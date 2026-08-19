@@ -374,9 +374,19 @@ A1 range and does not match any defined name in workbook "historical". Close mat
 "ReservingTotals".
 ```
 
-All four of these are catchable statically — no workbook needs to be opened to produce any of
-them. This level of specificity (name the field, show the expected shape, suggest the fix) is
-the actual bar for tier-1 validation, not just "invalid config" or a raw pydantic traceback.
+**Corrected during implementation of tier-1 validation (§10.4's build): the fourth example
+above is not actually catchable statically.** "Does not match any defined name in workbook
+historical" requires opening that workbook to enumerate its defined names — which contradicts
+this section's own claim, two lines up, that "no workbook needs to be opened to produce any of
+them." The first three examples are genuinely workbook-access-free (list-shape checks, a
+step-id reference check) and are what tier 1 actually implements. Checking a range against a
+workbook's *real* defined names needs either a third validation tier that opens workbooks
+read-only for checking purposes only (not designed), or gets demoted to a plain runtime error
+when an action actually tries to use the range and openpyxl can't resolve it. Not decided —
+carried to §12 as an open item, not silently dropped.
+
+The first three examples are the actual bar for tier-1 validation: name the field, show the
+expected shape, suggest the fix — not just "invalid config" or a raw pydantic traceback.
 
 ## 10. Syntax conventions
 
@@ -873,6 +883,11 @@ Still open:
   — needs a concrete design.
 - **Scratch-directory collision-avoidance (§6.3.1)** — naming/locking scheme if two runs
   target the same workbook concurrently. Not addressed yet.
+- **§9.1's fourth validation example (checking a range against a workbook's real defined
+  names)** — not implementable in either validation tier as designed (both are explicitly
+  workbook-access-free). Needs either a new tier that opens workbooks read-only for validation
+  only, or demotion to a runtime error. Found during tier-1 validation's implementation
+  (Specification.md §5.4); not decided.
 
 Everything else originally tracked here is resolved. Kept for the record, not because
 anything is still pending:

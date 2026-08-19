@@ -394,25 +394,57 @@ Which workbooks *get* staged is decided by `SessionManager` (staged iff opened
 from validation — that handoff is still §5.4's to build, `ScratchManager` itself doesn't know
 or care where the staging decision came from.
 
-### 5.4 Validation — two tiers
+### 5.4 Validation — two tiers — **built**
 
 Matching PRD §9/§9.1, kept as clearly separated functions within the file since they run at
-different times and check different things:
+different times and check different things.
 
-- **Tier 1 (static schema validation)** — runs immediately on the raw parsed `Workflow`, no
-  workbook access. Checks: every `Step.action` exists in the registry (§5.1); every param
-  name/type matches that action's signature; every `steps.<id>` reference in a `{{ }}`
-  expression points at a step id that exists *and* appears earlier in the list; `range`/
-  named-range syntax is at least well-formed. Produces the specific, corrective error format
-  from PRD §9.1 — each check is a small, individually testable function, not one large
-  validator.
-- **Tier 2 (dry-run / step-graph validation)** — still no real workbook access, but now reasons
-  over the whole step graph together: for each `WorkbookRef`, is it ever a `target`? (drives
-  read-only vs. read-write inference, PRD §6.3) Does every workbook a step references appear in
-  `workbooks:`? Produces an `ExecutionPlan` (per-workbook mode, which ones need scratch
-  staging) that `runner.py` (§6.1) and `ScratchManager` (§5.3) consume directly — this *is* the
-  "plain-English execution plan" PRD §9 promises an agent/user can sanity-check before a real
-  run.
+**Correction found while building tier 1: range/named-range syntax checking against a
+workbook's real defined names is not implementable here** — it needs to open the workbook,
+which contradicts this tier's own "no workbook access" premise. Not built; PRD §9.1/§12
+corrected to record this as an open item rather than a solved one. What tier 1 actually checks,
+via `validate_static(workflow, registry)`, five small functions run in a fixed order (each one
+individually testable, and assuming every earlier one in the list already passed):
+
+1. **Action exists** in the registry — `difflib.get_close_matches` suggests a fix for typos.
+2. **No unrecognized params** — every key in `step.params` must be either a real property of
+   that action's `param_schema`, or the one universally-implicit field, `workbook` (present on
+   almost every action's raw YAML but absent from its Python signature, per §4's correction —
+   hardcoded as a named exception here, not a general mechanism).
+3. **No missing required params** — same allowance for the implicit `workbook` field.
+4. **Param types match** — `_matches_type()` handles plain types, `Literal[...]` (membership
+   check), `X | Y` unions (any branch matches), and generic aliases like `list[...]` (checks
+   only the origin — "is this a list at all", not element-by-element). Produces PRD §9.1-style
+   messages, including the "wrap it in [ ]" suggestion specifically when a list was expected
+   and a string was given.
+5. **Step references resolve** — every `steps.<id>` found anywhere in a step's `params` or
+   `if_expr` (recursive scan, regex `steps\.([A-Za-z_]\w*)`) must name a step id that both
+   exists and appears *earlier* in the list; a fuzzy-matched suggestion is offered when it
+   doesn't exist at all.
+
+**`copy` is exempt from checks 2–4** (`_SCHEMA_EXEMPT_ACTIONS`) — its raw YAML shape (`source:`/
+`target:` dicts) doesn't match its Python signature (§4's two-session correction), so there's no
+schema to check it against yet; that's the runner's translation-layer job (build order item 7),
+not validation's, until that layer exists.
+
+**Tier 2 (dry-run / step-graph), via `plan(workflow) -> ExecutionPlan`** — still no workbook
+access, reasons over the whole step list together:
+- Checks every workbook name referenced anywhere in any step's params (a generic recursive
+  walk for any key literally named `workbook`, handling both a flat field and `copy`'s nested
+  dicts with the same code) actually appears in `workbooks:`.
+- Infers each workbook's mode: `read_write` iff some step's action is in a small static
+  `_WRITE_ACTIONS` table (`write_cell`, `write_range`, `write_row`, `insert_range`,
+  `set_column_width`, `save`), else `read_only`. This is a simple lookup table, not deep
+  analysis — deliberately, to avoid overengineering an inference that's already
+  capability-correct for every action built so far. `copy` is a documented exception: since its
+  source vs. target can't be told apart statically yet (same reason as above), *every* workbook
+  it references gets marked `read_write` — the safe over-provisioning PRD §6.3 itself prescribes
+  ("if a target reference can't be resolved statically, default to read-write") rather than
+  risking one being silently left read-only.
+
+This *is* the "plain-English execution plan" PRD §9 promises an agent/user can sanity-check
+before a real run — `SessionManager.get_or_open`'s `mode` param (§5.2) is the seam this plugs
+into once `runner.py` exists to wire them together.
 
 ## 6. Runner layer — `runner.py`
 
@@ -529,7 +561,10 @@ time within it.
    mode is caller-specified for now, the seam validation will feed into later. See §5.2's notes
    for the real bug this surfaced (missing parent-directory creation on one code path) and the
    `ExceptionGroup`-based crash-safety design in `close_all()`.
-6. `engine.py` §5.4 — both validation tiers.
+6. `engine.py` §5.4 — both validation tiers. **Done**, except checking a range against a
+   workbook's real defined names (PRD §9.1's fourth example) — not implementable in either
+   tier as designed (needs workbook access, both tiers are explicitly workbook-access-free),
+   carried to PRD §12 as an open item.
 7. `runner.py` §6.1/§6.2 — first end-to-end real run of a multi-step file-backend workflow.
 8. `runner.py` §6.3 — the public surface, once there's a working engine underneath it to expose.
 9. **Later phase (Windows-dependent COM work)**: `backends.py`'s COM-backend functions and

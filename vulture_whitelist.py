@@ -64,3 +64,5 @@ engine.ScratchManager.cleanup
 engine.SessionManager
 engine.SessionManager.get_or_open
 engine.SessionManager.close_all
+engine.validate_static
+engine.plan

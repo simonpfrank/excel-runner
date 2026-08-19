@@ -2,66 +2,46 @@
 
 ## Last Session (2026-08-19)
 **Status:** In Progress
-**Working on:** Build order items 1–5 (Spec §8) all done (items 4 and 5 for what's cleanly
-buildable now — see below). Git repo initialized, five commits on `main`.
+**Working on:** Build order items 1–6 (Spec §8) all done (items 4/5/6 for what's cleanly
+buildable now). Git repo initialized, six commits on `main`.
 
-Item 2 surfaced a real design bug: PRD §10.1/Spec §2.2 originally said "render the whole YAML
-file as one Jinja2 text pass, then parse it" — can't work for `{{ steps.* }}` (no step has run
-at load time). Corrected to: parse YAML directly, resolve `env:`/`workbooks:` once at load time
-(env-only), `Step.params`/`if_expr` left raw and resolved per-step during execution (env +
-steps). Docs updated in place.
+**Earlier items, summarized** (full detail in git log / Spec §2–§5 correction notes):
+item 1 — data model + errors in `core.py`. Item 2 — loading/templating; found the whole-file
+"render then parse" plan couldn't work for `{{ steps.* }}`, corrected to parse-then-resolve-
+per-field. Item 3 — action registry + first 5 actions; found `ActionResult`/`WorkbookSession`
+needed to live in `core.py` to avoid a circular import, `workbook` gets stripped before an
+action is called, actions call `backends.py` directly. Item 4 — 9 more actions (14 total);
+established the `ActionResult(status="error")` vs. raised-exception policy; found `read_links`
+empirically broken (openpyxl can't create the relationship it would need to read back);
+`copy` needed a two-session signature. Item 5 — `SessionManager`/`ScratchManager`; mode is
+caller-specified for now (tier 2 wasn't built yet); coverage caught a real missing-`mkdir` bug
+on the read-only + `create_if_missing` path.
 
-Item 3 (action registry + first 5 actions) surfaced four corrections, all recorded in
-Spec §4/§5.1/§5.2: `ActionResult`/`WorkbookSession` moved to `core.py` (avoids a circular import
-between `engine.py`'s registry and `actions.py`); no `workbook` param on action functions (the
-not-yet-built runner resolves it into `session` before calling); actions call `backends.py`
-directly rather than through a `session.<something>` indirection; `WorkbookSession` needed a
-`path` field the original sketch missed.
+**Item 6 (both validation tiers, Spec §5.4)** — built, with one real gap found and corrected
+rather than papered over: **PRD §9.1's fourth example message (checking a range against a
+workbook's real defined names) isn't actually implementable in either tier** — it needs to
+open the workbook, which contradicts both tiers' own "no workbook access" premise. The other
+three examples are genuinely workbook-access-free and are what tier 1 builds: action-exists
+(with a fuzzy "did you mean" suggestion), no-unrecognized-params, no-missing-required-params,
+param-type-matches (handles `Literal`/`Union`/generic annotations, not just plain types), and
+step-id-reference resolution (exists + defined earlier, with a fuzzy suggestion). `copy` is
+exempt from the param-schema checks — its raw YAML shape (`source:`/`target:` dicts) still
+doesn't match its Python signature, same reason as item 4's note, unresolved until the runner's
+translation layer exists. Tier 2 (`plan()`) checks every referenced workbook is declared and
+infers read/write mode via a small static write-actions lookup table (deliberately simple, not
+deep analysis) — `copy` again gets the safe-fallback treatment (every workbook it touches
+marked `read_write`, since source vs. target can't be told apart statically yet). PRD §9.1/§12
+corrected to record the workbook-access gap as an open item.
 
-Item 4 (remaining v1 file-backend actions) built 9 more: `copy`, `write_range`, `write_row`
-(base + positional modes), `insert_range` (whole-row/column only), `set_column_width`,
-`find_headers_row`, `find_row`, `find_column`, `find_columns`, `read_metadata` (properties/cells
-sub-cases) — 14 actions built in total now. This batch established the error-handling policy
-(structured `ActionResult(status="error")` for a normal "search found nothing" outcome vs. a
-raised exception for a genuine authoring mistake — Spec §4) and surfaced real deferrals:
-- `write_table`, `write_row`'s by-header mode, and `aggregate` all need step-output context
-  (`source`/`headers_from` are step-id references, not templated values) that doesn't exist
-  until `runner.py` threads it through — item 7, not blocking now.
-- `read_links` — **empirically** (not just theoretically) downgraded: a spike showed openpyxl
-  never creates an external-link relationship from a written formula, only reflects one already
-  in a real-Excel-created file. Moved into the same deferred bucket as `write_links`. PRD §7/§8
-  and §12 corrected — the earlier "resolved: reading looks solid" call was wrong, based on docs
-  not a real test.
-- `copy` needed two `WorkbookSession` params (source + target) — its YAML shape has two nested
-  workbook refs, not one flat `workbook:` field. Built and tested; `runner.py` will need
-  matching two-session wiring later.
-- `read_metadata`'s `cells` sub-case needed a `sheet` param the original PRD §7 catalog didn't
-  list.
-
-Item 5 (`SessionManager` + `ScratchManager`, Spec §5.2/§5.3) built both, with `promote_to_com`
-deliberately left out (no COM backend yet, item 9 — not a stub, simply not present). Key
-decisions, all recorded in Spec §5.2:
-- Session mode (read-only vs. read-write) is caller-specified for now, not statically inferred
-  — that's tier-2 validation's job (item 6), which comes after this in the build order.
-  `get_or_open(mode=...)` is the seam it'll feed into; `mode="read_write"` today is exactly the
-  "will be written to" condition PRD §6.3.1 stages against, whoever decides it.
-- `close_all()` aggregates per-session close failures via `ExceptionGroup` rather than stopping
-  at the first one — every session still gets a close attempt (PRD §6.3's crash-safety
-  requirement), every failure still surfaces afterward. Explicitly not the "defensive fallback"
-  anti-pattern PRD §1 warns against — that's about inventing behavior for bad input, not about
-  guaranteeing cleanup runs and reports what broke.
-- **Coverage caught a real bug**: read-only + `create_if_missing` (unusual but not forbidden)
-  failed because the workbook-creation helper never ensured its target's parent directory
-  existed — the read-write path got that for free from `ScratchManager.stage()`'s own `mkdir`,
-  the read-only path didn't. Found by chasing an untested branch down, not by inspection. Fixed
-  with a regression test.
-
-All quality gates pass: 176/176 tests, ruff clean, mypy --strict clean (`excel_runner` +
-`tests`), radon cc clean, vulture clean, **100% branch coverage** across all 4 modules.
-**Next step:** Build order item 6 (Spec §8) — both validation tiers in `engine.py` §5.4: tier-1
-static schema validation (the PRD §9.1-style specific error messages) and tier-2 dry-run
-(step-graph checks, and the read/write-mode inference that item 5's `get_or_open` is waiting
-on).
+All quality gates pass: 201/201 tests, ruff clean, mypy --strict clean (`excel_runner` +
+`tests`), radon cc clean, vulture clean, **100% branch coverage** across all 4 modules — two
+lines needed an honest `# pragma: no cover` (structurally unreachable via the current design,
+documented why) rather than a contrived test.
+**Next step:** Build order item 7 (Spec §8) — `runner.py` §6.1/§6.2: the orchestration loop
+(`run_workflow`) and audit logging. This is also the point `copy`'s two-session wiring and the
+`workbook`-field-stripping translation actually get implemented for real, and the first point
+genuine end-to-end YAML-driven integration tests become possible (discussed with the user —
+plan is to pause for integration testing once this item and item 8 land, before the COM phase).
 **Notes:** `aggregate` and `update_summary_table`'s exact parameters are still explicitly
 flagged as open in the PRD — don't block on them. Tracker below stays function/class-granular
 even though source files are consolidated — see Spec §7.
@@ -124,8 +104,8 @@ even though source files are consolidated — see Spec §7.
 
 | Component | Unit Tests | Code | Integration Tests | Unit Results | Integration Results |
 |---|---|---|---|---|---|
-| Tier 1: static schema validation — `engine.py` §5.4 | ❌ | ❌ | ⏭️ | ❌ | ⏭️ |
-| Tier 2: dry-run / step-graph validation — `engine.py` §5.4 | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Tier 1: static schema validation — `engine.py` §5.4 (real-defined-names check excluded, PRD §12) | ✅ | ✅ | ⏭️ | ✅ | ⏭️ |
+| Tier 2: dry-run / step-graph validation — `engine.py` §5.4 | ✅ | ✅ | ❌ | ✅ | ❌ |
 
 ## Phase 6 — Runner, audit, public API (Spec §6)
 
