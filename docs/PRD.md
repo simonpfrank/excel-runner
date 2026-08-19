@@ -909,6 +909,52 @@ because it's resolved inside the action's own code, not in raw YAML:
 ## 12. Open questions carried to spec phase
 
 Still open:
+- **openpyxl silently drops charts it can't fully parse, on any save (found 2026-08-19,
+  evidence-backed, not folklore)** — `open`'s load, followed by any `save`, means any chart
+  openpyxl's reader can't fully parse is gone from the file afterward, even if the workflow
+  never referenced charts at all: openpyxl's chart *reader* catches a parse failure and warns
+  rather than preserving the original part, so a re-save simply omits whatever it couldn't
+  round-trip. Confirmed real via openpyxl's own documented reader-warning path (`"Unable to
+  read chart {rel.id}..."`) and a local test: a chart openpyxl itself created survives our own
+  `open`→`save` cycle twice over, but that's the friendly case — a chart authored by real Excel
+  using a feature openpyxl's reader doesn't support is the actual risk, and confirming that
+  needs a real Excel-generated fixture, the same limitation already blocking `read_links`/
+  `write_links` (see §7's note, and `docs/Specification.md` §0 for the private-fixture-notes
+  convention). Not a feature request — a risk to the core save path's basic promise, that a
+  workflow which never touches charts could still silently strip them from the real file.
+  Buildable mitigation, not designed yet: openpyxl's read failures are catchable warnings, so
+  `open` could detect "N chart(s) I can't fully parse" and surface it as a structured warning
+  before anything is saved, instead of losing them silently. Same question likely applies to
+  pivot tables — not verified either way yet, and out of scope to chase down unless/until a
+  workflow actually needs to touch one (see the pivot-table note below).
+- **"Replay nice" mode (backlog idea, not committed)** — a desktop-comfort feature for users who
+  see other Excel-MCP-style tools drive Excel live via COM and associate that visible activity
+  with trustworthiness, even though (§6.1) that's not how this engine works and isn't going to
+  be (raised 2026-08-19). Rejected approach: giving file-backend actions an alternate xlwings
+  implementation — that inverts §6.1's "backend is never a user choice" decision and fights the
+  scratch-copy safety model (§6.3.1), for a payoff that's purely psychological. Preferred
+  approach instead: after a real run finishes safely via the file backend, open the
+  already-committed result in visible Excel via xlwings and *replay* it — select/flash each
+  step's affected range with a short pause, narrate using `ActionSpec.description` + the audit
+  log's per-step output (§6.7), and visibly surface `error`/`skipped`/`stopped` steps rather than
+  only the happy path (a `stop` step's reason, PRD §6.9, is a good moment to show the safety net
+  actually working). This consumes an already-finished `RunResult` and only re-displays
+  already-computed values — it never becomes a second execution path, needs no crash-safety
+  design of its own, and doesn't touch `run_workflow`'s contract. Desktop/COM-only by nature,
+  strictly opt-in, never part of an automated pipeline. A related but explicitly separate idea —
+  pivot tables, charts, or other new *capabilities* some Excel-MCP tools offer — is a different
+  axis (more actions, not better visibility into existing ones) and is explicitly **not** part
+  of this idea; avoid something requested wanted before it's actually asked for.
+- **A conversational, agent-driven spreadsheet-authoring product (adjacent idea, likely a
+  different product, not this project's scope — raised 2026-08-19)** — distinct from §9's
+  existing v1-adjacent goal (an agent inspects a workbook once and authors a complete, static
+  `workflow.yaml` from a plain-language description, which then runs deterministically). What's
+  being flagged here is more ambitious: a live, iterative "type an instruction, see it happen,
+  ask for the next tweak" experience for building up a spreadsheet conversationally, closer to
+  an Excel-copilot product than a workflow-automation engine. `excel_runner`'s action catalog and
+  `list_actions()`'s schema-generation (§6.1/§6.3) would likely be reusable substrate for
+  something like this later, but designing for it now would be building ahead of any real
+  request — noted for the record, not scoped, not committed.
 - **Grouped `if:` blocks (backlog idea, not committed)** — today, several steps that all depend
   on the same condition each repeat their own `if: "{{ ... }}"`. A block-level `if:` wrapping
   multiple steps would remove the repetition, but adds YAML nesting/structure for a problem

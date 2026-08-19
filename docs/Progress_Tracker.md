@@ -94,9 +94,16 @@ clean.
 (deferred items: `update_summary_table`, `aggregate`, `export_pdf`, AI-authoring inspection
 actions). README's action reference still needs a `stop` entry.
 **Notes:** `aggregate` and `update_summary_table`'s exact parameters are still explicitly
-flagged as open in the PRD — don't block on them. Grouped `if:` blocks (spanning multiple
-steps) is a deliberately backlogged idea, not designed — PRD §12. Tracker below stays
-function/class-granular even though source files are consolidated — see Spec §7.
+flagged as open in the PRD — don't block on them. Four things parked in PRD §12, none designed
+or scheduled: grouped `if:` blocks; a "replay nice" desktop-comfort mode (visible Excel replay
+of an already-finished real run, via xlwings — deliberately not a second execution backend);
+openpyxl silently dropping charts it can't parse on any save (a real, evidence-backed risk to
+the core save path, not just a feature idea — confirmed via openpyxl's own reader-warning
+mechanism and a local round-trip test; verifying the real-Excel-chart case still needs a fixture
+we don't have, same blocker as `read_links`); and a conversational agent-driven
+spreadsheet-authoring product, explicitly flagged as likely a different product from this one.
+Tracker below stays function/class-granular even though source files are consolidated — see
+Spec §7.
 
 ## Status legend
 ❌ Not Done · 🟡 In Progress · ✅ Done — Results: ✅ Pass · ❌ Fail · ⏭️ N/A
