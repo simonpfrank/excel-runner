@@ -918,6 +918,16 @@ because it's resolved inside the action's own code, not in raw YAML:
 ## 12. Open questions carried to spec phase
 
 Still open:
+- **Watch for xlwings object references going stale if held across calls (backlog caution, not
+  a confirmed bug — raised 2026-08-19)** — a live xlwings object (`Sheet`, `Range`, `Book`) wraps
+  a connection to a specific live-Excel entity, which can plausibly go stale if the underlying
+  index shifts (rows/sheets inserted or removed) or the connection is otherwise invalidated
+  between when the reference was taken and when it's used. Current design already re-resolves
+  through `WorkbookSession`/`backends.py` per call rather than caching objects across steps, so
+  this may simply not apply — noted defensively, not because it's been hit here. If an `xlw_`/
+  `com_`-tier action shows unreliable behavior once actually built and tested against real
+  Excel, the fix is: stop holding the object reference, re-resolve it fresh (by name/index) at
+  the point of use, rather than debugging it as a new mystery.
 - **openpyxl silently drops charts it can't fully parse, on any save (found 2026-08-19,
   evidence-backed, not folklore)** — `open`'s load, followed by any `save`, means any chart
   openpyxl's reader can't fully parse is gone from the file afterward, even if the workflow

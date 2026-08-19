@@ -123,14 +123,17 @@ actions in `actions.py`, TDD as usual — real tests for what's provably reliabl
 through `save()` (or found to share its limitation) using
 `@pytest.mark.skipif` for "needs Windows" rather than a mock.
 **Notes:** `aggregate` and `update_summary_table`'s exact parameters are still explicitly
-flagged as open in the PRD — don't block on them. Four things parked in PRD §12, none designed
+flagged as open in the PRD — don't block on them. Five things parked in PRD §12, none designed
 or scheduled: grouped `if:` blocks; a "replay nice" desktop-comfort mode (visible Excel replay
 of an already-finished real run, via xlwings — deliberately not a second execution backend);
 openpyxl silently dropping charts it can't parse on any save (a real, evidence-backed risk to
 the core save path, not just a feature idea — confirmed via openpyxl's own reader-warning
 mechanism and a local round-trip test; verifying the real-Excel-chart case still needs a fixture
-we don't have, same blocker as `read_links`); and a conversational agent-driven
-spreadsheet-authoring product, explicitly flagged as likely a different product from this one.
+we don't have, same blocker as `read_links`); a conversational agent-driven
+spreadsheet-authoring product, explicitly flagged as likely a different product from this one;
+and a defensive caution to watch for xlwings object references (`Sheet`/`Range`/`Book`) going
+stale if held across calls once the `xlw_`/`com_`-tier actions are actually built and tested —
+not a confirmed issue here, current design already re-resolves per call rather than caching.
 Tracker below stays function/class-granular even though source files are consolidated — see
 Spec §7.
 
