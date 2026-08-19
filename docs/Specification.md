@@ -169,20 +169,54 @@ that a directory boundary no longer does it. If this file grows past a size wher
 convention stops being enough to navigate by, split by concern then (not pre-split now, since
 the real size is unknown before code exists).
 
-### 3.1 Owned-instance tracking (PRD §6.2.1)
+### 3.1 Owned-instance tracking (PRD §6.2.1) — **built**
 
 ```python
 class OwnedInstanceRegistry:
-    def spawn(self) -> InstanceHandle: ...     # always a NEW xw.App, never xw.apps.active
-    def close_owned(self) -> None: ...          # only ever acts on self._owned
+    def spawn(self, visible: bool = False) -> xw.App: ...  # always a NEW xw.App, never xw.apps.active
+    def close_owned(self) -> None: ...                      # only ever acts on self._owned
+    pids: tuple[int, ...]                                    # property — the audit-trail-ready PID set
 ```
 
-Holds the run's own set of spawned `xw.App` PIDs. The `SessionManager` (`engine.py`, §5.2) asks
-this registry for an App instance rather than ever calling `xw.App`/`xw.Book` directly — that
-keeps "never touch an instance we didn't spawn" (PRD §6.2.1) enforced in one place instead of
-scattered through action code. The cross-run "recognize an orphaned instance from a *previous*
-crashed run" mechanism is explicitly not designed yet — PRD §12 open item — this class is the
-seam where that logic will attach once designed, not a placeholder to guess at now.
+Holds the run's own set of spawned `xw.App` instances, keyed by PID (`dict[int, xw.App]`, not
+just a bare PID set — the actual object reference is what `close_owned()` needs to act on). The
+(future, not-yet-built) `SessionManager` COM promotion will ask this registry for an App
+instance rather than ever calling `xw.App`/`xw.Book` directly — that keeps "never touch an
+instance we didn't spawn" (PRD §6.2.1) enforced in one place instead of scattered through action
+code. `close_owned()` mirrors `SessionManager.close_all()`'s `ExceptionGroup` pattern exactly:
+every owned instance gets a quit attempt regardless of an earlier one failing. The cross-run
+"recognize an orphaned instance from a *previous* crashed run" mechanism is still explicitly not
+designed — PRD §12 open item — this class is the seam where that logic will attach once
+designed, not a placeholder to guess at now.
+
+**Tested for real against a locally-spawned Excel instance, no mocks** (`tests/unit/
+test_owned_instance_registry.py`), gated by a `requires_excel` skip marker (`tests/unit/
+conftest.py`) so the suite degrades cleanly on a machine without Excel rather than failing.
+Found two genuine, empirical facts about macOS Excel automation while writing these tests —
+neither is a bug in this class, both are documented here so later COM work doesn't rediscover
+them the hard way:
+- **`app.quit()` is asynchronous.** The call returns before the underlying process has actually
+  terminated (~0.5s observed locally). A test — or any future code — checking "is this PID gone
+  yet" immediately after `quit()` returns is racing it, not verifying it; needs a short poll.
+- **Quitting an already-dead instance doesn't fail predictably.** It raises `-600 Application
+  isn't running` when it's the *only* Excel process on the machine, but silently no-ops when
+  another owned instance is still alive — confirmed this does **not** cross-target and
+  accidentally kill the other live instance (PRD §6.2.1's core safety concern holds), it's just
+  an inert no-op. Not something `close_owned()`'s tests can rely on for a real double-quit
+  failure case — mirrors `SessionManager`'s own precedent (openpyxl's `close()` is also a no-op
+  on a second call), so the "one failure doesn't block the rest" test uses a fake exploding
+  stand-in instead of a genuine double-quit, same justification.
+
+Also confirmed empirically (the reason build order item 10 can even start on macOS): spawning a
+dedicated App, opening/adding a workbook, and reading/writing cell values all work reliably here
+via Apple Events. `save()` specifically does not — `Parameter error (-50)` on
+`save_workbook_as`, reproduced consistently (headless and visible, simple and complex paths, no
+dialog involved) and matches multiple open xlwings GitHub issues, not something specific to this
+machine. Doesn't block v1 (PRD §4 already treats Windows as the real target and macOS as
+"test what's testable now") — it does mean anything routing through COM `save()` (and possibly
+`recalculate`/`run_macro`/`refresh_links`/`write_links` — not yet individually checked) needs its
+tests gated behind Windows access, per this section's skip-don't-mock convention, not written off
+as broken.
 
 ## 4. Actions layer — `actions.py`
 
@@ -702,9 +736,12 @@ time within it.
    (`stop` joins `copy` in `_SCHEMA_EXEMPT_ACTIONS`, §5.4), the new `"stopped"` `StepResult`
    status, and the runner loop's early-exit handling. Pure logic, no I/O — fits before the
    platform-dependent phases below, same rationale as the rest of this build order. **Done.**
-10. **Later phase (Windows-dependent COM work)**: `backends.py`'s COM-backend functions and
-    `OwnedInstanceRegistry` (§3.1), and the COM actions in `actions.py` (`recalculate`,
-    `run_macro`, `refresh_links`, `write_links`, `read_metadata`'s textbox sub-case).
+10. **COM phase**: `backends.py`'s `OwnedInstanceRegistry` (§3.1) — **done**, tested for real on
+    macOS (Excel is installed here) — plus the remaining COM-backend functions and the COM
+    actions in `actions.py` (`recalculate`, `run_macro`, `refresh_links`, `write_links`,
+    `read_metadata`'s textbox sub-case) — **not yet built**. `save()` is confirmed broken via
+    xlwings on this Mac's Excel build (§3.1's note) — real COM-write-path testing needs the
+    Windows environment (PRD §4/§12), open/read-only paths can continue on macOS meanwhile.
 11. **Deferred/flagged, per PRD**: `update_summary_table`'s real parameters, the `aggregate`
     discussion, `export_pdf`, the AI-authoring inspection actions (PRD §9: `list_sheets`,
     `describe_sheet`).

@@ -71,3 +71,8 @@ engine.plan
 
 runner.StepResult.step_id
 runner.run_workflow
+
+backends.OwnedInstanceRegistry
+backends.OwnedInstanceRegistry.pids
+backends.OwnedInstanceRegistry.spawn
+backends.OwnedInstanceRegistry.close_owned

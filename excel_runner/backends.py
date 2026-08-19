@@ -11,6 +11,7 @@ import shutil
 from typing import Any, Literal
 
 import openpyxl
+import xlwings as xw
 from openpyxl.cell.cell import Cell
 from openpyxl.cell.read_only import ReadOnlyCell
 from openpyxl.utils import column_index_from_string, get_column_letter
@@ -341,3 +342,63 @@ def read_cells(workbook: Workbook, sheet: str, cells: list[str]) -> dict[str, An
     """
     worksheet = workbook[sheet]
     return {cell: worksheet[cell].value for cell in cells}
+
+
+# --- COM (xlwings) — owned-instance tracking (PRD sec 6.2.1, Spec sec 3.1) -----------------
+
+
+class OwnedInstanceRegistry:
+    """Tracks Excel App instances a run has spawned itself, so cleanup only ever touches
+    instances it owns.
+
+    xlwings (and the underlying Excel COM/Apple Event API) will happily attach to whatever
+    Excel instance is already running rather than spawning its own — dangerous when more than
+    one automation run, or a real user's own Excel session, can be active at once. Every
+    instance this registry hands out comes from a fresh `xw.App(...)` call, never an
+    unqualified lookup like `xw.apps.active` or a bare `xw.Book("name.xlsx")` that could bind
+    to an instance it doesn't own.
+    """
+
+    def __init__(self) -> None:
+        self._owned: dict[int, xw.App] = {}
+
+    @property
+    def pids(self) -> tuple[int, ...]:
+        """Process IDs of every instance currently owned — the run's audit trail of what it
+        spawned (PRD sec 6.2.1's "records that instance's process ID against the run")."""
+        return tuple(self._owned)
+
+    def spawn(self, visible: bool = False) -> xw.App:
+        """Spawn a brand-new, dedicated Excel App instance and start tracking it.
+
+        Args:
+            visible: Whether the spawned Excel window is shown. Defaults to hidden, the normal
+                automation case; a visible instance is for a deliberately different use (e.g.
+                the parked "replay nice" idea, PRD sec 12), not the default run path.
+
+        Returns:
+            The newly spawned App.
+        """
+        app = xw.App(visible=visible, add_book=False)
+        self._owned[app.pid] = app
+        return app
+
+    def close_owned(self) -> None:
+        """Quit every owned instance, attempting all of them even if some fail.
+
+        Raises:
+            ExceptionGroup: If one or more instances failed to quit. Every instance still gets
+                a quit attempt regardless (PRD sec 6.3's crash-safety requirement), mirroring
+                `engine.SessionManager.close_all()` — this isn't a defensive catch-and-ignore,
+                every failure is still surfaced, just after giving every other instance a
+                chance to close too.
+        """
+        errors: list[Exception] = []
+        for app in self._owned.values():
+            try:
+                app.quit()
+            except Exception as exc:  # noqa: BLE001 - intentional, see docstring
+                errors.append(exc)
+        self._owned.clear()
+        if errors:
+            raise ExceptionGroup("failed to quit one or more owned Excel instances", errors)

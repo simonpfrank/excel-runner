@@ -90,9 +90,25 @@ now **16** (was 15) — `list_actions()`'s count assertion caught every place th
 All quality gates pass: 248/248 tests, 100% branch coverage, ruff/mypy --strict/radon/vulture
 clean.
 
-**Next step:** Not yet decided — build order item 10 (COM phase, Windows-dependent) or item 11
-(deferred items: `update_summary_table`, `aggregate`, `export_pdf`, AI-authoring inspection
-actions). README's action reference still needs a `stop` entry.
+**Item 10 (COM phase) started — `OwnedInstanceRegistry` (backends.py §3.1) built and tested for
+real** against a locally-spawned Excel instance (Excel is installed on this dev Mac, so real
+COM-path testing is possible here for what actually works). Along the way: fixed an unrelated
+but serious environment bug — this project's venv lived under `~/Documents` (iCloud-synced),
+which was silently breaking `.pth`-file processing (editable installs, `appscript`) via macOS's
+hidden-file flag being repeatedly reapplied by the iCloud daemon; fixed by relocating the venv
+to `~/.venvs/excel-runner` (symlinked back as `.venv`) and documented in
+`/Users/simonfrank/Documents/dev/python/CLAUDE.md` so every future project in this tree gets it
+right from the start. Confirmed empirically: open/read/write cell values work reliably via
+xlwings on macOS; `save()` does not (`Parameter error -50`, reproduced consistently, matches
+known xlwings GitHub issues) — real COM-write-path testing needs the Windows environment the
+user will provide. Two Mac-specific `quit()` behaviors found and documented in Spec §3.1 (async
+termination; inconsistent error-vs-no-op on a redundant quit) — neither is a bug in the class.
+**Next step:** Continue item 10 — `backends.py`'s remaining COM-backend primitives
+(`com_open_workbook`, `com_recalculate`, `com_run_macro`, `com_refresh_links`, `com_write_links`,
+`com_read_textbox`) and the COM actions in `actions.py`, TDD as usual — real tests for what's
+provably reliable on macOS (open/read/write), `requires_excel`-gated per `tests/unit/
+conftest.py`, with anything routing through `save()` (or found to share its limitation) using
+`@pytest.mark.skipif` for "needs Windows" rather than a mock.
 **Notes:** `aggregate` and `update_summary_table`'s exact parameters are still explicitly
 flagged as open in the PRD — don't block on them. Four things parked in PRD §12, none designed
 or scheduled: grouped `if:` blocks; a "replay nice" desktop-comfort mode (visible Excel replay
@@ -182,7 +198,7 @@ Spec §7.
 | Component | Unit Tests | Code | Integration Tests | Unit Results | Integration Results |
 |---|---|---|---|---|---|
 | COM-backend primitives — `backends.py` §3 | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `OwnedInstanceRegistry` — `backends.py` §3.1 | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `OwnedInstanceRegistry` — `backends.py` §3.1 | ✅ | ✅ | ⏭️ | ✅ | ⏭️ |
 | `recalculate` action | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `run_macro` action | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `refresh_links` action | ❌ | ❌ | ❌ | ❌ | ❌ |
