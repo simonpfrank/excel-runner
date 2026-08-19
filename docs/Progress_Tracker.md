@@ -2,22 +2,29 @@
 
 ## Last Session (2026-08-19)
 **Status:** In Progress
-**Working on:** Build order item 1 (Spec §8) — `core.py` data model + error types, TDD.
-Project skeleton created (`pyproject.toml`, `.venv` via `uv` — Homebrew's Python 3.14
-`ensurepip` was broken, used `uv venv --python 3.12` instead). 21 unit tests written first
-(red), then `excel_runner/core.py` implemented (green): `WorkbookRef`, `Step`, `Workflow`,
-`ErrorDetail`, `ExcelRunnerError`, `ValidationError`, `ActionExecutionError`. All quality gates
-pass: ruff clean, mypy --strict clean, radon cc clean (no C+), vulture clean (added
-`vulture_whitelist.py` for the standard dataclass-field false-positive pattern), 100% branch
-coverage on `core.py`.
-**Next step:** Loading/templating pipeline (Spec §2.2) — `render`, `resolve_value`,
-`evaluate_condition`, `load` — still in `core.py`. Needs `pyyaml` + `jinja2` added as real
-(non-dev) dependencies.
-**Notes:** No git repo initialized yet in this directory — flag if that should happen.
-`aggregate` and `update_summary_table`'s exact parameters are still explicitly flagged as open
-in the PRD — don't block on them, they're late in the build order (Spec §8 items 4 and 10).
-Tracker below stays function/class-granular even though source files are consolidated — see
-Spec §7.
+**Working on:** Build order items 1 and 2 (Spec §8) both done — `core.py`'s data model, error
+types, and loading/templating pipeline, all TDD, all green. Git repo initialized, initial
+commits made.
+
+Item 2 surfaced a real design bug during implementation: PRD §10.1/Spec §2.2 originally said
+"render the whole YAML file as one Jinja2 text pass, then parse it" — this can't work for
+`{{ steps.* }}` references since no step has run at load time. Corrected to: parse YAML
+directly first, then resolve fields per-context — `env:`/`workbooks:` once at load time
+(env-only), `Step.params`/`if_expr` left raw and resolved per-step during execution
+(env + steps). PRD §10.1 and Spec §2.2 updated to match what's actually built, with the
+correction explained in place rather than silently changed.
+
+`resolve_value`/`evaluate_condition`/`load` implemented in `excel_runner/core.py`, plus a
+custom `_Yaml12BoolLoader` (PyYAML SafeLoader subclass with the yes/no/on/off boolean resolver
+removed, per PRD §7's quoting note). All quality gates pass: 53/53 tests, ruff clean,
+mypy --strict clean, radon cc clean, vulture clean, **100% branch coverage** on `core.py`.
+**Next step:** Build order item 3 (Spec §8) — action registry (`engine.py` §5.1) + a first
+vertical slice of trivial actions in `actions.py` (`open`, `save`, `close`, `read_range`,
+`write_cell`) to prove the discovery + capability-tag pattern end to end.
+**Notes:** `aggregate` and `update_summary_table`'s exact parameters are still explicitly
+flagged as open in the PRD — don't block on them, they're late in the build order (Spec §8
+items 4 and 10). Tracker below stays function/class-granular even though source files are
+consolidated — see Spec §7.
 
 ## Status legend
 ❌ Not Done · 🟡 In Progress · ✅ Done — Results: ✅ Pass · ❌ Fail · ⏭️ N/A
@@ -28,8 +35,8 @@ Spec §7.
 |---|---|---|---|---|---|
 | Data model dataclasses (`WorkbookRef`, `Step`, `Workflow`) — §2.1 | ✅ | ✅ | ⏭️ | ✅ | ⏭️ |
 | Error types (`ErrorDetail`, exception classes) — §2.3 | ✅ | ✅ | ⏭️ | ✅ | ⏭️ |
-| Loading pipeline (`load`) — §2.2 | ❌ | ❌ | ⏭️ | ❌ | ⏭️ |
-| Templating (`render`, `resolve_value`, `evaluate_condition`) — §2.2 | ❌ | ❌ | ⏭️ | ❌ | ⏭️ |
+| Loading pipeline (`load`) — §2.2 | ✅ | ✅ | ⏭️ | ✅ | ⏭️ |
+| Templating (`resolve_value`, `evaluate_condition`) — §2.2 | ✅ | ✅ | ⏭️ | ✅ | ⏭️ |
 
 ## Phase 2 — Registry + first action slice (Spec §5.1, §4)
 

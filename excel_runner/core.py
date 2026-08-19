@@ -1,11 +1,20 @@
-"""Core, I/O-free layer: the workflow data model and error types.
+"""Core layer: the workflow data model, error types, and the loading/templating pipeline.
 
-See docs/Specification.md sec 2 for the full design. Loading/templating (sec 2.2) is added in
-a later increment — this module currently covers sec 2.1 (data model) and sec 2.3 (errors).
+See docs/Specification.md sec 2 for the full design.
+
+There is no whole-file "render as text, then parse" step. {{ }} expressions are resolved per
+field: once at load time for env:/workbooks: fields (env-only context), and once per step
+during execution for step params/`if:` (env + accumulated step-output context) — see the
+module docstring correction recorded in docs/PRD.md sec 10.1 and docs/Specification.md sec 2.2.
 """
 
+import re
 from dataclasses import dataclass
+from pathlib import Path
 from typing import Any
+
+import jinja2
+import yaml
 
 
 @dataclass(frozen=True)
@@ -93,3 +102,158 @@ class ValidationError(ExcelRunnerError):
 
 class ActionExecutionError(ExcelRunnerError):
     """An action failed while a workflow was running."""
+
+
+# --- Templating -------------------------------------------------------------------------
+
+_ENV = jinja2.Environment(undefined=jinja2.StrictUndefined)
+_WHOLE_EXPRESSION_RE = re.compile(r"^\{\{(.*)\}\}$", re.DOTALL)
+
+
+def _whole_expression(text: str) -> str | None:
+    """Return the inner expression if `text` is entirely one {{ }} block, else None."""
+    match = _WHOLE_EXPRESSION_RE.match(text.strip())
+    if match is None:
+        return None
+    inner = match.group(1)
+    if "{{" in inner or "}}" in inner:
+        return None  # more than one block — treat as an embedded/partial string instead
+    return inner.strip()
+
+
+def _wrap_template_error(original_text: str, exc: Exception) -> ValidationError:
+    stripped = original_text.strip()
+    if isinstance(exc, jinja2.exceptions.UndefinedError):
+        message = f'"{stripped}" references something that does not exist: {exc}'
+    else:
+        message = f'"{stripped}" is not a valid template expression: {exc}'
+    return ValidationError(ErrorDetail(message=message, technical_reason=f"{type(exc).__name__}: {exc}"))
+
+
+def _evaluate_expression(expr_text: str, context: dict[str, Any], original_text: str) -> Any:
+    try:
+        expression = _ENV.compile_expression(expr_text, undefined_to_none=False)
+        return expression(**context)
+    except (jinja2.exceptions.UndefinedError, jinja2.exceptions.TemplateSyntaxError) as exc:
+        raise _wrap_template_error(original_text, exc) from exc
+
+
+def _resolve_string(text: str, context: dict[str, Any]) -> Any:
+    if "{{" not in text and "{%" not in text and "{#" not in text:
+        return text
+    inner = _whole_expression(text)
+    if inner is not None:
+        return _evaluate_expression(inner, context, text)
+    try:
+        return _ENV.from_string(text).render(**context)
+    except (jinja2.exceptions.UndefinedError, jinja2.exceptions.TemplateSyntaxError) as exc:
+        raise _wrap_template_error(text, exc) from exc
+
+
+def resolve_value(value: Any, context: dict[str, Any]) -> Any:
+    """Resolve ``{{ }}`` templating in a value, recursing through dicts and lists.
+
+    A value that is entirely one ``{{ }}`` expression resolves to the native Python object
+    it evaluates to; an expression embedded in a larger string always stringifies
+    (Ansible-style native type preservation — see docs/PRD.md sec 10.1).
+
+    Args:
+        value: The raw value — a string, dict, list, or any other scalar.
+        context: Template context, e.g. ``{"env": {...}}`` or
+            ``{"env": {...}, "steps": {...}}``.
+
+    Returns:
+        The resolved value, same shape as the input for dicts/lists.
+
+    Raises:
+        ValidationError: If the value references an undefined variable, or contains a
+            syntactically invalid expression.
+    """
+    if isinstance(value, str):
+        return _resolve_string(value, context)
+    if isinstance(value, dict):
+        return {resolve_value(k, context): resolve_value(v, context) for k, v in value.items()}
+    if isinstance(value, list):
+        return [resolve_value(item, context) for item in value]
+    return value
+
+
+def evaluate_condition(if_expr: str, context: dict[str, Any]) -> bool:
+    """Evaluate a step's ``if:`` expression to a bool.
+
+    Args:
+        if_expr: The raw condition, with or without a surrounding ``{{ }}`` wrapper.
+        context: Template context (env + accumulated step outputs).
+
+    Returns:
+        The Python-truthy value of the evaluated expression.
+
+    Raises:
+        ValidationError: If the expression references an undefined variable, or is
+            syntactically invalid.
+    """
+    inner = _whole_expression(if_expr)
+    expr_text = inner if inner is not None else if_expr
+    return bool(_evaluate_expression(expr_text, context, if_expr))
+
+
+# --- Loading ------------------------------------------------------------------------------
+
+
+class _Yaml12BoolLoader(yaml.SafeLoader):
+    """SafeLoader without YAML 1.1's yes/no/on/off boolean coercion (PRD sec 7's quoting note).
+
+    ``yes``/``no``/``on``/``off`` stay plain strings; only true/false variants are booleans.
+    """
+
+
+_Yaml12BoolLoader.yaml_implicit_resolvers = {
+    first_char: [(tag, regexp) for tag, regexp in resolvers if tag != "tag:yaml.org,2002:bool"]
+    for first_char, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
+}
+_Yaml12BoolLoader.add_implicit_resolver(
+    "tag:yaml.org,2002:bool",
+    re.compile(r"^(?:true|True|TRUE|false|False|FALSE)$"),
+    list("tTfF"),
+)
+
+
+def _build_step(raw_step: dict[str, Any]) -> Step:
+    params = {k: v for k, v in raw_step.items() if k not in {"id", "action", "if"}}
+    return Step(id=raw_step["id"], action=raw_step["action"], params=params, if_expr=raw_step.get("if"))
+
+
+def load(path: str | Path, env_overrides: dict[str, Any] | None = None) -> Workflow:
+    """Load and parse a workflow YAML file.
+
+    ``env:``/``workbooks:`` fields are resolved immediately (env-only context); step params
+    and ``if:`` are left raw — they may reference another step's output, which doesn't exist
+    until execution reaches that step (see the module docstring).
+
+    Args:
+        path: Path to the workflow YAML file.
+        env_overrides: Values merged over (and taking precedence over) the file's own
+            ``env:`` block — how an external caller parameterizes a run (PRD sec 6.6).
+
+    Returns:
+        The parsed Workflow, with workbook paths resolved and step params left raw.
+    """
+    raw_text = Path(path).read_text()
+    raw = yaml.load(raw_text, Loader=_Yaml12BoolLoader) or {}
+
+    env: dict[str, Any] = {**(raw.get("env") or {}), **(env_overrides or {})}
+    context = {"env": env}
+
+    workbooks: dict[str, WorkbookRef] = {}
+    for name, entry in (raw.get("workbooks") or {}).items():
+        resolved = resolve_value(entry, context)
+        workbooks[name] = WorkbookRef(
+            name=name,
+            file=resolved["file"],
+            create_if_missing=resolved.get("create_if_missing", False),
+            template=resolved.get("template"),
+        )
+
+    steps = tuple(_build_step(raw_step) for raw_step in raw.get("steps") or [])
+
+    return Workflow(env=env, workbooks=workbooks, steps=steps)

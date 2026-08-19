@@ -371,16 +371,26 @@ the actual bar for tier-1 validation, not just "invalid config" or a raw pydanti
 
 ### 10.1 Templating expression syntax — DECIDED
 
-**Decision: Jinja2 syntax (`{{ }}`), rendered by the actual `jinja2` library, whole file
-rendered as text before it's parsed as YAML.** Picked on technical merit:
+**Decision: Jinja2 syntax (`{{ }}`), rendered by the actual `jinja2` library, resolved
+per-field rather than as one whole-file text pass.** Picked on technical merit:
 
 - **Reuses a mature, battle-tested library instead of hand-rolling a parser.** The syntax *is*
   Jinja2, so rendering and `if:` comparisons come from the `jinja2` package directly — one
   dependency, not a bespoke parser to maintain.
-- **Render-then-parse** (the whole YAML file is rendered as a Jinja2 template first, *then*
-  the result is parsed as YAML) rather than parse-then-substitute. This is what Jinja/Ansible
-  do, and it's what makes the computed-dict-key case below possible at all — by the time YAML
-  parsing happens, a computed key is already plain text.
+- **Corrected during implementation: not a whole-file render.** The original plan here was
+  "render the whole YAML file as one Jinja2 pass, then parse the result as YAML" — building it
+  surfaced that this can't actually work: at load time no step has run yet, so a `{{ steps.x }}`
+  reference anywhere in the file has nothing to resolve against, and a real whole-file render
+  would either error on every one of them (with the strict, fail-fast undefined-checking we
+  want) or silently blank them out (which we don't want). Neither GitHub Actions nor Ansible
+  actually do a single whole-document text substitution either — both parse the structure first,
+  then evaluate each expression per field, in whatever context is available at that point. The
+  built mechanism does the same: YAML is parsed directly (`{{ }}` is just string content to a
+  YAML parser, no conflict), then `env:`/`workbooks:` fields are resolved once at load time
+  (env-only context), and step `params`/`if:` are left raw and resolved per step during
+  execution (env + accumulated step-output context) — see docs/Specification.md §2.2. The
+  computed-dict-key case below still works under this model, more directly: resolving a step's
+  `params` just before it runs already recurses through that dict's keys and values.
 - **Native type preservation, Ansible-style.** A naive Jinja2 render always produces a string,
   which would make `row: {{ steps.find_target_row.output.row }}` render to the text `"5"`
   rather than the integer `5`. Ansible solves exactly this with "native Jinja2 types": when a
@@ -418,8 +428,9 @@ the key of a `values:` mapping, not just a value:
 values: { "{{ steps.find_key_columns.output.total }}": "{{ steps.totals.output.North }}" }
 ```
 
-Render-then-parse (above) is exactly what makes this legal at all — by the time YAML parsing
-happens, the key is already resolved to plain text.
+Resolving `params` per-field (rather than any whole-document substitution) is what makes this
+legal — the computed key is just another value `resolve_value` walks through on its way to
+building the step's final, resolved parameter dict.
 
 ### 10.2 List/dict ergonomics for hand-authors — DECIDED
 
@@ -433,8 +444,8 @@ from a blank page, which keeps the real-world error surface for this small.
 
 ### 10.3 Summary of §10 decisions
 
-- **10.1 (templating syntax): decided** — Jinja2 `{{ }}`, render-then-parse, native type
-  preservation.
+- **10.1 (templating syntax): decided** — Jinja2 `{{ }}`, resolved per-field (not a whole-file
+  render — corrected during implementation, see §10.1), native type preservation.
 - **10.2 (list/dict ergonomics): decided** — real YAML structures always; validation is the
   ergonomics fix.
 

@@ -94,30 +94,35 @@ that signature at tier 1 (§5.4).
 
 ### 2.2 Loading and templating pipeline
 
-Pipeline, per PRD §10.1 (render-then-parse):
+**Built and green.** No whole-file render step — corrected during implementation (see the
+PRD §10.1 note on why). Resolution happens per field instead:
 
-1. Read the YAML file as raw text.
-2. `render(raw_text, context) -> str` — render the **entire file** through Jinja2 first.
-   `context` at this stage is just `{"env": <merged env dict>}` (§6.6 of the PRD's
-   `env_overrides` merged over the file's own `env:` block) — step outputs don't exist yet, so
-   any `{{ steps.* }}` expression in the file is *not* rendered here; it stays literal text for
-   step 4.
-3. `yaml.safe_load(...)` (with a YAML-1.2-core-schema loader, per PRD §7's quoting note, so
-   `on`/`off`/`yes`/`no` are never silently coerced) the rendered text into a raw `dict`.
-4. `build_workflow(raw_dict) -> Workflow` — structural parse into the §2.1 dataclasses.
-   `Step.if_expr` and any `{{ steps.* }}` references inside `Step.params` are **not** resolved
-   here — they're resolved per-step, during execution (§6.1), once the referenced step has
-   actually run and its output exists.
+1. `load()` reads the YAML file as raw text and parses it directly with a custom
+   `yaml.SafeLoader` subclass (`_Yaml12BoolLoader`) that removes PyYAML's YAML-1.1
+   `yes`/`no`/`on`/`off` boolean resolver, keeping only `true`/`false` variants — `{{ }}` is
+   just string content to a YAML parser, so there's no conflict with parsing first.
+2. The merged `env` dict (file's own `env:` block, overridden by `env_overrides` — PRD §6.6)
+   becomes the context for resolving `workbooks:` fields immediately, via `resolve_value` —
+   e.g. a workbook's `file:` path gets its `{{ env.* }}` references resolved right away, since
+   only `env` is available at load time and always will be for that field.
+3. `Step.params` and `Step.if_expr` are built directly from the raw parsed step dict and left
+   **completely unresolved** — any `{{ }}` they contain (including `{{ steps.* }}`) stays
+   literal text until the step actually executes (§6.1), when both `env` and the
+   accumulated step-output context exist.
 
 Functions in this module:
-- `load(path, env_overrides) -> Workflow` — the four steps above, wired together; the one
-  function `runner.py` calls to go from a file path to a typed `Workflow`.
-- `render(text: str, context: dict) -> str` — the file-level pre-parse render (step 2 above).
-- `resolve_value(value: Any, context: dict) -> Any` — per-step resolution during execution;
-  implements the "whole field is one `{{ }}` expression → native Python type, else stringify"
-  rule from PRD §10.1. Recurses through nested dicts/lists in a step's `params` so a computed
-  dict key (PRD §10.1's finding) is resolved before the dict itself is used.
-- `evaluate_condition(if_expr: str, context: dict) -> bool` — for `Step.if_expr`.
+- `load(path, env_overrides) -> Workflow` — the pipeline above; the one function `runner.py`
+  calls to go from a file path to a typed `Workflow`.
+- `resolve_value(value: Any, context: dict) -> Any` — the one resolution primitive, used both
+  by `load()` (env-only context) and per-step during execution (env + steps context).
+  Implements the "whole field is one `{{ }}` expression → native Python type, else stringify"
+  rule from PRD §10.1, with a fast path that skips Jinja entirely for any string containing no
+  `{{`/`{%`/`{#` at all. Recurses through dict keys *and* values and list items, so a computed
+  dict key (PRD §10.1's finding) resolves naturally as part of resolving the dict it's in.
+  Undefined references and syntax errors are caught and re-raised as `ValidationError` with a
+  plain-English message and the original exception preserved as `technical_reason` (§2.3).
+- `evaluate_condition(if_expr: str, context: dict) -> bool` — for `Step.if_expr`; accepts the
+  expression with or without a surrounding `{{ }}` wrapper.
 
 ### 2.3 Error types
 
@@ -375,9 +380,9 @@ platform-dependent pieces last). Note the file each item lands in no longer maps
 increment — several increments land in the same file, built and tested one function/class at a
 time within it.
 
-1. `core.py` §2.1/§2.3 — data model + error types. Pure dataclasses, no I/O.
-2. `core.py` §2.2 — loading/templating (render/resolve/condition), unit-testable with no files
-   or workbooks at all.
+1. `core.py` §2.1/§2.3 — data model + error types. Pure dataclasses, no I/O. **Done.**
+2. `core.py` §2.2 — loading/templating (`load`, `resolve_value`, `evaluate_condition`),
+   unit-testable with no real workbooks (temp YAML files only). **Done.**
 3. `engine.py` §5.1 (registry) + a first vertical slice of trivial actions in `actions.py`
    (`open`, `save`, `close`, `read_range`, `write_cell`) to prove the discovery + capability-tag
    pattern end to end before building the other ~15 file-backend actions.

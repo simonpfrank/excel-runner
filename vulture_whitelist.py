@@ -7,7 +7,15 @@ docs/Specification.md's build order) also flag until those land. Run: `vulture e
 vulture_whitelist.py`.
 """
 
-from excel_runner.core import ActionExecutionError, ErrorDetail, Step, ValidationError, Workflow, WorkbookRef
+from excel_runner.core import (
+    ActionExecutionError,
+    ErrorDetail,
+    Step,
+    ValidationError,
+    Workflow,
+    WorkbookRef,
+    evaluate_condition,
+)
 
 WorkbookRef.name
 WorkbookRef.file
@@ -26,3 +34,4 @@ ErrorDetail.field
 ErrorDetail.suggestion
 ValidationError
 ActionExecutionError
+evaluate_condition
