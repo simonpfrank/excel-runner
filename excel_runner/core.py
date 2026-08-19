@@ -9,9 +9,10 @@ module docstring correction recorded in docs/PRD.md sec 10.1 and docs/Specificat
 """
 
 import re
+from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any
+from typing import Any, Literal
 
 import jinja2
 import yaml
@@ -257,3 +258,81 @@ def load(path: str | Path, env_overrides: dict[str, Any] | None = None) -> Workf
     steps = tuple(_build_step(raw_step) for raw_step in raw.get("steps") or [])
 
     return Workflow(env=env, workbooks=workbooks, steps=steps)
+
+
+# --- Execution-time types ----------------------------------------------------------------
+#
+# Defined here, not in engine.py/actions.py (Spec sec 5.1/sec 4's original homes), to avoid a
+# circular import: engine.py's registry must import actions.py to discover its functions, and
+# actions.py's functions are typed against ActionResult/WorkbookSession — putting the shared
+# types in core.py (which neither engine.py nor actions.py depend on each other for) keeps the
+# dependency graph a clean line: core.py <- {backends.py, actions.py} <- engine.py <- runner.py.
+
+
+@dataclass(frozen=True)
+class ActionResult:
+    """The result of running one action. Always a keyed object (PRD sec 10.4) — even a
+    single-value output like find_row's `row` lives under a named key, never returned bare.
+
+    Args:
+        status: Whether the action succeeded.
+        output: The action's result data. Empty dict if the action has no meaningful output.
+        error: Present when status is "error".
+    """
+
+    status: Literal["success", "error"]
+    output: dict[str, Any]
+    error: ErrorDetail | None = None
+
+
+@dataclass
+class WorkbookSession:
+    """A workbook currently open for the duration of a run. Deliberately not frozen — this
+    models live, mutable run state (PRD sec 6.5's "avoid mutable dicts for state" is about
+    ad-hoc dicts; a real class with named fields is exactly the alternative it asks for).
+
+    Args:
+        name: Logical workbook name, matching a WorkbookRef.name.
+        backend: Which backend currently holds this workbook open.
+        handle: The live backend object (an openpyxl Workbook, or later an xlwings Book).
+        path: The file path the backend is currently pointed at — the real path until the
+            scratch-copy execution model (PRD sec 6.3.1, not built yet) starts routing
+            writes through `scratch_path` instead.
+        mode: Whether this session was opened read-only or read-write.
+        scratch_path: Set once the scratch-copy execution model is built. None means work
+            happens directly against `path`.
+        dirty: Whether a write has happened since the last save.
+    """
+
+    name: str
+    backend: Literal["file", "com"]
+    handle: Any
+    path: str
+    mode: Literal["read_only", "read_write"]
+    scratch_path: Path | None = None
+    dirty: bool = False
+
+
+# --- Action capability tagging ------------------------------------------------------------
+#
+# A plain name->capability dict, populated by decorators, rather than attributes stamped onto
+# the function object — keeps mypy --strict happy (no dynamic-attribute type: ignore noise)
+# and keeps the registration mechanism trivially introspectable (engine.py's discover_actions
+# just reads this dict). "depends_on_param" (PRD sec 7's read_metadata exception) gets its own
+# decorator when that action is built — not added speculatively now.
+
+ACTION_CAPABILITIES: dict[str, Literal["file", "com", "depends_on_param"]] = {}
+
+_ActionFn = Callable[..., ActionResult]
+
+
+def file_action(fn: _ActionFn) -> _ActionFn:
+    """Register a function as a file-backend (openpyxl) action for discovery (Spec sec 5.1)."""
+    ACTION_CAPABILITIES[fn.__name__] = "file"
+    return fn
+
+
+def com_action(fn: _ActionFn) -> _ActionFn:
+    """Register a function as a COM-backend (xlwings) action for discovery (Spec sec 5.1)."""
+    ACTION_CAPABILITIES[fn.__name__] = "com"
+    return fn

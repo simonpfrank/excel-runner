@@ -174,16 +174,48 @@ seam where that logic will attach once designed, not a placeholder to guess at n
 
 ## 4. Actions layer — `actions.py`
 
-All 24 action functions (PRD §7's full catalog), each with the shape
-`fn(session: WorkbookSession, **params) -> ActionResult`, where `ActionResult` is a small
-dataclass (`output: dict`, `status: Literal["success","error"]`, `error: ErrorDetail | None`) —
-this is what makes PRD §10.4's "output is always a keyed object" rule mechanical rather than a
-convention each action has to remember to follow: `ActionResult` is the return type, full stop.
+All 24 action functions (PRD §7's full catalog — **5 built so far**: `open`, `save`, `close`,
+`read_range`, `write_cell`), each with the shape `fn(session: WorkbookSession, **params) ->
+ActionResult`.
 
-Actions never import `backends.py` functions directly by name scattered through the file's own
-logic beyond calling them — they call `session.<something>` (from `engine.py`, §5.2) which in
-turn delegates to `backends.py`, so backend choice stays centralized there rather than
-duplicated per action.
+**Corrected during implementation — `ActionResult` and `WorkbookSession` are defined in
+`core.py`, not here or in `engine.py`.** The original plan put `ActionResult` in this section
+and `WorkbookSession` in §5.2, but that creates a circular import: `engine.py`'s registry must
+import `actions.py` to discover its functions, and `actions.py`'s functions are typed against
+`WorkbookSession`/`ActionResult` — if either type lived in `engine.py`, `actions.py` would need
+to import `engine.py` right back. `core.py` depends on neither, and both already depend on it,
+so that's where the shared types live now: `core.py` (data) → `{backends.py, actions.py}` →
+`engine.py` → `runner.py`, a clean line, no cycle. `ActionResult` is still a small dataclass
+(`status: Literal["success","error"]`, `output: dict`, `error: ErrorDetail | None`) — this is
+still what makes PRD §10.4's "output is always a keyed object" rule mechanical rather than a
+convention each action has to remember: `ActionResult` is the return type, full stop.
+
+**Also corrected: no `workbook` parameter on any action function**, even though `workbook:` is
+a required field on every step in the YAML (PRD §7/§11). The (not-yet-built) runner resolves
+`workbook` into the `session` it passes in before calling the action — passing both would be
+the same information twice. `workbook` still exists as a YAML field; it's just consumed before
+the Python function is ever called, not forwarded to it.
+
+**Also corrected: actions call `backends.py` functions directly, passing `session.handle`** —
+not through a `session.<something>` indirection as originally sketched. Since an action's
+capability tag already fixes which backend it will only ever run against, there's no runtime
+branching to hide behind an indirection layer; the action just calls the matching (unprefixed
+for file, `com_`-prefixed for COM) `backends.py` function. Backend choice still isn't the
+action's decision — it's fixed once, by the capability tag, not decided per-call.
+
+**Each action registers its capability via a decorator** (`@file_action`/`@com_action`, defined
+in `core.py` alongside `ACTION_CAPABILITIES`, a plain `name -> capability` dict the decorators
+populate) rather than by stamping an attribute onto the function object — keeps mypy --strict
+clean (no dynamic-attribute `type: ignore` noise) and keeps registration trivially
+introspectable for `engine.py`'s `discover_actions()` (§5.1).
+
+**The 5 built actions have a deliberately reduced param surface vs. the full PRD §7 catalog**,
+each documented in its own docstring: `open` omits `update_links` (no effect without a live
+Excel session — COM, a later phase) and a `mode` override (depends on read/write inference that
+tier-2 validation, §5.4, doesn't exist yet to override); `read_range` omits `as: formulas`
+(depends on which `data_only` flag the workbook was opened with — a session-level decision, §5.4
+again). These are scope boundaries for this increment, not permanent cuts — they get added back
+once the machinery they depend on exists.
 
 This is the largest file in the package (an estimated 900–1200 lines across 24 functions) and
 the one touched most often. Two things keep it navigable without adding source files:
@@ -201,7 +233,7 @@ discovery, session/workbook lifecycle, the scratch-copy execution model, and bot
 tiers. Four sub-concerns, one file, because they're all "run-preparation and run-state," used
 together by `runner.py` (§6) and nothing else.
 
-### 5.1 Action registry
+### 5.1 Action registry — **built**
 
 Mirrors a proven pattern (name checked at the pattern level, not copied — see §0) of scanning
 for typed, docstringed functions and generating a schema from each one's signature:
@@ -212,40 +244,55 @@ class ActionSpec:
     name: str
     fn: Callable[..., ActionResult]
     capability: Literal["file", "com", "depends_on_param"]   # "depends_on_param": read_metadata
-    param_schema: dict[str, Any]        # derived from fn's signature + docstring
+    param_schema: dict[str, Any]        # derived from fn's signature (excludes `session`)
 ```
 
+(`ActionResult` itself is imported from `core.py` — see §4's correction.)
+
 `capability="depends_on_param"` is a **named, single exception**, not a general mechanism —
-only `read_metadata` uses it (PRD §7: file for `properties`/`cells`, COM for `textboxes`).
-`runner.py` checks for this literal case explicitly rather than building a generic
-capability-resolution feature for one action.
+only `read_metadata` uses it (PRD §7: file for `properties`/`cells`, COM for `textboxes`), and
+isn't built yet. `runner.py` (not built yet) will check for this literal case explicitly rather
+than building a generic capability-resolution feature for one action.
 
-`discover_actions()` runs once (import time or lazily, cached), introspecting `actions.py` to
-build the module-level registry that `runner.py`'s public surface (§6.3) and the tier-1
-validator (§5.4) both read from.
+`discover_actions(module)` scans a module with `inspect.getmembers`, keeping only functions
+with an entry in `core.py`'s `ACTION_CAPABILITIES` dict (populated by the `@file_action`/
+`@com_action` decorators, §4) — not every function in `actions.py`, just the tagged ones.
+`param_schema` is derived from the function's signature, skipping `session` and marking any
+parameter with no default as required.
 
-### 5.2 Session management
+### 5.2 Session management — **`WorkbookSession` data shape built; `SessionManager` not yet**
 
 ```python
 @dataclass
-class WorkbookSession:
+class WorkbookSession:      # actually lives in core.py — see §4's correction
     name: str
     backend: Literal["file", "com"]
     handle: Any                      # openpyxl Workbook | xlwings Book
+    path: str                        # added during implementation — see below
     mode: Literal["read_only", "read_write"]
-    scratch_path: Path | None        # None if opened read-only in place (no scratch copy)
+    scratch_path: Path | None = None # None until the scratch-copy model (§5.3) is built
     dirty: bool = False
 
-class SessionManager:
+class SessionManager:               # not built yet
     def get_or_open(self, name: str) -> WorkbookSession: ...
     def promote_to_com(self, name: str) -> WorkbookSession: ...   # file -> com, mid-run
     def commit_all(self) -> None: ...     # delegates to the scratch-copy manager, §5.3
     def close_all(self) -> None: ...      # always runs — see runner.py's try/finally, §6.1
 ```
 
-`SessionManager` is the only thing that calls into `backends.py` (§3) — actions never do, they
-call `session.<something>` instead, so backend choice (PRD §6.1's "never a user choice," and
-here also "never an *action-code* choice") stays centralized in one place.
+**`path: str` was missing from the original sketch and had to be added** — `save` needs to know
+*where* to save to, and there's no way to derive that without the session carrying its own
+current path. It's `path`, not reused-as-`scratch_path`, because `scratch_path` specifically
+means "None until scratch-copy staging exists" (§5.3) — `path` is always concrete: the real file
+path today, and wherever `scratch_path` points once §5.3 lands and starts routing writes there
+instead.
+
+`SessionManager` — the actual multi-workbook lifecycle tracker (lazy-open, promotion, close-all)
+— isn't built yet; that's what makes actions.py's five built actions take a `WorkbookSession`
+directly rather than a `SessionManager`. Once built, `SessionManager` is still the only thing
+that calls into `backends.py` (§3) for the *lifecycle* operations (open/promote/close) — but per
+§4's correction, actions call `backends.py` directly for their own per-action operations
+(read/write/etc.), not through a session indirection.
 
 ### 5.3 Scratch-copy execution model
 
@@ -384,14 +431,18 @@ time within it.
 2. `core.py` §2.2 — loading/templating (`load`, `resolve_value`, `evaluate_condition`),
    unit-testable with no real workbooks (temp YAML files only). **Done.**
 3. `engine.py` §5.1 (registry) + a first vertical slice of trivial actions in `actions.py`
-   (`open`, `save`, `close`, `read_range`, `write_cell`) to prove the discovery + capability-tag
-   pattern end to end before building the other ~15 file-backend actions.
-4. `backends.py`'s file-backend functions, filled out alongside the remaining v1 file-backend
-   actions in `actions.py` (PRD §7/§8: `copy`, `write_range`, `write_row`, `write_table`,
-   `insert_range`, `set_column_width`, `find_headers_row`, `find_row`, `find_column`,
-   `find_columns`, `aggregate`, `read_links`, `read_metadata`'s file sub-case).
-5. `engine.py` §5.2/§5.3 — session + scratch-copy layer, now that there are real actions to run
-   through it.
+   (`open`, `save`, `close`, `read_range`, `write_cell`), plus `backends.py`'s first 5
+   file-backend primitives, to prove the discovery + capability-tag pattern end to end before
+   building the other ~15 file-backend actions. **Done** — surfaced the corrections recorded in
+   §4/§5.1/§5.2 (shared types moved to `core.py`, `workbook` param dropped from action
+   signatures, actions call `backends.py` directly, `WorkbookSession` needed a `path` field).
+4. `backends.py`'s remaining file-backend functions, filled out alongside the remaining v1
+   file-backend actions in `actions.py` (PRD §7/§8: `copy`, `write_range`, `write_row`,
+   `write_table`, `insert_range`, `set_column_width`, `find_headers_row`, `find_row`,
+   `find_column`, `find_columns`, `aggregate`, `read_links`, `read_metadata`'s file sub-case).
+5. `engine.py` §5.2/§5.3 — the `SessionManager` class (multi-workbook lifecycle: lazy-open,
+   promotion, close-all — the `WorkbookSession` data shape itself is already built, §5.2) and
+   scratch-copy layer, now that there are real actions to run through it.
 6. `engine.py` §5.4 — both validation tiers.
 7. `runner.py` §6.1/§6.2 — first end-to-end real run of a multi-step file-backend workflow.
 8. `runner.py` §6.3 — the public surface, once there's a working engine underneath it to expose.

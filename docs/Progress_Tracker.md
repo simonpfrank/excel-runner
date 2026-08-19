@@ -2,29 +2,39 @@
 
 ## Last Session (2026-08-19)
 **Status:** In Progress
-**Working on:** Build order items 1 and 2 (Spec §8) both done — `core.py`'s data model, error
-types, and loading/templating pipeline, all TDD, all green. Git repo initialized, initial
-commits made.
+**Working on:** Build order items 1–3 (Spec §8) all done. Git repo initialized, three commits
+on `main`.
 
-Item 2 surfaced a real design bug during implementation: PRD §10.1/Spec §2.2 originally said
-"render the whole YAML file as one Jinja2 text pass, then parse it" — this can't work for
-`{{ steps.* }}` references since no step has run at load time. Corrected to: parse YAML
-directly first, then resolve fields per-context — `env:`/`workbooks:` once at load time
-(env-only), `Step.params`/`if_expr` left raw and resolved per-step during execution
-(env + steps). PRD §10.1 and Spec §2.2 updated to match what's actually built, with the
-correction explained in place rather than silently changed.
+Item 2 surfaced a real design bug: PRD §10.1/Spec §2.2 originally said "render the whole YAML
+file as one Jinja2 text pass, then parse it" — can't work for `{{ steps.* }}` (no step has run
+at load time). Corrected to: parse YAML directly, resolve `env:`/`workbooks:` once at load time
+(env-only), `Step.params`/`if_expr` left raw and resolved per-step during execution (env +
+steps). Docs updated in place.
 
-`resolve_value`/`evaluate_condition`/`load` implemented in `excel_runner/core.py`, plus a
-custom `_Yaml12BoolLoader` (PyYAML SafeLoader subclass with the yes/no/on/off boolean resolver
-removed, per PRD §7's quoting note). All quality gates pass: 53/53 tests, ruff clean,
-mypy --strict clean, radon cc clean, vulture clean, **100% branch coverage** on `core.py`.
-**Next step:** Build order item 3 (Spec §8) — action registry (`engine.py` §5.1) + a first
-vertical slice of trivial actions in `actions.py` (`open`, `save`, `close`, `read_range`,
-`write_cell`) to prove the discovery + capability-tag pattern end to end.
+Item 3 (action registry + first 5 actions: `open`, `save`, `close`, `read_range`, `write_cell`,
+plus the matching `backends.py` file-backend primitives) surfaced four more corrections, all
+recorded in Spec §4/§5.1/§5.2: `ActionResult`/`WorkbookSession` moved to `core.py` (avoids a
+circular import between `engine.py`'s registry and `actions.py`); no `workbook` param on action
+functions (the not-yet-built runner resolves it into `session` before calling); actions call
+`backends.py` directly rather than through a `session.<something>` indirection (the capability
+tag already fixes which backend, no runtime branching to hide); `WorkbookSession` needed a
+`path` field the original sketch missed. Also: the 5 built actions have a smaller param surface
+than PRD §7's full catalog (`open` without `update_links`/`mode`, `read_range` without
+`as: formulas`) — documented per-action as deferred until the machinery they depend on
+(COM, tier-2 validation) exists, not a permanent cut.
+
+All quality gates pass: 96/96 tests, ruff clean, mypy --strict clean (`excel_runner` + `tests`),
+radon cc clean, vulture clean, **100% branch coverage** across `core.py`, `backends.py`,
+`actions.py`, `engine.py`.
+**Next step:** Build order item 4 (Spec §8) — fill out `backends.py`'s remaining file-backend
+primitives alongside the rest of the v1 file-backend actions (`copy`, `write_range`,
+`write_row`, `write_table`, `insert_range`, `set_column_width`, `find_headers_row`, `find_row`,
+`find_column`, `find_columns`, `aggregate`, `read_links`, `read_metadata`'s file sub-case).
 **Notes:** `aggregate` and `update_summary_table`'s exact parameters are still explicitly
 flagged as open in the PRD — don't block on them, they're late in the build order (Spec §8
-items 4 and 10). Tracker below stays function/class-granular even though source files are
-consolidated — see Spec §7.
+items 4 and 10 — note item 4's action list above still needs `aggregate` built even though its
+exact param design is flagged, since the base shape from PRD §11.17 is usable now). Tracker
+below stays function/class-granular even though source files are consolidated — see Spec §7.
 
 ## Status legend
 ❌ Not Done · 🟡 In Progress · ✅ Done — Results: ✅ Pass · ❌ Fail · ⏭️ N/A
@@ -42,12 +52,14 @@ consolidated — see Spec §7.
 
 | Component | Unit Tests | Code | Integration Tests | Unit Results | Integration Results |
 |---|---|---|---|---|---|
-| Action registry (`ActionSpec`, `discover_actions`) — `engine.py` §5.1 | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `open` action — `actions.py` | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `save` action — `actions.py` | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `close` action — `actions.py` | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `read_range` action — `actions.py` | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `write_cell` action — `actions.py` | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Action registry (`ActionSpec`, `discover_actions`) — `engine.py` §5.1 | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `open` action — `actions.py` | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `save` action — `actions.py` | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `close` action — `actions.py` | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `read_range` action — `actions.py` | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `write_cell` action — `actions.py` | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `WorkbookSession`/`ActionResult` (moved to `core.py`) | ✅ | ✅ | ⏭️ | ✅ | ⏭️ |
+| File-backend primitives for the 5 actions above — `backends.py` §3 | ✅ | ✅ | ❌ | ✅ | ❌ |
 
 ## Phase 3 — Remaining v1 file-backend actions (Spec §3, §4)
 
