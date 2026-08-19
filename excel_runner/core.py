@@ -340,7 +340,7 @@ class WorkbookSession:
 # just reads this dict). "depends_on_param" (PRD sec 7's read_metadata exception) gets its own
 # decorator when that action is built — not added speculatively now.
 
-ACTION_CAPABILITIES: dict[str, Literal["file", "com", "depends_on_param"]] = {}
+ACTION_CAPABILITIES: dict[str, Literal["file", "com", "depends_on_param", "none"]] = {}
 
 _P = ParamSpec("_P")
 
@@ -360,4 +360,13 @@ def file_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]:
 def com_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]:
     """Register a function as a COM-backend (xlwings) action for discovery (Spec sec 5.1)."""
     ACTION_CAPABILITIES[fn.__name__] = "com"
+    return fn
+
+
+def control_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]:
+    """Register a function as a control-flow action for discovery — no backend, no `session`
+    (PRD sec 6.9's `stop`). Distinct from `file_action`/`com_action` since capability "none"
+    means the runner never resolves a workbook session before calling it.
+    """
+    ACTION_CAPABILITIES[fn.__name__] = "none"
     return fn

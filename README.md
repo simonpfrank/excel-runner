@@ -8,7 +8,7 @@ Design notes live in [`docs/PRD.md`](docs/PRD.md) and [`docs/Specification.md`](
 ## Status
 
 v1 file-backend engine is built and tested: loading, templating, validation, session/scratch
-management, 15 actions, and the orchestration loop (`run_workflow`). There is **no CLI yet** —
+management, 16 actions, and the orchestration loop (`run_workflow`). There is **no CLI yet** —
 this is a Python library, used from a script. Nothing here talks to a live Excel process (COM)
 yet — everything runs against files directly via openpyxl, which is also why the action list
 below skips macros, recalculation, and a few other Excel-specific things (see
@@ -118,7 +118,8 @@ If a field's value is *entirely* one `{{ }}` expression, it resolves to the real
 ```
 
 A step whose `if:` evaluates false is skipped (not run, not an error). Every step's `status`
-(`success`, `error`, or `skipped`) is available the same way as its output.
+(`success`, `error`, `skipped`, or `stopped` — see [`stop`](#stop)) is available the same way as
+its output.
 
 ### When an action doesn't find what it's looking for
 
@@ -171,6 +172,25 @@ Closes the workbook, releasing its file handle.
   action: close
   workbook: manip
 ```
+
+#### `stop`
+
+Halts the run right there — no workbook, no later step runs. Pairs with `if:` so you don't have
+to repeat the same condition on every step downstream of a lookup that might fail:
+
+```yaml
+- id: guard
+  action: stop
+  reason: "region not found"    # optional — shows up in the audit log
+  if: "{{ steps.find_it.status == 'error' }}"
+```
+
+Every step after a triggered `stop` gets `status: "stopped"` instead of running — distinct from
+`skipped`, so you can tell "this step's own `if:` said don't run" apart from "the run ended
+before we got here." Reaching `stop` isn't itself a failure: whether the run saves still depends
+only on whether an *earlier* step returned `status: "error"` — "not found → stop" naturally
+discards, but a deliberate early exit on success ("already done, nothing to do") still saves
+whatever ran before it.
 
 ### Data
 
@@ -452,7 +472,7 @@ duplicating the action catalog.
 ```bash
 uv pip install -e ".[dev]"    # adds pytest, ruff, mypy, radon, vulture
 source .venv/bin/activate
-python -m pytest tests/unit/ tests/integration/    # 239 tests, 100% branch coverage
+python -m pytest tests/unit/ tests/integration/    # 248 tests, 100% branch coverage
 ruff check .
 mypy excel_runner tests
 radon cc excel_runner --min C

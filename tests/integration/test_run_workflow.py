@@ -289,6 +289,145 @@ class TestCopyAcrossTwoWorkbooks:
         assert reopened["Sheet"]["D1"].value == "hello"
 
 
+class TestStop:
+    """The `stop` control-flow action (PRD sec 6.9, Spec sec 6.1 build order item 9)."""
+
+    def test_stop_after_a_failed_lookup_marks_later_steps_stopped_and_does_not_commit(
+        self, tmp_path: Path
+    ) -> None:
+        real = _make_workbook(tmp_path / "output" / "manip.xlsx")
+        workflow_path = _write_yaml(
+            tmp_path / "workflow.yaml",
+            """
+            env:
+              output_folder: "./output"
+            workbooks:
+              manip:
+                file: "{{ env.output_folder }}/manip.xlsx"
+            steps:
+              - id: find_it
+                action: find_row
+                workbook: manip
+                sheet: "Sheet"
+                column: "A"
+                search_value: "does-not-exist"
+              - id: guard
+                action: stop
+                reason: "lookup failed"
+                if: "{{ steps.find_it.status == 'error' }}"
+              - id: never_runs
+                action: write_cell
+                workbook: manip
+                sheet: "Sheet"
+                cell: "B1"
+                value: "should not be committed"
+            """,
+        )
+
+        result = run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+
+        assert result.status == "error"  # find_it itself failed
+        statuses = {s.step_id: s.status for s in result.step_results}
+        assert statuses == {"find_it": "error", "guard": "success", "never_runs": "stopped"}
+        guard = [s for s in result.step_results if s.step_id == "guard"][0]
+        assert guard.output == {"reason": "lookup failed"}
+        assert openpyxl.load_workbook(real)["Sheet"]["B1"].value is None
+
+    def test_stop_on_a_deliberate_early_exit_still_commits_prior_work(self, tmp_path: Path) -> None:
+        """Reaching `stop` is not itself a failure — only an earlier `status: "error"` blocks
+        the commit (PRD sec 6.9)."""
+        real = _make_workbook(tmp_path / "output" / "manip.xlsx")
+        workflow_path = _write_yaml(
+            tmp_path / "workflow.yaml",
+            """
+            env:
+              output_folder: "./output"
+            workbooks:
+              manip:
+                file: "{{ env.output_folder }}/manip.xlsx"
+            steps:
+              - id: write_b1
+                action: write_cell
+                workbook: manip
+                sheet: "Sheet"
+                cell: "B1"
+                value: "already processed"
+              - id: guard
+                action: stop
+              - id: never_runs
+                action: write_cell
+                workbook: manip
+                sheet: "Sheet"
+                cell: "C1"
+                value: "should not run"
+            """,
+        )
+
+        result = run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+
+        assert result.status == "success"
+        statuses = {s.step_id: s.status for s in result.step_results}
+        assert statuses == {"write_b1": "success", "guard": "success", "never_runs": "stopped"}
+        reopened = openpyxl.load_workbook(real)
+        assert reopened["Sheet"]["B1"].value == "already processed"
+        assert reopened["Sheet"]["C1"].value is None
+
+    def test_stop_with_a_false_if_is_skipped_not_triggered(self, tmp_path: Path) -> None:
+        _make_workbook(tmp_path / "output" / "manip.xlsx")
+        workflow_path = _write_yaml(
+            tmp_path / "workflow.yaml",
+            """
+            env:
+              output_folder: "./output"
+            workbooks:
+              manip:
+                file: "{{ env.output_folder }}/manip.xlsx"
+            steps:
+              - id: guard
+                action: stop
+                if: "{{ false }}"
+              - id: still_runs
+                action: read_range
+                workbook: manip
+                sheet: "Sheet"
+                range: "A1"
+            """,
+        )
+
+        result = run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+
+        assert result.status == "success"
+        statuses = {s.step_id: s.status for s in result.step_results}
+        assert statuses == {"guard": "skipped", "still_runs": "success"}
+
+    def test_stopped_steps_still_get_an_audit_record(self, tmp_path: Path) -> None:
+        _make_workbook(tmp_path / "output" / "manip.xlsx")
+        workflow_path = _write_yaml(
+            tmp_path / "workflow.yaml",
+            """
+            env:
+              output_folder: "./output"
+            workbooks:
+              manip:
+                file: "{{ env.output_folder }}/manip.xlsx"
+            steps:
+              - id: guard
+                action: stop
+              - id: never_runs
+                action: read_range
+                workbook: manip
+                sheet: "Sheet"
+                range: "A1"
+            """,
+        )
+
+        result = run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+
+        lines = result.audit_log_path.read_text().splitlines()
+        records = {json.loads(line)["step_id"]: json.loads(line)["status"] for line in lines}
+        assert records == {"guard": "success", "never_runs": "stopped"}
+
+
 class TestAuditLog:
     def test_audit_log_has_one_record_per_step(self, tmp_path: Path) -> None:
         _make_workbook(tmp_path / "output" / "manip.xlsx")

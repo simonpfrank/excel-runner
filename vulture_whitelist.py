@@ -55,6 +55,7 @@ actions.open
 actions.copy
 actions.read_metadata
 actions.write_row
+actions.stop
 
 backends.open_workbook
 

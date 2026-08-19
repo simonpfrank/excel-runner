@@ -47,7 +47,7 @@ class ActionSpec:
 
     name: str
     fn: Callable[..., ActionResult]
-    capability: Literal["file", "com", "depends_on_param"]
+    capability: Literal["file", "com", "depends_on_param", "none"]
     description: str
     param_schema: dict[str, Any]
 
@@ -310,9 +310,11 @@ class SessionManager:
 
 _IMPLICIT_FIELDS = {"workbook"}  # consumed by the (not yet built) runner before dispatch, not
                                   # part of any action's own param_schema — see Spec sec 4.
-_SCHEMA_EXEMPT_ACTIONS = {"copy"}  # its raw YAML shape (source/target dicts) doesn't match its
-                                     # Python signature yet — needs the runner's translation
-                                     # layer (Spec sec 4/8 item 7). Not validated here yet.
+_SCHEMA_EXEMPT_ACTIONS = {"copy", "stop"}  # copy's raw YAML shape (source/target dicts) doesn't
+                                     # match its Python signature yet — needs the runner's
+                                     # translation layer (Spec sec 4/8 item 7). stop has no
+                                     # workbook: field at all (PRD sec 6.9), so it's exempt from
+                                     # the implicit workbook requirement every other action gets.
 _STEP_REF_RE = re.compile(r"steps\.([A-Za-z_][A-Za-z0-9_]*)")
 
 

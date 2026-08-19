@@ -283,6 +283,13 @@ names as a root cause to avoid, not a pattern to bring back under a different na
   didn't list — reading specific cells needs to know which worksheet they're on, same as every
   other cell-addressing action. PRD §7 updated.
 
+**`stop` — control-flow action — built (PRD §6.9).** **16 actions now** (was 15). Unlike every
+other action, `stop` takes no `session` parameter and has no `workbook:` field at all — it's
+pure control flow inside `runner.py`'s loop (§6.1), not a backend call, registered via a new
+`@control_action` decorator (capability `"none"`, a fourth value alongside `"file"`/`"com"`/
+`"depends_on_param"`). It joins `copy` in `_SCHEMA_EXEMPT_ACTIONS` (§5.4) since neither's YAML
+shape is the generic "flat `workbook:` + params" the standard schema check handles.
+
 ## 5. Engine layer — `engine.py`
 
 Everything that prepares and manages a run *before and during* action dispatch — registry
@@ -538,6 +545,18 @@ hit a line count — see AGENTS.md), wrapped in `try`/`finally` for the crash-sa
    simply never called — the scratch copies are left in place as the recovery artifact
    (PRD §6.3.1), exactly as designed.
 
+**`stop` — built (PRD §6.9)**: a step whose `action` is `stop` and whose `if:` is true (or
+absent) ends the loop immediately after being recorded — the one *action* that does stop the
+loop, deliberately distinct from #6 above (a normal `status: "error"` result, which doesn't).
+Every step after it gets `StepResult(status="stopped")` instead of being dispatched at all, so
+`RunResult.step_results` keeps its "one entry per workflow step" contract, and the audit log can
+distinguish "this step's own `if:` said don't run me" from "the run ended before we got here."
+`stop` doesn't set `any_failed` itself — whether the run commits is still governed purely by
+whether any *earlier* step returned `status: "error"` (#6 above), unchanged. Implemented as a
+small addition to the per-step loop (`enumerate` for the index, a nested loop over the remaining
+steps on trigger) — not a new abstraction, per the "composition root doesn't need splitting"
+convention (§6.1's intro note).
+
 `OwnedInstanceRegistry.close_owned()` isn't wired in here — there's no COM backend yet (§3.1,
 build order item 9), so there's nothing to close on that front.
 
@@ -679,10 +698,14 @@ time within it.
    implied but never actually added — see §6.3's note). This is also where the "14 actions"
    count repeated across items 4–7's notes turned out to be an off-by-one for "15" —
    `list_actions()` asserting the real count directly is what caught it.
-9. **Later phase (Windows-dependent COM work)**: `backends.py`'s COM-backend functions and
-   `OwnedInstanceRegistry` (§3.1), and the COM actions in `actions.py` (`recalculate`,
-   `run_macro`, `refresh_links`, `write_links`, `read_metadata`'s textbox sub-case).
-10. **Deferred/flagged, per PRD**: `update_summary_table`'s real parameters, the `aggregate`
+9. `runner.py` §6.1 — the `stop` control-flow action (PRD §6.9): schema-exempt registration
+   (`stop` joins `copy` in `_SCHEMA_EXEMPT_ACTIONS`, §5.4), the new `"stopped"` `StepResult`
+   status, and the runner loop's early-exit handling. Pure logic, no I/O — fits before the
+   platform-dependent phases below, same rationale as the rest of this build order. **Done.**
+10. **Later phase (Windows-dependent COM work)**: `backends.py`'s COM-backend functions and
+    `OwnedInstanceRegistry` (§3.1), and the COM actions in `actions.py` (`recalculate`,
+    `run_macro`, `refresh_links`, `write_links`, `read_metadata`'s textbox sub-case).
+11. **Deferred/flagged, per PRD**: `update_summary_table`'s real parameters, the `aggregate`
     discussion, `export_pdf`, the AI-authoring inspection actions (PRD §9: `list_sheets`,
     `describe_sheet`).
 

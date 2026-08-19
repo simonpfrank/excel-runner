@@ -26,6 +26,7 @@ class TestDiscoverActions:
             "find_row",
             "find_column",
             "find_columns",
+            "stop",
         }
 
     def test_each_entry_is_an_action_spec(self) -> None:
@@ -52,6 +53,10 @@ class TestDiscoverActions:
     def test_action_spec_carries_its_capability(self) -> None:
         registry = discover_actions(actions)
         assert registry["open"].capability == "file"
+
+    def test_stop_registers_with_no_backend_capability(self) -> None:
+        registry = discover_actions(actions)
+        assert registry["stop"].capability == "none"
 
     def test_action_spec_name_matches_the_function_name(self) -> None:
         registry = discover_actions(actions)

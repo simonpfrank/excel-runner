@@ -26,13 +26,15 @@ class StepResult:
         step_id: The step's id.
         status: "success", "error" (a normal, anticipated "didn't work" outcome — see the
             error-handling policy in Spec sec 4 — or an exception would have been raised
-            instead and this StepResult would never be constructed), or "skipped".
-        output: The action's output, or `{}` if skipped.
+            instead and this StepResult would never be constructed), "skipped" (this step's own
+            `if:` was false), or "stopped" (a `stop` step ended the run before this step was
+            ever reached — PRD sec 6.9).
+        output: The action's output, or `{}` if skipped or stopped.
         error: Present when status is "error".
     """
 
     step_id: str
-    status: Literal["success", "error", "skipped"]
+    status: Literal["success", "error", "skipped", "stopped"]
     output: dict[str, Any]
     error: ErrorDetail | None = None
 
@@ -42,8 +44,9 @@ class RunResult:
     """The outcome of a full run.
 
     Args:
-        status: "success" iff every step succeeded or was deliberately skipped — "error" if
-            any step's action returned an error result, even though the run continued past it.
+        status: "success" iff every step succeeded, was deliberately skipped, or never ran
+            because a `stop` step (PRD sec 6.9) ended the run early — "error" if any *dispatched*
+            step's action returned an error result, even though the run continued past it.
         step_results: One StepResult per step, in execution order.
         audit_log_path: Where the structured, per-step JSONL audit log was written.
     """
@@ -125,6 +128,9 @@ def _dispatch(
     resolved = core.resolve_value(step.params, context)
     if step.action == "copy":
         return _dispatch_copy(resolved, session_manager, plan)
+    if step.action == "stop":
+        # No session to resolve — stop is pure control flow, no workbook: field (PRD sec 6.9).
+        return registry[step.action].fn(**resolved)
     workbook_name = resolved["workbook"]
     session: WorkbookSession = session_manager.get_or_open(workbook_name, mode=plan.modes[workbook_name])
     kwargs = {key: value for key, value in resolved.items() if key != "workbook"}
@@ -174,9 +180,10 @@ def run_workflow(path: str | Path, env_overrides: dict[str, Any] | None = None) 
     any_failed = False
 
     try:
-        for step in workflow.steps:
+        for i, step in enumerate(workflow.steps):
             context = {"env": workflow.env, "steps": step_outputs}
             started_at = datetime.now()
+            stop_triggered = False
 
             if step.if_expr is not None and not core.evaluate_condition(step.if_expr, context):
                 step_result = StepResult(step_id=step.id, status="skipped", output={})
@@ -190,6 +197,7 @@ def run_workflow(path: str | Path, env_overrides: dict[str, Any] | None = None) 
                 )
                 if action_result.status == "error":
                     any_failed = True
+                stop_triggered = step.action == "stop"
 
             audit.record_step(step, step_result, started_at, datetime.now())
             step_results.append(step_result)
@@ -200,6 +208,19 @@ def run_workflow(path: str | Path, env_overrides: dict[str, Any] | None = None) 
             # integration test: without this, an in-memory-only write is invisible on disk
             # until commit_all(), which never runs on a crash.
             session_manager.checkpoint()
+
+            if stop_triggered:
+                # A stop step (PRD sec 6.9) ends the run right here — every later step gets a
+                # "stopped" StepResult (distinct from "skipped": its own if: never even ran)
+                # instead of being dispatched at all, so RunResult.step_results still has one
+                # entry per workflow step.
+                for later_step in workflow.steps[i + 1 :]:
+                    later_now = datetime.now()
+                    later_result = StepResult(step_id=later_step.id, status="stopped", output={})
+                    audit.record_step(later_step, later_result, later_now, later_now)
+                    step_results.append(later_result)
+                    step_outputs[later_step.id] = {"status": "stopped", "output": {}}
+                break
 
         if not any_failed:
             session_manager.commit_all()

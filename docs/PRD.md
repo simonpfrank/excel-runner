@@ -261,6 +261,31 @@ get translated the same way, with the technical original preserved as a secondar
 audit record (§6.7), not shown as the headline. See §9.1 for the bar validation errors need to
 hit; runtime errors are held to the same standard.
 
+### 6.9 Stopping a run early — DECIDED (2026-08-19)
+
+A `stop` step halts the workflow before any later step runs — the answer to "if this lookup
+comes back empty, don't bother running everything after it," without repeating the same `if:`
+condition on every subsequent step. `stop` is a normal action driven by the existing `if:`
+mechanism (§6.5) rather than a new per-step flag:
+
+```yaml
+- id: guard
+  action: stop
+  if: "{{ steps.find_it.status == 'error' }}"
+```
+
+When a `stop` step's `if:` is true (or absent, since `if:` is optional everywhere), the run
+halts right there — every remaining step gets `StepResult(status="stopped")`, a status
+deliberately distinct from `"skipped"` (§6.3's normal `if:`-false outcome), so the audit log can
+tell "this step's own condition said don't run me" apart from "the run ended before we got
+here." `stop` doesn't itself force the run to be treated as failed — whether the run commits
+still depends only on whether any *earlier* step returned `status: "error"` (§6.8's
+error-handling policy), unchanged. That means "not found → stop" naturally discards (the failed
+lookup already set that), while a deliberate early exit on a success condition ("already
+processed, nothing to do") naturally still saves whatever ran before it — no new commit logic
+needed, `stop` only needs to end the loop early. See `docs/Specification.md` §6.1 for the
+runner-side mechanics.
+
 ## 7. Action catalog
 
 **Status: syntax is settled for most actions; a couple are explicitly flagged as still open.**
@@ -286,6 +311,7 @@ Three things that apply to every row below, not repeated per-row:
 | `open` | file/COM (whichever the workbook needs) | workbook, update_links (optional), mode: read_only\|read_write (optional override) | Optional — see §6.3 implicit open. Implicit path always uses the inferred mode; explicit `open` may override it. |
 | `save` | file/COM | workbook | Optional — see §6.3 implicit save. |
 | `close` | file/COM | workbook | Optional — see §6.3 implicit close. A forgotten close is still handled automatically. |
+| `stop` | none — control flow only, no workbook | reason (optional string) | Halts the run before any later step runs — see §6.9. Not tied to any workbook; `workbook:` isn't a field on this action. |
 | `copy` | file | source: {workbook, sheet, range}, target: {workbook, sheet, range} | `range` optional on `source` — omit for the whole sheet. |
 | `read_range` | file | workbook, sheet (string, or a list for multi-sheet, or `all`), range, as: values\|formulas (optional) | Multi-sheet: an explicit list (`["North", "South"]`) is the real mechanism; `all` is authoring sugar that expands to the full sheet list before execution — one code path underneath either way. |
 | `read_metadata` | file (properties/cells) or COM (textboxes) | workbook, target: properties\|textboxes\|cells, sheet (required if target=cells — clarification found during implementation, missing from the original catalog), cells (list, if target=cells) | Two distinct things live behind one action: (a) workbook/document properties (author, title, custom doc properties — file-backend), (b) the current value of an embedded ActiveX/form control (COM-only — openpyxl can't see live control state). Capability depends on `target:`, not fixed per-action (§6.1 exception). |
@@ -883,6 +909,13 @@ because it's resolved inside the action's own code, not in raw YAML:
 ## 12. Open questions carried to spec phase
 
 Still open:
+- **Grouped `if:` blocks (backlog idea, not committed)** — today, several steps that all depend
+  on the same condition each repeat their own `if: "{{ ... }}"`. A block-level `if:` wrapping
+  multiple steps would remove the repetition, but adds YAML nesting/structure for a problem
+  `stop` (§6.9) may already cover well enough in practice. Raised alongside the `stop` design
+  (2026-08-19); deliberately not designed further until real workflows show repeated `if:`
+  conditions are an actual recurring pain, not just a theoretical one — possible over-engineering
+  if `stop` turns out to be sufficient.
 - **xlwings/Excel App instance ownership tagging mechanism (§6.2.1)** — exact way to record
   and recognize which running Excel process(es) belong to a given run, robust enough to
   survive a crash (so a *later* run or a cleanup utility can identify and safely reap an

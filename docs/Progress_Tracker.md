@@ -64,14 +64,39 @@ in Spec §5.1/§6.3 and above; not rewriting git history for it.
 
 All quality gates pass: 239/239 tests, ruff clean, mypy --strict clean (`excel_runner` +
 `tests`), radon cc clean, vulture clean, **100% branch coverage** across all 6 modules.
-**Next step:** A README (user-requested) — short prose, simple run instructions, YAML details
-starting with simple examples, then a comprehensive action reference with examples per action.
-After that: build order item 9 (COM phase, Windows-dependent) or item 10 (deferred items:
-`update_summary_table`, `aggregate`, `export_pdf`, AI-authoring inspection actions) — not yet
-decided which.
+`README.md` written and committed (`4eb5a37`) — every documented example verified end-to-end
+against real workbooks, not just asserted.
+
+**Design decision, 2026-08-19**: user flagged that without a way to halt a run early, avoiding a
+failed lookup's downstream steps means repeating the same `if:` on every one of them. Agreed
+design: a `stop` control-flow action, driven by the existing `if:` mechanism (no new per-step
+field), with a distinct `StepResult(status="stopped")` for every step after it — kept separate
+from `"skipped"` so the audit log can tell "this step's own condition skipped it" from "the run
+ended before we got here." Written up in PRD §6.9 and Specification.md §4/§6.1/§8 (now build
+order item 9, renumbering COM to 10 and deferred items to 11). A related but separate idea —
+grouped `if:` blocks spanning multiple steps, to avoid repeating the same condition — was
+deliberately **backlogged, not designed**: possible over-engineering, parked in PRD §12 until
+real workflows show it's an actual recurring need.
+
+**Item 9 (`stop` control-flow action, PRD §6.9/Spec §4/§6.1/§8)** — built via TDD. New
+`@control_action` decorator (capability `"none"`) since `stop` takes no `session` and has no
+`workbook:` field at all; joined `copy` in `_SCHEMA_EXEMPT_ACTIONS` for the same reason. New
+`StepResult(status="stopped")`, distinct from `"skipped"`, for every step after a triggered
+`stop` — kept `RunResult.step_results` at one entry per workflow step, and audit-logs the
+stopped steps too. `stop` doesn't set `any_failed` on its own, so a deliberate early exit still
+commits prior work while "not found → stop" still discards (the failed lookup already set
+that). No new commit logic needed — only the loop's early-exit needed writing. Action count is
+now **16** (was 15) — `list_actions()`'s count assertion caught every place that needed updating.
+All quality gates pass: 248/248 tests, 100% branch coverage, ruff/mypy --strict/radon/vulture
+clean.
+
+**Next step:** Not yet decided — build order item 10 (COM phase, Windows-dependent) or item 11
+(deferred items: `update_summary_table`, `aggregate`, `export_pdf`, AI-authoring inspection
+actions). README's action reference still needs a `stop` entry.
 **Notes:** `aggregate` and `update_summary_table`'s exact parameters are still explicitly
-flagged as open in the PRD — don't block on them. Tracker below stays function/class-granular
-even though source files are consolidated — see Spec §7.
+flagged as open in the PRD — don't block on them. Grouped `if:` blocks (spanning multiple
+steps) is a deliberately backlogged idea, not designed — PRD §12. Tracker below stays
+function/class-granular even though source files are consolidated — see Spec §7.
 
 ## Status legend
 ❌ Not Done · 🟡 In Progress · ✅ Done — Results: ✅ Pass · ❌ Fail · ⏭️ N/A
@@ -143,6 +168,7 @@ even though source files are consolidated — see Spec §7.
 | `SessionManager.checkpoint()` — `engine.py` §5.2 | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Public API surface (`__init__.py` re-exports, `list_actions()`, `ActionSpec.description`) — `runner.py` §6.3 | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Crash-safety (mid-run interruption) integration test (Spec §7) | ⏭️ | ⏭️ | ✅ | ⏭️ | ✅ |
+| `stop` control-flow action (`actions.py`) + `"stopped"` status + loop early-exit — `runner.py` §6.1, PRD §6.9 | ✅ | ✅ | ✅ | ✅ | ✅ |
 
 ## Phase 7 — COM (Windows-dependent, later phase per PRD §8)
 

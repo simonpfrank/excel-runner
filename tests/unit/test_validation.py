@@ -73,6 +73,12 @@ class TestRequiredParams:
             validation.validate_static(workflow, _REGISTRY)
         assert "range" in exc_info.value.detail.message
 
+    def test_stop_is_exempt_from_the_implicit_workbook_requirement(self) -> None:
+        """Every other action implicitly requires workbook: (_IMPLICIT_FIELDS) — stop has no
+        workbook at all (PRD sec 6.9), so it must be exempt the same way copy is."""
+        workflow = _workflow([Step(id="s1", action="stop", params={})])
+        validation.validate_static(workflow, _REGISTRY)  # should not raise
+
     def test_missing_implicit_workbook_field_raises(self) -> None:
         workflow = _workflow([Step(id="s1", action="read_range", params={"sheet": "S", "range": "A1"})])
         with pytest.raises(ValidationError) as exc_info:

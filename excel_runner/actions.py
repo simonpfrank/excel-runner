@@ -16,7 +16,14 @@ from typing import Any, Literal
 from openpyxl.utils import column_index_from_string, get_column_letter
 
 from excel_runner import backends
-from excel_runner.core import ActionExecutionError, ActionResult, ErrorDetail, WorkbookSession, file_action
+from excel_runner.core import (
+    ActionExecutionError,
+    ActionResult,
+    ErrorDetail,
+    WorkbookSession,
+    control_action,
+    file_action,
+)
 
 # --- basic -------------------------------------------------------------------------------
 
@@ -67,6 +74,23 @@ def close(session: WorkbookSession) -> ActionResult:
     """
     backends.close_workbook(session.handle)
     return ActionResult(status="success", output={})
+
+
+@control_action
+def stop(reason: str | None = None) -> ActionResult:
+    """Halt the run — no later step runs (PRD sec 6.9).
+
+    No `session` parameter and no `workbook:` field — this is pure control flow, not a backend
+    call. Reaching this action is not itself a failure; `runner.py` is what actually ends the
+    loop once this returns, marking every later step `"stopped"` (Spec sec 6.1).
+
+    Args:
+        reason: Optional note for the audit log explaining why the run stopped.
+
+    Returns:
+        A success result; `reason` is echoed into `output` when given, for the audit log.
+    """
+    return ActionResult(status="success", output={"reason": reason} if reason is not None else {})
 
 
 # --- data ----------------------------------------------------------------------------------
