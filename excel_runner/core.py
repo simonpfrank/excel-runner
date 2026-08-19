@@ -324,7 +324,7 @@ class WorkbookSession:
     """
 
     name: str
-    backend: Literal["file", "com"]
+    backend: Literal["file", "xlw"]
     handle: Any
     path: str
     mode: Literal["read_only", "read_write"]
@@ -339,8 +339,16 @@ class WorkbookSession:
 # and keeps the registration mechanism trivially introspectable (engine.py's discover_actions
 # just reads this dict). "depends_on_param" (PRD sec 7's read_metadata exception) gets its own
 # decorator when that action is built — not added speculatively now.
+#
+# Three live-Excel-adjacent tiers, not two — corrected from an earlier "com" catch-all that
+# was inaccurate on macOS (there is no COM there at all, only Apple Events; xlwings abstracts
+# the difference). "xlw" is xlwings' own portable API — works identically on both platforms,
+# what nearly every live-Excel action needs. "com" is reserved for the genuine exception: a
+# call that needs xlwings' `.api` escape hatch to reach the raw, Windows-only COM object
+# directly (PRD sec 7's `recalculate` full/full_rebuild modes are the known example) — not
+# added speculatively, just the capability plumbing for when the first one is actually built.
 
-ACTION_CAPABILITIES: dict[str, Literal["file", "com", "depends_on_param", "none"]] = {}
+ACTION_CAPABILITIES: dict[str, Literal["file", "xlw", "com", "depends_on_param", "none"]] = {}
 
 _P = ParamSpec("_P")
 
@@ -357,16 +365,27 @@ def file_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]:
     return fn
 
 
+def xlw_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]:
+    """Register a function as using xlwings' portable, cross-platform API for discovery (Spec
+    sec 5.1) — the normal live-Excel case. See `com_action` for the raw-COM-only exception.
+    """
+    ACTION_CAPABILITIES[fn.__name__] = "xlw"
+    return fn
+
+
 def com_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]:
-    """Register a function as a COM-backend (xlwings) action for discovery (Spec sec 5.1)."""
+    """Register a function as needing the raw, Windows-only COM object via xlwings' `.api`
+    escape hatch for discovery (Spec sec 5.1) — the genuine exception, not the default
+    live-Excel case (see `xlw_action`).
+    """
     ACTION_CAPABILITIES[fn.__name__] = "com"
     return fn
 
 
 def control_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]:
     """Register a function as a control-flow action for discovery — no backend, no `session`
-    (PRD sec 6.9's `stop`). Distinct from `file_action`/`com_action` since capability "none"
-    means the runner never resolves a workbook session before calling it.
+    (PRD sec 6.9's `stop`). Distinct from `file_action`/`xlw_action`/`com_action` since
+    capability "none" means the runner never resolves a workbook session before calling it.
     """
     ACTION_CAPABILITIES[fn.__name__] = "none"
     return fn

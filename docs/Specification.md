@@ -12,7 +12,7 @@ What's not allowed:
 - **No copying.** All code in this repo is written new. Not pasted, not closely paraphrased,
   and not structurally mirrored (module layout, class hierarchy, function boundaries) — the
   entire point of a fresh build is to not inherit that prior tool's structural issues
-  (COM-everywhere, string-mini-language config, defensive fallback layers — see PRD §1 for what
+  (always-live-Excel, string-mini-language config, defensive fallback layers — see PRD §1 for what
   those were, described in first-principles terms rather than tied to any specific prior code).
 - **No references in tracked material.** The prior tool is never named — not by name, not by
   path — anywhere in this repo's committed documentation, docstrings, code comments, or commit
@@ -44,7 +44,7 @@ excel_runner/
 
 tests/
   unit/            # test files stay granular even though source doesn't — see §7
-  integration/      # real files/openpyxl, real Excel where COM is exercised
+  integration/      # real files/openpyxl, real Excel where xlwings is exercised
   data/              # fixture workbooks
 ```
 
@@ -158,16 +158,25 @@ is independently unit-testable against its own bad-input fixture.
 
 ## 3. Backends layer — `backends.py`
 
-Everything that actually talks to openpyxl or xlwings/COM lives here — plain functions, not
-classes, one function per primitive operation (`open_workbook`, `read_range`, `write_cell`,
+Everything that actually talks to openpyxl or xlwings (live Excel) lives here — plain functions,
+not classes, one function per primitive operation (`open_workbook`, `read_range`, `write_cell`,
 `copy_range`, ...), so swapping or testing either side never requires touching action code
-(PRD §6.1's backend-invisibility goal). Naming convention keeps the two sides unambiguous
-within the single file: file-backend functions are unprefixed; COM-backend functions carry a
-`com_` prefix (`com_open_workbook`, `com_recalculate`, `com_run_macro`, `com_refresh_links`,
-`com_write_links`, `com_read_textbox`) — enforced by naming and a section-comment banner now
-that a directory boundary no longer does it. If this file grows past a size where that
-convention stops being enough to navigate by, split by concern then (not pre-split now, since
-the real size is unknown before code exists).
+(PRD §6.1's backend-invisibility goal). Naming convention keeps the tiers unambiguous within the
+single file — corrected from an earlier two-tier "COM" catch-all that was inaccurate on macOS
+(no COM exists there, only Apple Events; xlwings abstracts the difference, PRD §4):
+- File-backend functions (openpyxl) are unprefixed.
+- `xlw_`-prefixed functions use xlwings' portable, cross-platform API — the default live-Excel
+  case.
+- `com_`-prefixed functions are the genuine exception: xlwings' `.api` escape hatch for
+  something only the raw, Windows-only COM object can do (PRD §7's `recalculate`
+  full/full_rebuild modes are the known example) — not the default, only where actually needed.
+
+Enforced by naming and a section-comment banner now that a directory boundary no longer does it.
+Which specific future primitives land in which tier isn't fully decided until each is actually
+built (most will be `xlw_`; `recalculate` is the known case needing both, split by `mode`) — not
+asserted as a fixed list here. If this file grows past a size where the naming convention stops
+being enough to navigate by, split by concern then (not pre-split now, since the real size is
+unknown before code exists).
 
 ### 3.1 Owned-instance tracking (PRD §6.2.1) — **built**
 
@@ -180,7 +189,7 @@ class OwnedInstanceRegistry:
 
 Holds the run's own set of spawned `xw.App` instances, keyed by PID (`dict[int, xw.App]`, not
 just a bare PID set — the actual object reference is what `close_owned()` needs to act on). The
-(future, not-yet-built) `SessionManager` COM promotion will ask this registry for an App
+(future, not-yet-built) `SessionManager` xlwings promotion will ask this registry for an App
 instance rather than ever calling `xw.App`/`xw.Book` directly — that keeps "never touch an
 instance we didn't spawn" (PRD §6.2.1) enforced in one place instead of scattered through action
 code. `close_owned()` mirrors `SessionManager.close_all()`'s `ExceptionGroup` pattern exactly:
@@ -193,7 +202,7 @@ designed, not a placeholder to guess at now.
 test_owned_instance_registry.py`), gated by a `requires_excel` skip marker (`tests/unit/
 conftest.py`) so the suite degrades cleanly on a machine without Excel rather than failing.
 Found two genuine, empirical facts about macOS Excel automation while writing these tests —
-neither is a bug in this class, both are documented here so later COM work doesn't rediscover
+neither is a bug in this class, both are documented here so later xlwings work doesn't rediscover
 them the hard way:
 - **`app.quit()` is asynchronous.** The call returns before the underlying process has actually
   terminated (~0.5s observed locally). A test — or any future code — checking "is this PID gone
@@ -213,7 +222,7 @@ via Apple Events. `save()` specifically does not — `Parameter error (-50)` on
 `save_workbook_as`, reproduced consistently (headless and visible, simple and complex paths, no
 dialog involved) and matches multiple open xlwings GitHub issues, not something specific to this
 machine. Doesn't block v1 (PRD §4 already treats Windows as the real target and macOS as
-"test what's testable now") — it does mean anything routing through COM `save()` (and possibly
+"test what's testable now") — it does mean anything routing through xlwings' `save()` (and possibly
 `recalculate`/`run_macro`/`refresh_links`/`write_links` — not yet individually checked) needs its
 tests gated behind Windows access, per this section's skip-don't-mock convention, not written off
 as broken.
@@ -246,18 +255,19 @@ the Python function is ever called, not forwarded to it.
 not through a `session.<something>` indirection as originally sketched. Since an action's
 capability tag already fixes which backend it will only ever run against, there's no runtime
 branching to hide behind an indirection layer; the action just calls the matching (unprefixed
-for file, `com_`-prefixed for COM) `backends.py` function. Backend choice still isn't the
-action's decision — it's fixed once, by the capability tag, not decided per-call.
+for file, `xlw_`-prefixed for the portable xlwings API, `com_`-prefixed for the raw-COM
+exception) `backends.py` function. Backend choice still isn't the action's decision — it's fixed
+once, by the capability tag, not decided per-call.
 
-**Each action registers its capability via a decorator** (`@file_action`/`@com_action`, defined
-in `core.py` alongside `ACTION_CAPABILITIES`, a plain `name -> capability` dict the decorators
-populate) rather than by stamping an attribute onto the function object — keeps mypy --strict
-clean (no dynamic-attribute `type: ignore` noise) and keeps registration trivially
-introspectable for `engine.py`'s `discover_actions()` (§5.1).
+**Each action registers its capability via a decorator** (`@file_action`/`@xlw_action`/
+`@com_action`, defined in `core.py` alongside `ACTION_CAPABILITIES`, a plain `name -> capability`
+dict the decorators populate) rather than by stamping an attribute onto the function object —
+keeps mypy --strict clean (no dynamic-attribute `type: ignore` noise) and keeps registration
+trivially introspectable for `engine.py`'s `discover_actions()` (§5.1).
 
 **The 5 built actions have a deliberately reduced param surface vs. the full PRD §7 catalog**,
 each documented in its own docstring: `open` omits `update_links` (no effect without a live
-Excel session — COM, a later phase) and a `mode` override (depends on read/write inference that
+Excel session — xlwings, a later phase) and a `mode` override (depends on read/write inference that
 tier-2 validation, §5.4, doesn't exist yet to override); `read_range` omits `as: formulas`
 (depends on which `data_only` flag the workbook was opened with — a session-level decision, §5.4
 again). These are scope boundaries for this increment, not permanent cuts — they get added back
@@ -269,7 +279,7 @@ the one touched most often. Two things keep it navigable without adding source f
   `test_write_row.py`, etc. stay one-file-per-action even though the source doesn't — most of
   the per-action navigability comes back on the test side, where it matters most for TDD (§7).
 - Functions are ordered in the file to match PRD §7's table order (basic → data → structure →
-  lookup → aggregate → links → COM), with a one-line comment banner per group, so the physical
+  lookup → aggregate → links → live-Excel), with a one-line comment banner per group, so the physical
   layout still mirrors the catalog even without file boundaries doing it.
 
 **15 built so far** (corrected — earlier notes across items 4–7 said 14, an off-by-one
@@ -363,7 +373,7 @@ rejection of an unsupported `target`, found via this same investigation and fixe
 `actions.py`).
 
 `capability="depends_on_param"` is a **named, single exception**, not a general mechanism —
-only `read_metadata` uses it (PRD §7: file for `properties`/`cells`, COM for `textboxes`), and
+only `read_metadata` uses it (PRD §7: file for `properties`/`cells`, xlw for `textboxes`), and
 isn't built yet. `runner.py` (not built yet) will check for this literal case explicitly rather
 than building a generic capability-resolution feature for one action.
 
@@ -373,7 +383,7 @@ with an entry in `core.py`'s `ACTION_CAPABILITIES` dict (populated by the `@file
 `param_schema` is derived from the function's signature, skipping `session` and marking any
 parameter with no default as required.
 
-### 5.2 Session management — **built** (except `promote_to_com`, see below)
+### 5.2 Session management — **built** (except `promote_to_xlw`, see below)
 
 ```python
 @dataclass
@@ -391,8 +401,9 @@ class SessionManager:
     def checkpoint(self) -> None: ...     # save every dirty staged session's scratch file
     def commit_all(self) -> None: ...     # save-all (via checkpoint's helper) + ScratchManager commit, §5.3
     def close_all(self) -> None: ...      # always runs — see runner.py's try/finally, §6.1
-    # promote_to_com(name) is NOT built — needs the COM backend, which doesn't exist until
-    # the later COM phase (§8 item 9). No stub for it; it's simply absent until then.
+    # promote_to_xlw(name) is NOT built — needs the xlwings-backed session promotion, which
+    # doesn't exist until the later live-Excel phase (§8 item 10). No stub for it; it's simply
+    # absent until then.
 ```
 
 **`checkpoint()` was added after the fact, found via a failing crash-safety integration test,
@@ -469,8 +480,8 @@ class ScratchManager:
 path first, then delegates to `ScratchManager.commit_all()` to move each scratch file back to
 its real path — read-only sessions (never staged) aren't touched by either step.
 `ScratchManager` has no knowledge of openpyxl/xlwings — it operates on plain file paths, so
-both backends will stage/commit through the same code path once the COM backend exists (PRD
-§6.3.1's "COM steps operate on the scratch copy too").
+both backends will stage/commit through the same code path once xlwings-backed sessions exist
+(PRD §6.3.1's "xlwings-backed steps operate on the scratch copy too").
 
 Which workbooks *get* staged is decided by `SessionManager` (staged iff opened
 `mode="read_write"`, per §5.2's note above), not by `ScratchManager` reading an `ExecutionPlan`
@@ -591,8 +602,8 @@ small addition to the per-step loop (`enumerate` for the index, a nested loop ov
 steps on trigger) — not a new abstraction, per the "composition root doesn't need splitting"
 convention (§6.1's intro note).
 
-`OwnedInstanceRegistry.close_owned()` isn't wired in here — there's no COM backend yet (§3.1,
-build order item 9), so there's nothing to close on that front.
+`OwnedInstanceRegistry.close_owned()` isn't wired in here — `SessionManager` doesn't promote
+sessions to xlwings yet (§3.1, build order item 10), so there's nothing to close on that front.
 
 **A real bug found while writing the first integration test**: the audit log was originally
 written inside the same directory `ScratchManager.cleanup()` deletes — so a *successful* run
@@ -665,9 +676,11 @@ that could drift from it.
   (openpyxl, written to `tmp_path`), not committed as static binary files in `tests/data/`** as
   first sketched — more reviewable (visible in a diff, no binary blobs), easier to vary per
   test, and every other test in this codebase already does it this way. `tests/data/` stays
-  empty/unused unless a real need for a static fixture shows up. COM-backed actions/tests will
-  be marked `@pytest.mark.skipif` on platform/Excel-availability (PRD §4's "test what's
-  testable on macOS now, finish on Windows later") once any exist — none do yet.
+  empty/unused unless a real need for a static fixture shows up. xlwings-backed actions/tests
+  will be marked `@pytest.mark.skipif` on platform/Excel-availability (PRD §4's "test what's
+  testable on macOS now, finish on Windows later") — the pattern's already in place
+  (`tests/unit/conftest.py`'s `requires_excel`, used by `OwnedInstanceRegistry`'s tests,
+  build order item 10) even though no *action* uses it yet.
 - **Crash-safety test — built, as a follow-up to item 7**: `TestCrashSafety` in
   `tests/integration/test_run_workflow.py` deliberately triggers a raised exception mid-run
   (`write_row`'s positional mode without `start_column` — a real, already-covered way to
@@ -676,9 +689,10 @@ that could drift from it.
   see §5.2/§6.1's `checkpoint()` correction, found by this very test failing on the first
   attempt); the audit log survives too; and — the strongest cross-platform evidence that
   sessions were genuinely closed — a second, valid run against the same real file afterward
-  just works. **"No orphaned Excel process" is explicitly not tested** — there's no COM
-  backend yet, so no Excel process is ever spawned by the current action set; that part of
-  PRD §6.3's requirement gets a real test once build order item 9 exists. Directly detecting
+  just works. **"No orphaned Excel process" is explicitly not tested** — no *action* spawns
+  Excel yet (`OwnedInstanceRegistry` itself does, and is tested for that directly, §3.1 — but
+  nothing wires it into a real run); that part of PRD §6.3's requirement gets a real
+  `run_workflow()`-level test once build order item 10's actions exist. Directly detecting
   an OS-level file lock was deliberately not attempted either — meaningful mainly on Windows
   (PRD §4), not reliably testable on macOS, so the "does a later run succeed" check stands in
   for it as the behavior that actually matters.
@@ -708,7 +722,7 @@ time within it.
    during implementation."
 5. `engine.py` §5.2/§5.3 — `SessionManager` (lazy-open, `create_if_missing`/`template`,
    close-all) and `ScratchManager` (scratch-copy staging/atomic commit). **Done**, except
-   `promote_to_com` (needs the COM backend, item 9) and mode inference (needs §5.4, item 6) —
+   `promote_to_xlw` (needs the live-Excel phase, item 10) and mode inference (needs §5.4, item 6) —
    mode is caller-specified for now, the seam validation will feed into later. See §5.2's notes
    for the real bug this surfaced (missing parent-directory creation on one code path) and the
    `ExceptionGroup`-based crash-safety design in `close_all()`.
@@ -736,12 +750,13 @@ time within it.
    (`stop` joins `copy` in `_SCHEMA_EXEMPT_ACTIONS`, §5.4), the new `"stopped"` `StepResult`
    status, and the runner loop's early-exit handling. Pure logic, no I/O — fits before the
    platform-dependent phases below, same rationale as the rest of this build order. **Done.**
-10. **COM phase**: `backends.py`'s `OwnedInstanceRegistry` (§3.1) — **done**, tested for real on
-    macOS (Excel is installed here) — plus the remaining COM-backend functions and the COM
-    actions in `actions.py` (`recalculate`, `run_macro`, `refresh_links`, `write_links`,
-    `read_metadata`'s textbox sub-case) — **not yet built**. `save()` is confirmed broken via
-    xlwings on this Mac's Excel build (§3.1's note) — real COM-write-path testing needs the
-    Windows environment (PRD §4/§12), open/read-only paths can continue on macOS meanwhile.
+10. **xlwings / live-Excel phase**: `backends.py`'s `OwnedInstanceRegistry` (§3.1) — **done**,
+    tested for real on macOS (Excel is installed here) — plus the remaining `xlw_`/`com_`-tier
+    backend primitives and the live-Excel actions in `actions.py` (`recalculate`, `run_macro`,
+    `refresh_links`, `write_links`, `read_metadata`'s textbox sub-case) — **not yet built**.
+    `save()` is confirmed broken via xlwings on this Mac's Excel build (§3.1's note) — real
+    write-path testing needs the Windows environment (PRD §4/§12), open/read-only paths can
+    continue on macOS meanwhile.
 11. **Deferred/flagged, per PRD**: `update_summary_table`'s real parameters, the `aggregate`
     discussion, `export_pdf`, the AI-authoring inspection actions (PRD §9: `list_sheets`,
     `describe_sheet`).

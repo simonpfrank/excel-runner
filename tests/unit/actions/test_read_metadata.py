@@ -35,8 +35,8 @@ class TestReadMetadataAction:
     ) -> None:
         """Regression test: target="textboxes" used to silently fall through to the "cells"
         handling (anything not "properties" was treated as "cells"). mypy now catches this at
-        a literal call site like this one (file_action/com_action switched to ParamSpec so the
-        decorator no longer erases parameter types, Spec sec 4/5.1) — the `type: ignore` below
+        a literal call site like this one (the capability decorators switched to ParamSpec so
+        they no longer erase parameter types, Spec sec 4/5.1) — the `type: ignore` below
         is deliberate, simulating the runner's actual dispatch, which calls every action via
         `**kwargs` unpacked from a dynamically-typed dict that no amount of ParamSpec can check.
         The runtime guard this test verifies is the only real defense on that path."""

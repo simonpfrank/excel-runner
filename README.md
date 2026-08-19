@@ -9,10 +9,10 @@ Design notes live in [`docs/PRD.md`](docs/PRD.md) and [`docs/Specification.md`](
 
 v1 file-backend engine is built and tested: loading, templating, validation, session/scratch
 management, 16 actions, and the orchestration loop (`run_workflow`). There is **no CLI yet** —
-this is a Python library, used from a script. Nothing here talks to a live Excel process (COM)
-yet — everything runs against files directly via openpyxl, which is also why the action list
-below skips macros, recalculation, and a few other Excel-specific things (see
-[Not yet available](#not-yet-available)).
+this is a Python library, used from a script. Every action so far runs against files directly
+via openpyxl — no live Excel process involved, which is also why the action list below skips
+macros, recalculation, and a few other Excel-specific things (see
+[Not yet available](#not-yet-available)). Live-Excel support (via xlwings) is in progress.
 
 ## Install and run
 
@@ -445,10 +445,10 @@ Flagged clearly rather than silently missing:
   yet.
 - **`read_links`, `write_links`** — reading/rewriting external workbook links. A real
   limitation in openpyxl (not just unbuilt), see `docs/PRD.md` §7.
-- **`refresh_links`, `recalculate`, `run_macro`, `export_pdf`** — all need a live Excel (COM)
-  session, which doesn't exist yet. Nothing in this engine spawns Excel.
-- **`read_metadata` with `target: textboxes`** — same COM limitation; raises a clear error if
-  requested.
+- **`refresh_links`, `recalculate`, `run_macro`, `export_pdf`** — all need a live Excel session
+  (via xlwings), which these specific actions don't use yet.
+- **`read_metadata` with `target: textboxes`** — same live-Excel limitation; raises a clear
+  error if requested.
 - **`update_summary_table`** — not designed yet.
 - A CLI. `run_workflow()` is the only entry point today.
 

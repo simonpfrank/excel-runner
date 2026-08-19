@@ -1,9 +1,16 @@
-"""Backend primitives: openpyxl (file) and, later, xlwings (COM). See Spec sec 3.
+"""Backend primitives: openpyxl (file) and xlwings (live Excel). See Spec sec 3.
 
 Plain functions, not classes, one per primitive operation, so swapping or testing either side
-never requires touching action code (PRD sec 6.1). File-backend functions are unprefixed;
-COM-backend functions (added in a later increment) will carry a `com_` prefix to keep the two
-sides unambiguous within one file once both exist.
+never requires touching action code (PRD sec 6.1). Three naming tiers, not two — "COM" alone
+would be inaccurate, since there is no COM on macOS at all, only Apple Events; xlwings abstracts
+that difference, which is exactly why it was chosen over raw `win32com` (PRD sec 4):
+- File-backend functions (openpyxl) are unprefixed.
+- `xlw_`-prefixed functions use xlwings' portable, cross-platform API — the normal live-Excel
+  case, works identically on Windows and macOS.
+- `com_`-prefixed functions are the genuine exception: they reach through xlwings' `.api`
+  escape hatch for something only the raw, Windows-only COM object can do (PRD sec 7's
+  `recalculate` full/full_rebuild modes are the known example) — not the default, added only
+  where actually needed.
 """
 
 import re
@@ -344,7 +351,7 @@ def read_cells(workbook: Workbook, sheet: str, cells: list[str]) -> dict[str, An
     return {cell: worksheet[cell].value for cell in cells}
 
 
-# --- COM (xlwings) — owned-instance tracking (PRD sec 6.2.1, Spec sec 3.1) -----------------
+# --- xlwings — owned-instance tracking (PRD sec 6.2.1, Spec sec 3.1) ----------------------
 
 
 class OwnedInstanceRegistry:

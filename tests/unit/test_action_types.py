@@ -12,6 +12,7 @@ from excel_runner.core import (
     WorkbookSession,
     com_action,
     file_action,
+    xlw_action,
 )
 
 
@@ -62,7 +63,19 @@ class TestCapabilityTagging:
 
         assert ACTION_CAPABILITIES["_example_file_action"] == "file"
 
+    def test_xlw_action_registers_xlw_capability(self) -> None:
+        """xlwings' portable, cross-platform API — the normal live-Excel case (Spec sec 3)."""
+
+        @xlw_action
+        def _example_xlw_action(session: WorkbookSession) -> ActionResult:
+            return ActionResult(status="success", output={})
+
+        assert ACTION_CAPABILITIES["_example_xlw_action"] == "xlw"
+
     def test_com_action_registers_com_capability(self) -> None:
+        """The raw, Windows-only COM object via xlwings' `.api` escape hatch — the exception,
+        not the default (see `xlw_action`)."""
+
         @com_action
         def _example_com_action(session: WorkbookSession) -> ActionResult:
             return ActionResult(status="success", output={})

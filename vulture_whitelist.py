@@ -22,6 +22,7 @@ from excel_runner.core import (
     WorkbookSession,
     com_action,
     evaluate_condition,
+    xlw_action,
 )
 
 WorkbookRef.name
@@ -50,6 +51,7 @@ WorkbookSession.backend
 WorkbookSession.scratch_path
 WorkbookSession.dirty
 com_action
+xlw_action
 
 actions.open
 actions.copy

@@ -90,9 +90,9 @@ now **16** (was 15) — `list_actions()`'s count assertion caught every place th
 All quality gates pass: 248/248 tests, 100% branch coverage, ruff/mypy --strict/radon/vulture
 clean.
 
-**Item 10 (COM phase) started — `OwnedInstanceRegistry` (backends.py §3.1) built and tested for
-real** against a locally-spawned Excel instance (Excel is installed on this dev Mac, so real
-COM-path testing is possible here for what actually works). Along the way: fixed an unrelated
+**Item 10 (xlwings / live-Excel phase) started — `OwnedInstanceRegistry` (backends.py §3.1)
+built and tested for real** against a locally-spawned Excel instance (Excel is installed on this
+dev Mac, so real testing is possible here for what actually works). Along the way: fixed an unrelated
 but serious environment bug — this project's venv lived under `~/Documents` (iCloud-synced),
 which was silently breaking `.pth`-file processing (editable installs, `appscript`) via macOS's
 hidden-file flag being repeatedly reapplied by the iCloud daemon; fixed by relocating the venv
@@ -100,14 +100,27 @@ to `~/.venvs/excel-runner` (symlinked back as `.venv`) and documented in
 `/Users/simonfrank/Documents/dev/python/CLAUDE.md` so every future project in this tree gets it
 right from the start. Confirmed empirically: open/read/write cell values work reliably via
 xlwings on macOS; `save()` does not (`Parameter error -50`, reproduced consistently, matches
-known xlwings GitHub issues) — real COM-write-path testing needs the Windows environment the
+known xlwings GitHub issues) — real write-path testing needs the Windows environment the
 user will provide. Two Mac-specific `quit()` behaviors found and documented in Spec §3.1 (async
 termination; inconsistent error-vs-no-op on a redundant quit) — neither is a bug in the class.
-**Next step:** Continue item 10 — `backends.py`'s remaining COM-backend primitives
-(`com_open_workbook`, `com_recalculate`, `com_run_macro`, `com_refresh_links`, `com_write_links`,
-`com_read_textbox`) and the COM actions in `actions.py`, TDD as usual — real tests for what's
-provably reliable on macOS (open/read/write), `requires_excel`-gated per `tests/unit/
-conftest.py`, with anything routing through `save()` (or found to share its limitation) using
+
+**Naming correction, same session**: the original two-tier "COM" naming (file-backend
+unprefixed, `com_`-prefixed for everything live-Excel) was inaccurate — there is no COM on
+macOS at all, only Apple Events; xlwings abstracts the difference (PRD §4), which is exactly why
+it was chosen over raw `win32com`. Corrected to three tiers throughout code and docs: `file`
+(openpyxl), `xlw` (xlwings' portable API — the normal case), `com` (the genuine exception: raw,
+Windows-only COM object via xlwings' `.api`, e.g. `recalculate`'s full/full_rebuild modes).
+`ACTION_CAPABILITIES`/`ActionSpec.capability` widened accordingly; `com_action` now means the
+raw-COM case specifically, with a new `xlw_action` covering what it used to mean;
+`WorkbookSession.backend` is `Literal["file", "xlw"]`. `promote_to_xlw` (was `promote_to_com`)
+renamed to match. All gates re-verified green after the rename (254/254 tests).
+
+**Next step:** Continue item 10 — `backends.py`'s remaining live-Excel backend primitives (which
+tier each one lands in isn't fully decided until built — most will be `xlw_`; only a genuine
+raw-COM need, like `recalculate`'s full/full_rebuild modes, gets `com_`) and the corresponding
+actions in `actions.py`, TDD as usual — real tests for what's provably reliable on macOS
+(open/read/write), `requires_excel`-gated per `tests/unit/conftest.py`, with anything routing
+through `save()` (or found to share its limitation) using
 `@pytest.mark.skipif` for "needs Windows" rather than a mock.
 **Notes:** `aggregate` and `update_summary_table`'s exact parameters are still explicitly
 flagged as open in the PRD — don't block on them. Four things parked in PRD §12, none designed
@@ -171,7 +184,7 @@ Spec §7.
 
 | Component | Unit Tests | Code | Integration Tests | Unit Results | Integration Results |
 |---|---|---|---|---|---|
-| `SessionManager` — `engine.py` §5.2 (`promote_to_com` excluded — needs item 9) | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `SessionManager` — `engine.py` §5.2 (`promote_to_xlw` excluded — needs item 9) | ✅ | ✅ | ❌ | ✅ | ❌ |
 | `ScratchManager` — `engine.py` §5.3 | ✅ | ✅ | ❌ | ✅ | ❌ |
 | `backends.create_workbook` (supports `create_if_missing`) | ✅ | ✅ | ❌ | ✅ | ❌ |
 
@@ -193,11 +206,11 @@ Spec §7.
 | Crash-safety (mid-run interruption) integration test (Spec §7) | ⏭️ | ⏭️ | ✅ | ⏭️ | ✅ |
 | `stop` control-flow action (`actions.py`) + `"stopped"` status + loop early-exit — `runner.py` §6.1, PRD §6.9 | ✅ | ✅ | ✅ | ✅ | ✅ |
 
-## Phase 7 — COM (Windows-dependent, later phase per PRD §8)
+## Phase 7 — xlwings / live-Excel (Windows-dependent, later phase per PRD §8)
 
 | Component | Unit Tests | Code | Integration Tests | Unit Results | Integration Results |
 |---|---|---|---|---|---|
-| COM-backend primitives — `backends.py` §3 | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Remaining `xlw_`/`com_`-tier backend primitives — `backends.py` §3 | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `OwnedInstanceRegistry` — `backends.py` §3.1 | ✅ | ✅ | ⏭️ | ✅ | ⏭️ |
 | `recalculate` action | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `run_macro` action | ❌ | ❌ | ❌ | ❌ | ❌ |

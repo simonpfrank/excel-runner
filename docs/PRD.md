@@ -14,7 +14,7 @@ Ansible/GitHub Actions than to UiPath/Power Automate Desktop.
 
 Design principles established up front, driving every decision below:
 
-1. **Only pay for a live Excel COM session where the work genuinely requires it** —
+1. **Only pay for a live Excel session where the work genuinely requires it** —
    recalculation, VBA macros, live external-link refresh. Everything else (reads, writes,
    copies, structural edits) runs against the file directly via openpyxl: fast, headless, no
    live Excel process needed.
@@ -33,7 +33,7 @@ Design principles established up front, driving every decision below:
   structured, self-describing fields; no encoded mini-languages; fail-fast validation instead
   of silent fallback behavior.
 - An architecture that transparently uses a fast file-only backend (openpyxl) for actions that
-  don't need it, and only pays the cost of a live Excel COM session (via xlwings) for actions
+  don't need it, and only pays the cost of a live Excel session (via xlwings) for actions
   that genuinely require Excel's calc engine or VBA — the user never chooses this explicitly.
 - **A clean, directly-importable Python library**, usable from a plain script in another
   project, not only via a YAML file on disk — see §3 and §9.
@@ -64,12 +64,17 @@ Design principles established up front, driving every decision below:
 Primary real-world target is a **Windows environment with a live Excel install** (this is
 where the tool will actually be used day to day). Development happens on macOS.
 
-Decision: use **xlwings as the COM abstraction on both platforms** (it handles the Windows/COM
-vs. Mac/AppleScript difference internally) rather than raw `win32com`. Consequence: on macOS,
-some COM-backed actions may behave differently or not be fully supported — this is an accepted
-limitation of the dev environment, not a v1 blocker, since Windows is the real target. File-only
-(openpyxl) actions are unaffected by platform. Testing strategy: test what's testable on macOS
-now, finish COM-path integration testing on Windows later — accepted (see §12).
+Decision: use **xlwings as the cross-platform live-Excel automation layer** (it handles the
+Windows/COM vs. Mac/AppleScript difference internally) rather than raw `win32com`. Naming
+convention this decision drives (Specification.md §3): "COM" alone is not an accurate umbrella
+term, since there is no COM on macOS at all — only "xlw" (xlwings' portable API, works
+identically on both platforms) and "com" (the genuine exception: reaching through xlwings'
+`.api` escape hatch for something only the raw, Windows-only COM object can do) are used as
+capability tiers, alongside "file" for openpyxl. Consequence: on macOS, some live-Excel actions
+may behave differently or not be fully supported — this is an accepted limitation of the dev
+environment, not a v1 blocker, since Windows is the real target. File-only (openpyxl) actions
+are unaffected by platform. Testing strategy: test what's testable on macOS now, finish
+xlwings-path integration testing on Windows later — accepted (see §12).
 
 ## 5. Interfaces
 
@@ -117,16 +122,18 @@ this is a registry-entry concern, not a separate step action; see §11 item 10.
 
 ### 6.2.1 xlwings instance ownership
 
-xlwings — and the underlying Excel COM API — will happily attach to whatever Excel instance is
-already running on the machine, rather than always spawning an isolated instance of its own.
-On a machine where more than one automation run (or a real user's own Excel session) can be
-active at the same time, this is dangerous: a run that isn't careful about this can end up
-operating on, or worse closing, a workbook or process that belongs to something else entirely.
+xlwings — and the underlying Excel automation API it wraps (COM on Windows, Apple Events on
+macOS) — will happily attach to whatever Excel instance is already running on the machine,
+rather than always spawning an isolated instance of its own. On a machine where more than one
+automation run (or a real user's own Excel session) can be active at the same time, this is
+dangerous: a run that isn't careful about this can end up operating on, or worse closing, a
+workbook or process that belongs to something else entirely.
 
-**Decision: every run that needs a COM session creates its own dedicated Excel App instance,
-and only ever tracks and acts on instances it created itself.**
+**Decision: every run that needs a live Excel session creates its own dedicated Excel App
+instance, and only ever tracks and acts on instances it created itself.** Built as
+`OwnedInstanceRegistry`, Specification.md §3.1.
 
-- On first promotion to COM (§6.1), the runner spawns a new `xw.App` explicitly — never an
+- On first promotion to xlwings (§6.1), the runner spawns a new `xw.App` explicitly — never an
   unqualified lookup (`xw.apps.active`, or a bare `xw.Book("name.xlsx")` that could bind to any
   already-open workbook of that name anywhere on the system) that might attach to an instance
   it doesn't own — and records that instance's process ID against the run.
@@ -158,8 +165,8 @@ and only ever tracks and acts on instances it created itself.**
 - Explicit `open`/`save`/`close` actions remain available for manual control (e.g. save
   mid-run, close early to release a lock) but are optional.
 - **Crash safety is a hard requirement, not a nice-to-have.** The runner must guarantee that
-  every workbook it has opened — file-backend or COM — is properly closed and every COM
-  process/file lock released, even when a step raises, the process is interrupted, or an
+  every workbook it has opened — file-backend or xlwings-backed — is properly closed and every
+  Excel process/file lock released, even when a step raises, the process is interrupted, or an
   unhandled exception occurs mid-run. Mechanism: the run's session lifecycle is wrapped in a
   `try`/`finally` (or equivalent context-manager) at the top level so cleanup always executes
   regardless of how the run ends. The "does a crash save partial progress or not" question is
@@ -179,7 +186,7 @@ something to carefully engineer step by step:
 - **What gets copied**: only workbooks the static pre-pass (§6.3) determines will be written to
   — a pure-source workbook that's never a `target` doesn't need a scratch copy, it can be
   opened read-only in place.
-- **COM-backed steps operate on the scratch copy too**, for the same reason — this also
+- **xlwings-backed steps operate on the scratch copy too**, for the same reason — this also
   protects the real file from an orphaned/crashed Excel session, not just from a Python
   exception.
 - **Commit is atomic per workbook**: write the finished scratch copy to a temp path next to the
@@ -207,7 +214,7 @@ something to carefully engineer step by step:
 
 Cost to be honest about: extra I/O for the copy-out/commit-back, and scratch-directory
 management (naming, collision-avoidance if two runs target the same workbook concurrently —
-open question, not addressed yet). Likely negligible next to Excel/COM overhead itself, but
+open question, not addressed yet). Likely negligible next to Excel/xlwings overhead itself, but
 worth flagging if a very large workbook makes the copy step itself slow.
 
 ### 6.4 No per-action "step reference" field
@@ -231,7 +238,7 @@ steps.
 4. **Formulas need no dedicated action.** Any action that writes a cell value accepts a string;
    if it starts with `=`, openpyxl stores it as a formula automatically. Caveat to document
    prominently: openpyxl cannot evaluate formulas — reading a freshly-written formula back
-   returns `None`/stale cached value until a COM `recalculate` step runs.
+   returns `None`/stale cached value until a live-Excel `recalculate` step runs.
 
 ### 6.6 Runtime parameterization
 
@@ -256,7 +263,8 @@ happened during a failed run, alongside the scratch copies from §6.3.1.
 Every error a user (or an agent) sees needs a plain-English message explaining what went wrong
 and what to do about it, with the raw technical detail (exception type, message, traceback)
 attached separately — never as the primary message. This applies to every error surface,
-including runtime failures against real Excel/COM (an openpyxl exception, a COM error) — those
+including runtime failures against real Excel via xlwings (an openpyxl exception, an xlwings
+error) — those
 get translated the same way, with the technical original preserved as a secondary field in the
 audit record (§6.7), not shown as the headline. See §9.1 for the bar validation errors need to
 hit; runtime errors are held to the same standard.
@@ -308,13 +316,13 @@ Three things that apply to every row below, not repeated per-row:
 
 | Action | Backend | Parameters | Notes |
 |---|---|---|---|
-| `open` | file/COM (whichever the workbook needs) | workbook, update_links (optional), mode: read_only\|read_write (optional override) | Optional — see §6.3 implicit open. Implicit path always uses the inferred mode; explicit `open` may override it. |
-| `save` | file/COM | workbook | Optional — see §6.3 implicit save. |
-| `close` | file/COM | workbook | Optional — see §6.3 implicit close. A forgotten close is still handled automatically. |
+| `open` | file/xlw (whichever the workbook needs) | workbook, update_links (optional), mode: read_only\|read_write (optional override) | Optional — see §6.3 implicit open. Implicit path always uses the inferred mode; explicit `open` may override it. |
+| `save` | file/xlw | workbook | Optional — see §6.3 implicit save. |
+| `close` | file/xlw | workbook | Optional — see §6.3 implicit close. A forgotten close is still handled automatically. |
 | `stop` | none — control flow only, no workbook | reason (optional string) | Halts the run before any later step runs — see §6.9. Not tied to any workbook; `workbook:` isn't a field on this action. |
 | `copy` | file | source: {workbook, sheet, range}, target: {workbook, sheet, range} | `range` optional on `source` — omit for the whole sheet. |
 | `read_range` | file | workbook, sheet (string, or a list for multi-sheet, or `all`), range, as: values\|formulas (optional) | Multi-sheet: an explicit list (`["North", "South"]`) is the real mechanism; `all` is authoring sugar that expands to the full sheet list before execution — one code path underneath either way. |
-| `read_metadata` | file (properties/cells) or COM (textboxes) | workbook, target: properties\|textboxes\|cells, sheet (required if target=cells — clarification found during implementation, missing from the original catalog), cells (list, if target=cells) | Two distinct things live behind one action: (a) workbook/document properties (author, title, custom doc properties — file-backend), (b) the current value of an embedded ActiveX/form control (COM-only — openpyxl can't see live control state). Capability depends on `target:`, not fixed per-action (§6.1 exception). |
+| `read_metadata` | file (properties/cells) or xlw (textboxes) | workbook, target: properties\|textboxes\|cells, sheet (required if target=cells — clarification found during implementation, missing from the original catalog), cells (list, if target=cells) | Two distinct things live behind one action: (a) workbook/document properties (author, title, custom doc properties — file-backend), (b) the current value of an embedded ActiveX/form control (needs a live Excel session — openpyxl can't see live control state). Capability depends on `target:`, not fixed per-action (§6.1 exception). |
 | `write_cell` | file | workbook, sheet, cell, value | Single-cell write. `value` can be a literal or a step-output reference (§10), resolved by the templating engine — no special encoding needed. |
 | `write_range` | file | workbook, sheet, range, values (2D list) | Writes a computed block of values in one shot — the gap between single-cell `write_cell` and row/table-oriented `write_row`/`write_table`. |
 | `write_row` | file | workbook, sheet, row, values: {column: value, ...} — or values_by_header + headers_from — or start_column + positional values | Three modes: explicit column-letter mapping (base form), by-header-name (using a prior `find_columns` step's output), and positional (an ordered list from a start column, no mapping at all). All three in v1. |
@@ -328,11 +336,11 @@ Three things that apply to every row below, not repeated per-row:
 | `aggregate` — **flagged for discussion when we get to it, not resolved now** | file (pandas, in-memory) | source (step ref), group_by, value_column, operation: count\|sum\|avg | No workbook access — pure in-memory aggregation of a prior step's data. |
 | `update_summary_table` — **kept as a dedicated action; exact parameters deliberately deferred, not a phase-1 design task** | file | *(not designed yet)* | Conceptually composes `find_headers_row` + `find_row` + `find_columns` + `aggregate` + `write_row` — see §11 item 19 for a worked composed-vs-wrapper comparison kept for reference. |
 | `read_links` | file — **status downgraded, see below** | workbook | Reads current external-link target paths. |
-| `write_links` | COM | workbook, links: {link_id or old_path: new_path} | Rewrites external-link target paths. COM-backed (`ChangeLink`/`LinkSources`) rather than file-backend — openpyxl's write support for external links isn't confirmed reliable enough to depend on. Enables the move-rewrite-refresh-restore scenario in §11 item 18. |
-| `refresh_links` | COM | workbook | Forces Excel to actually re-pull values through the links — distinct from just changing where they point (`read_links`/`write_links` above). |
-| `recalculate` | COM | workbook, mode: normal\|full\|full_rebuild (optional, default normal) | `mode: normal` uses xlwings' portable `app.calculate()` (works on Mac and Windows). `full`/`full_rebuild` require the raw COM object (`app.api.CalculateFull()`/`CalculateFullRebuild()`) — **Windows-only**; requesting either on Mac raises a clear unsupported-platform error, never a silent downgrade. |
-| `run_macro` | COM | workbook, macro_name, args (optional list) | |
-| `export_pdf` — **backlog, not scheduled for a phase yet** | COM | workbook, sheet or range, output_path | |
+| `write_links` | com (raw COM object) | workbook, links: {link_id or old_path: new_path} | Rewrites external-link target paths via `ChangeLink`/`LinkSources` — real Excel object-model methods, not part of xlwings' own portable API, hence the raw-COM tier rather than file-backend or xlw. openpyxl's write support for external links isn't confirmed reliable enough to depend on. Enables the move-rewrite-refresh-restore scenario in §11 item 18. |
+| `refresh_links` | xlw (tier to confirm when built) | workbook | Forces Excel to actually re-pull values through the links — distinct from just changing where they point (`read_links`/`write_links` above). |
+| `recalculate` | xlw or com, depending on `mode` | workbook, mode: normal\|full\|full_rebuild (optional, default normal) | `mode: normal` uses xlwings' portable `app.calculate()` (works on Mac and Windows) — xlw tier. `full`/`full_rebuild` require the raw COM object (`app.api.CalculateFull()`/`CalculateFullRebuild()`) — com tier, **Windows-only**; requesting either on Mac raises a clear unsupported-platform error, never a silent downgrade. |
+| `run_macro` | xlw | workbook, macro_name, args (optional list) | xlwings has a portable macro-invocation API (`app.macro(name)(...)`), works on both platforms — not a raw-COM case. |
+| `export_pdf` — **backlog, not scheduled for a phase yet** | xlw (tier to confirm when built) | workbook, sheet or range, output_path | |
 
 ## 8. v1 vs. later phases
 
@@ -343,8 +351,9 @@ Updated against actual build progress (Specification.md §8/§4 track this in de
   (base column-mapping + positional modes), insert_range (whole-row/whole-column only —
   partial-range returns a structured error, not built), set_column_width, find_headers_row,
   find_row, find_column, find_columns.
-- **v1, but COM-required rather than file-backend**: read_metadata (textbox-control sub-case
-  only — openpyxl can't see live control state). Not built yet — COM phase.
+- **v1, but needs a live Excel session rather than file-backend**: read_metadata (textbox-control
+  sub-case only — openpyxl can't see live control state). Not built yet — live-Excel phase
+  (Specification.md §8 build order item 10).
 - **Deferred — needs cross-step data access `runner.py` doesn't provide yet**: `write_table`
   (its `source: [step_ids]` param means "look up these steps' outputs", not a literal value),
   `write_row`'s by-header mode (`headers_from` is the same kind of step-id reference),
@@ -353,7 +362,7 @@ Updated against actual build progress (Specification.md §8/§4 track this in de
   threads accumulated step-output context through to action calls.
 - **Deferred — empirically confirmed openpyxl limitation, see §7's `read_links` note**:
   `read_links`, alongside the already-deferred `write_links`.
-- **Later phase (COM promotion)**: recalculate, run_macro, refresh_links, write_links.
+- **Later phase (xlwings/live-Excel promotion)**: recalculate, run_macro, refresh_links, write_links.
 - **Kept, syntax deferred (not phase-1 design work)**: update_summary_table.
 - **Backlog**: export_pdf.
 
@@ -521,7 +530,7 @@ never sometimes-bare/sometimes-not. Keys are either fixed (known at design time)
 | `find_columns` | `{ <logical name from patterns:>: <column letter>, ... }` (dynamic keys, fixed by the step's own `patterns:` input) |
 | `aggregate` | `{ <group value found in the data>: <aggregated value>, ... }` (fully dynamic keys — e.g. `.output.North` only makes sense if "North" is an actual value that appeared in the `group_by` column) |
 | `read_links` | `{ <link identifier>: <current target path>, ... }` (dynamic keys) |
-| `run_macro` | whatever the macro returns, if anything — shape TBD, COM detail for spec phase |
+| `run_macro` | whatever the macro returns, if anything — shape TBD, xlwings detail for spec phase |
 | `open`/`save`/`close`/`copy`/`write_cell`/`write_range`/`write_row`/`write_table`/`insert_range`/`set_column_width`/`refresh_links`/`recalculate` | no meaningful `.output` — use `.status`/`.error` in `if:` conditions instead |
 
 ## 11. Action examples — full capability reference
@@ -928,7 +937,7 @@ Still open:
   pivot tables — not verified either way yet, and out of scope to chase down unless/until a
   workflow actually needs to touch one (see the pivot-table note below).
 - **"Replay nice" mode (backlog idea, not committed)** — a desktop-comfort feature for users who
-  see other Excel-MCP-style tools drive Excel live via COM and associate that visible activity
+  see other Excel-MCP-style tools drive Excel live and associate that visible activity
   with trustworthiness, even though (§6.1) that's not how this engine works and isn't going to
   be (raised 2026-08-19). Rejected approach: giving file-backend actions an alternate xlwings
   implementation — that inverts §6.1's "backend is never a user choice" decision and fights the
@@ -940,7 +949,7 @@ Still open:
   only the happy path (a `stop` step's reason, PRD §6.9, is a good moment to show the safety net
   actually working). This consumes an already-finished `RunResult` and only re-displays
   already-computed values — it never becomes a second execution path, needs no crash-safety
-  design of its own, and doesn't touch `run_workflow`'s contract. Desktop/COM-only by nature,
+  design of its own, and doesn't touch `run_workflow`'s contract. Desktop/live-Excel-only by nature,
   strictly opt-in, never part of an automated pipeline. A related but explicitly separate idea —
   pivot tables, charts, or other new *capabilities* some Excel-MCP tools offer — is a different
   axis (more actions, not better visibility into existing ones) and is explicitly **not** part
@@ -983,8 +992,8 @@ anything is still pending:
   moving between environments, manual zip/move/unzip/clone of folders is acceptable for now.
 - ~~Packaging/distribution~~ — not building a distribution mechanism yet; out of scope until
   the engine itself is proven.
-- ~~COM backend testing strategy across platforms~~ — **resolved**: test what's testable on
-  macOS now, finish COM-path integration testing on Windows later. Accepted as the plan (§4).
+- ~~xlwings backend testing strategy across platforms~~ — **resolved**: test what's testable on
+  macOS now, finish xlwings-path integration testing on Windows later. Accepted as the plan (§4).
 - ~~Whether the engine needs to be importable as a plain Python library~~ — **resolved: yes**,
   a v1 architectural requirement (§3, §9). Follow-up requirement this creates: a deliberately
   curated public API surface (e.g. an `api.py` with the stable importable symbols), separate

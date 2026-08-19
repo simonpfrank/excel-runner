@@ -47,7 +47,7 @@ class ActionSpec:
 
     name: str
     fn: Callable[..., ActionResult]
-    capability: Literal["file", "com", "depends_on_param", "none"]
+    capability: Literal["file", "xlw", "com", "depends_on_param", "none"]
     description: str
     param_schema: dict[str, Any]
 
