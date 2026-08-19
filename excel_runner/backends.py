@@ -351,6 +351,44 @@ def read_cells(workbook: Workbook, sheet: str, cells: list[str]) -> dict[str, An
     return {cell: worksheet[cell].value for cell in cells}
 
 
+def xlw_open_workbook(app: xw.App, path: str, mode: Literal["read_only", "read_write"]) -> xw.Book:
+    """Open an existing workbook in a live Excel App instance.
+
+    Args:
+        app: The App instance to open the workbook in — from `OwnedInstanceRegistry.spawn()`,
+            never an unqualified `xw.Book(path)` that could attach to an instance not owned by
+            this run (PRD sec 6.2.1).
+        path: Path to an existing workbook file.
+        mode: "read_only" opens without allowing writes; "read_write" allows them.
+
+    Returns:
+        The opened xlwings Book.
+
+    Raises:
+        FileNotFoundError: If path does not exist — xlwings itself raises this before any
+            Apple Event/COM call is made, same contract as `open_workbook`.
+    """
+    return app.books.open(path, read_only=(mode == "read_only"))
+
+
+def xlw_close_workbook(book: xw.Book) -> None:
+    """Close a workbook, without quitting the App instance it belongs to.
+
+    Args:
+        book: The workbook to close.
+    """
+    book.close()
+
+
+def xlw_save_workbook(book: xw.Book) -> None:
+    """Save a workbook in place, to whatever path it was opened/created at.
+
+    Args:
+        book: The workbook to save.
+    """
+    book.save()
+
+
 # --- xlwings — owned-instance tracking (PRD sec 6.2.1, Spec sec 3.1) ----------------------
 
 

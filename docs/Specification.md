@@ -751,12 +751,16 @@ time within it.
    status, and the runner loop's early-exit handling. Pure logic, no I/O — fits before the
    platform-dependent phases below, same rationale as the rest of this build order. **Done.**
 10. **xlwings / live-Excel phase**: `backends.py`'s `OwnedInstanceRegistry` (§3.1) — **done**,
-    tested for real on macOS (Excel is installed here) — plus the remaining `xlw_`/`com_`-tier
-    backend primitives and the live-Excel actions in `actions.py` (`recalculate`, `run_macro`,
+    tested for real on macOS (Excel is installed here). `xlw_open_workbook`, `xlw_close_workbook`,
+    `xlw_save_workbook` — **done**, tested for real (open/close) or gated behind
+    `requires_working_xlwings_save` (save — `tests/unit/conftest.py`, since `save()` is confirmed
+    broken via xlwings on this Mac's Excel build, §3.1's note; real write-path verification needs
+    the Windows environment, PRD §4/§12). `backends.py` sits at 99% branch coverage as a result —
+    the one uncovered line is `xlw_save_workbook`'s `book.save()` call, only exercised on
+    Windows; not forced to 100% with a `# pragma: no cover` since the line genuinely is
+    reachable, just not on this test runner — expected to close once tested on Windows, not a
+    permanent gap. Remaining live-Excel actions in `actions.py` (`recalculate`, `run_macro`,
     `refresh_links`, `write_links`, `read_metadata`'s textbox sub-case) — **not yet built**.
-    `save()` is confirmed broken via xlwings on this Mac's Excel build (§3.1's note) — real
-    write-path testing needs the Windows environment (PRD §4/§12), open/read-only paths can
-    continue on macOS meanwhile.
 11. **Deferred/flagged, per PRD**: `update_summary_table`'s real parameters, the `aggregate`
     discussion, `export_pdf`, the AI-authoring inspection actions (PRD §9: `list_sheets`,
     `describe_sheet`).

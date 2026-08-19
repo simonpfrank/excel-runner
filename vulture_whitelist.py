@@ -78,3 +78,6 @@ backends.OwnedInstanceRegistry
 backends.OwnedInstanceRegistry.pids
 backends.OwnedInstanceRegistry.spawn
 backends.OwnedInstanceRegistry.close_owned
+backends.xlw_open_workbook
+backends.xlw_close_workbook
+backends.xlw_save_workbook

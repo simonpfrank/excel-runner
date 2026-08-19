@@ -115,13 +115,24 @@ raw-COM case specifically, with a new `xlw_action` covering what it used to mean
 `WorkbookSession.backend` is `Literal["file", "xlw"]`. `promote_to_xlw` (was `promote_to_com`)
 renamed to match. All gates re-verified green after the rename (254/254 tests).
 
-**Next step:** Continue item 10 — `backends.py`'s remaining live-Excel backend primitives (which
-tier each one lands in isn't fully decided until built — most will be `xlw_`; only a genuine
-raw-COM need, like `recalculate`'s full/full_rebuild modes, gets `com_`) and the corresponding
-actions in `actions.py`, TDD as usual — real tests for what's provably reliable on macOS
-(open/read/write), `requires_excel`-gated per `tests/unit/conftest.py`, with anything routing
-through `save()` (or found to share its limitation) using
-`@pytest.mark.skipif` for "needs Windows" rather than a mock.
+**`xlw_open_workbook`/`xlw_close_workbook`/`xlw_save_workbook` built** (backends.py), mirroring
+the file-backend's original open/save/close first slice. Tested for real: open (existing file +
+`FileNotFoundError` on a missing one) and close both verified working reliably on macOS;
+save gated behind a new `requires_working_xlwings_save` marker (`tests/unit/conftest.py`,
+Windows-only for now) since it's confirmed broken here — ruled out the "in-place vs. save-as"
+distinction as the cause along the way (tested both explicitly; both fail identically). 257
+tests passing, 1 skipped (the gated save test), `backends.py` at 99% branch coverage (the one
+gap is exactly that skipped line, expected to close on Windows). All other gates clean.
+**User asked to pause spawning real Excel processes for now** (permission-dialog fatigue) — no
+more live-Excel test runs until told otherwise; anything needing real Excel verification should
+wait.
+
+**Next step:** Continue item 10 — the remaining live-Excel backend primitives (which tier each
+one lands in isn't fully decided until built — most will be `xlw_`; only a genuine raw-COM need,
+like `recalculate`'s full/full_rebuild modes, gets `com_`) and the corresponding actions in
+`actions.py`. Given the pause above, prefer non-Excel-spawning work first (design, docs, code
+that can be written and statically checked without running it) until the user says it's fine to
+resume live tests.
 **Notes:** `aggregate` and `update_summary_table`'s exact parameters are still explicitly
 flagged as open in the PRD — don't block on them. Five things parked in PRD §12, none designed
 or scheduled: grouped `if:` blocks; a "replay nice" desktop-comfort mode (visible Excel replay
