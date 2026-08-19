@@ -2,8 +2,8 @@
 
 ## Last Session (2026-08-19)
 **Status:** In Progress
-**Working on:** Build order items 1–4 (Spec §8) all done (item 4 for what's cleanly buildable
-now — see below). Git repo initialized, four commits on `main`.
+**Working on:** Build order items 1–5 (Spec §8) all done (items 4 and 5 for what's cleanly
+buildable now — see below). Git repo initialized, five commits on `main`.
 
 Item 2 surfaced a real design bug: PRD §10.1/Spec §2.2 originally said "render the whole YAML
 file as one Jinja2 text pass, then parse it" — can't work for `{{ steps.* }}` (no step has run
@@ -38,11 +38,30 @@ raised exception for a genuine authoring mistake — Spec §4) and surfaced real
 - `read_metadata`'s `cells` sub-case needed a `sheet` param the original PRD §7 catalog didn't
   list.
 
-All quality gates pass: 152/152 tests, ruff clean, mypy --strict clean (`excel_runner` +
+Item 5 (`SessionManager` + `ScratchManager`, Spec §5.2/§5.3) built both, with `promote_to_com`
+deliberately left out (no COM backend yet, item 9 — not a stub, simply not present). Key
+decisions, all recorded in Spec §5.2:
+- Session mode (read-only vs. read-write) is caller-specified for now, not statically inferred
+  — that's tier-2 validation's job (item 6), which comes after this in the build order.
+  `get_or_open(mode=...)` is the seam it'll feed into; `mode="read_write"` today is exactly the
+  "will be written to" condition PRD §6.3.1 stages against, whoever decides it.
+- `close_all()` aggregates per-session close failures via `ExceptionGroup` rather than stopping
+  at the first one — every session still gets a close attempt (PRD §6.3's crash-safety
+  requirement), every failure still surfaces afterward. Explicitly not the "defensive fallback"
+  anti-pattern PRD §1 warns against — that's about inventing behavior for bad input, not about
+  guaranteeing cleanup runs and reports what broke.
+- **Coverage caught a real bug**: read-only + `create_if_missing` (unusual but not forbidden)
+  failed because the workbook-creation helper never ensured its target's parent directory
+  existed — the read-write path got that for free from `ScratchManager.stage()`'s own `mkdir`,
+  the read-only path didn't. Found by chasing an untested branch down, not by inspection. Fixed
+  with a regression test.
+
+All quality gates pass: 176/176 tests, ruff clean, mypy --strict clean (`excel_runner` +
 `tests`), radon cc clean, vulture clean, **100% branch coverage** across all 4 modules.
-**Next step:** Build order item 5 (Spec §8) — `engine.py`'s `SessionManager` (multi-workbook
-lifecycle: lazy-open, promotion, close-all) and `ScratchManager` (scratch-copy execution model,
-PRD §6.3.1). The `WorkbookSession` data shape is already built; `SessionManager` itself isn't.
+**Next step:** Build order item 6 (Spec §8) — both validation tiers in `engine.py` §5.4: tier-1
+static schema validation (the PRD §9.1-style specific error messages) and tier-2 dry-run
+(step-graph checks, and the read/write-mode inference that item 5's `get_or_open` is waiting
+on).
 **Notes:** `aggregate` and `update_summary_table`'s exact parameters are still explicitly
 flagged as open in the PRD — don't block on them. Tracker below stays function/class-granular
 even though source files are consolidated — see Spec §7.
@@ -97,8 +116,9 @@ even though source files are consolidated — see Spec §7.
 
 | Component | Unit Tests | Code | Integration Tests | Unit Results | Integration Results |
 |---|---|---|---|---|---|
-| `WorkbookSession` / `SessionManager` — `engine.py` §5.2 | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `ScratchManager` — `engine.py` §5.3 | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `SessionManager` — `engine.py` §5.2 (`promote_to_com` excluded — needs item 9) | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `ScratchManager` — `engine.py` §5.3 | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `backends.create_workbook` (supports `create_if_missing`) | ✅ | ✅ | ❌ | ✅ | ❌ |
 
 ## Phase 5 — Validation (Spec §5.4)
 

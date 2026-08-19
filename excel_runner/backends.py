@@ -7,6 +7,7 @@ sides unambiguous within one file once both exist.
 """
 
 import re
+import shutil
 from typing import Any, Literal
 
 import openpyxl
@@ -37,6 +38,19 @@ def open_workbook(path: str, mode: Literal["read_only", "read_write"]) -> Workbo
         FileNotFoundError: If path does not exist.
     """
     return openpyxl.load_workbook(path, read_only=(mode == "read_only"))
+
+
+def create_workbook(path: str, template_path: str | None = None) -> None:
+    """Create a new workbook file — blank, or copied from a template.
+
+    Args:
+        path: Where to create the new workbook.
+        template_path: If given, copy this existing workbook's content instead of a blank one.
+    """
+    if template_path is not None:
+        shutil.copy2(template_path, path)
+    else:
+        openpyxl.Workbook().save(path)
 
 
 def save_workbook(workbook: Workbook, path: str) -> None:

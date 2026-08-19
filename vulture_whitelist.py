@@ -60,3 +60,7 @@ backends.open_workbook
 
 engine.ActionSpec.param_schema
 engine.discover_actions
+engine.ScratchManager.cleanup
+engine.SessionManager
+engine.SessionManager.get_or_open
+engine.SessionManager.close_all

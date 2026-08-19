@@ -303,59 +303,96 @@ with an entry in `core.py`'s `ACTION_CAPABILITIES` dict (populated by the `@file
 `param_schema` is derived from the function's signature, skipping `session` and marking any
 parameter with no default as required.
 
-### 5.2 Session management — **`WorkbookSession` data shape built; `SessionManager` not yet**
+### 5.2 Session management — **built** (except `promote_to_com`, see below)
 
 ```python
 @dataclass
-class WorkbookSession:      # actually lives in core.py — see §4's correction
+class WorkbookSession:      # lives in core.py — see §4's correction
     name: str
     backend: Literal["file", "com"]
     handle: Any                      # openpyxl Workbook | xlwings Book
     path: str                        # added during implementation — see below
     mode: Literal["read_only", "read_write"]
-    scratch_path: Path | None = None # None until the scratch-copy model (§5.3) is built
+    scratch_path: Path | None = None
     dirty: bool = False
 
-class SessionManager:               # not built yet
-    def get_or_open(self, name: str) -> WorkbookSession: ...
-    def promote_to_com(self, name: str) -> WorkbookSession: ...   # file -> com, mid-run
-    def commit_all(self) -> None: ...     # delegates to the scratch-copy manager, §5.3
+class SessionManager:
+    def get_or_open(self, name: str, mode: Literal["read_only","read_write"] = "read_write") -> WorkbookSession: ...
+    def commit_all(self) -> None: ...     # delegates to ScratchManager, §5.3
     def close_all(self) -> None: ...      # always runs — see runner.py's try/finally, §6.1
+    # promote_to_com(name) is NOT built — needs the COM backend, which doesn't exist until
+    # the later COM phase (§8 item 9). No stub for it; it's simply absent until then.
 ```
 
 **`path: str` was missing from the original sketch and had to be added** — `save` needs to know
 *where* to save to, and there's no way to derive that without the session carrying its own
 current path. It's `path`, not reused-as-`scratch_path`, because `scratch_path` specifically
-means "None until scratch-copy staging exists" (§5.3) — `path` is always concrete: the real file
-path today, and wherever `scratch_path` points once §5.3 lands and starts routing writes there
-instead.
+means "was this session staged" — `path` is always concrete: the scratch path for a staged
+(read-write) session, the real path for a read-only one.
 
-`SessionManager` — the actual multi-workbook lifecycle tracker (lazy-open, promotion, close-all)
-— isn't built yet; that's what makes actions.py's five built actions take a `WorkbookSession`
-directly rather than a `SessionManager`. Once built, `SessionManager` is still the only thing
-that calls into `backends.py` (§3) for the *lifecycle* operations (open/promote/close) — but per
-§4's correction, actions call `backends.py` directly for their own per-action operations
-(read/write/etc.), not through a session indirection.
+**Mode is caller-specified, not statically inferred — this is deliberate for now, not a
+shortcut.** PRD §6.3's "infer read-only vs. read-write from whether a workbook is ever a
+target" is tier-2 validation's job (§5.4), which comes *after* session management in the build
+order. Rather than block session management on validation existing, `get_or_open`'s `mode`
+param is the seam that inference will feed into later — `mode="read_write"` today just means
+"the caller is telling me this workbook will be written to," which is exactly the condition
+PRD §6.3.1 stages against, whether a human or a validation pass decided it.
 
-### 5.3 Scratch-copy execution model
+**`create_if_missing`/`template` resolution lives in `SessionManager._create()`**, called from
+both the read-write and read-only open paths when the target file doesn't exist yet. `template`
+is a *logical name* (another entry in the `workbooks:` registry), resolved to that entry's
+`file` path before delegating to `backends.create_workbook()`.
 
-Implements PRD §6.3.1 directly:
+**A real bug, caught by a coverage gap, not by intuition**: the read-only-plus-`create_if_missing`
+combination (unusual — why read something you just created blank? — but not forbidden) failed
+because `_create()` never ensured its target's parent directory existed. The read-write path
+got this for free from `ScratchManager.stage()`'s own `mkdir`; the read-only path didn't have
+an equivalent. Found by chasing a coverage report down to an untested branch, not by reasoning
+about it up front — exactly the kind of thing "90%+ branch coverage" is supposed to catch.
+
+**Error type choice**: unknown workbook name, and missing file without `create_if_missing`,
+both raise `ActionExecutionError` (not `ValidationError`) — both only surface once
+`SessionManager` actually tries to touch the filesystem, which happens during a run, not during
+static (tier-1) validation. Once tier-2 validation (§5.4) exists, the *unknown name* case should
+be caught earlier as a `ValidationError` before any workbook is touched at all — this exception
+is the fallback for whatever tier-2 doesn't catch, not the primary catch of that particular
+mistake.
+
+**`close_all()` aggregates failures via `ExceptionGroup` rather than stopping at the first
+one** — every session gets a close attempt regardless of whether an earlier one failed (PRD
+§6.3's crash-safety requirement), but every failure is still surfaced afterward, not silently
+swallowed. This is a deliberate exception to "avoid defensive fallback layers" (PRD §1): the
+distinction is inventing fallback *behavior* for bad input (the anti-pattern) vs. guaranteeing
+cleanup still runs and still reports what went wrong (the actual requirement).
+
+### 5.3 Scratch-copy execution model — **built**
+
+Implements PRD §6.3.1:
 
 ```python
 class ScratchManager:
-    def stage(self, workbook_refs: Iterable[WorkbookRef]) -> dict[str, Path]: ...
-       # copies only workbooks the dry-run pass (§5.4) marked read-write;
-       # read-only sources are opened in place, never staged
-    def commit(self, name: str, scratch_path: Path, real_path: Path) -> None: ...
-       # temp-path-then-os.replace, per workbook, atomic
-    def commit_all(self) -> None: ...
+    def stage(self, name: str, real_path: Path) -> Path: ...
+       # copies real_path into the scratch dir if it exists; if not (create_if_missing case),
+       # just reserves the scratch path for the caller to create the workbook at directly
+    def commit(self, name: str) -> None: ...
+       # temp-path-then-Path.replace, atomic
+    def commit_all(self) -> None: ...     # marks the run fully committed, for cleanup()
     def cleanup(self, keep_on_failure: bool = True) -> None: ...
+       # keep_on_failure=True (default): only deletes the scratch dir if commit_all()
+       # succeeded. False forces deletion regardless — the explicit choice on the success path.
 ```
 
-`SessionManager.commit_all()`/`close_all()` delegate here rather than duplicating the
-atomic-write logic. `ScratchManager` has no knowledge of openpyxl/xlwings — it operates on
-plain file paths, so both backends stage/commit through the same code path (PRD §6.3.1's "COM
-steps operate on the scratch copy too").
+`SessionManager.commit_all()` saves every *staged* session's in-memory state to its scratch
+path first, then delegates to `ScratchManager.commit_all()` to move each scratch file back to
+its real path — read-only sessions (never staged) aren't touched by either step.
+`ScratchManager` has no knowledge of openpyxl/xlwings — it operates on plain file paths, so
+both backends will stage/commit through the same code path once the COM backend exists (PRD
+§6.3.1's "COM steps operate on the scratch copy too").
+
+Which workbooks *get* staged is decided by `SessionManager` (staged iff opened
+`mode="read_write"`, per §5.2's note above), not by `ScratchManager` reading an `ExecutionPlan`
+from validation — that handoff is still §5.4's to build, `ScratchManager` itself doesn't know
+or care where the staging decision came from.
 
 ### 5.4 Validation — two tiers
 
@@ -486,9 +523,12 @@ time within it.
    `read_metadata`'s file sub-case. `write_table`, `aggregate`, `write_row`'s by-header mode,
    and `read_links` deferred with concrete reasons — see §4's "Deferred, with reasons found
    during implementation."
-5. `engine.py` §5.2/§5.3 — the `SessionManager` class (multi-workbook lifecycle: lazy-open,
-   promotion, close-all — the `WorkbookSession` data shape itself is already built, §5.2) and
-   scratch-copy layer, now that there are real actions to run through it.
+5. `engine.py` §5.2/§5.3 — `SessionManager` (lazy-open, `create_if_missing`/`template`,
+   close-all) and `ScratchManager` (scratch-copy staging/atomic commit). **Done**, except
+   `promote_to_com` (needs the COM backend, item 9) and mode inference (needs §5.4, item 6) —
+   mode is caller-specified for now, the seam validation will feed into later. See §5.2's notes
+   for the real bug this surfaced (missing parent-directory creation on one code path) and the
+   `ExceptionGroup`-based crash-safety design in `close_all()`.
 6. `engine.py` §5.4 — both validation tiers.
 7. `runner.py` §6.1/§6.2 — first end-to-end real run of a multi-step file-backend workflow.
 8. `runner.py` §6.3 — the public surface, once there's a working engine underneath it to expose.
