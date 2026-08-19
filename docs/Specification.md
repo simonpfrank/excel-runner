@@ -345,11 +345,24 @@ class WorkbookSession:      # lives in core.py — see §4's correction
 
 class SessionManager:
     def get_or_open(self, name: str, mode: Literal["read_only","read_write"] = "read_write") -> WorkbookSession: ...
-    def commit_all(self) -> None: ...     # delegates to ScratchManager, §5.3
+    def checkpoint(self) -> None: ...     # save every dirty staged session's scratch file
+    def commit_all(self) -> None: ...     # save-all (via checkpoint's helper) + ScratchManager commit, §5.3
     def close_all(self) -> None: ...      # always runs — see runner.py's try/finally, §6.1
     # promote_to_com(name) is NOT built — needs the COM backend, which doesn't exist until
     # the later COM phase (§8 item 9). No stub for it; it's simply absent until then.
 ```
+
+**`checkpoint()` was added after the fact, found via a failing crash-safety integration test,
+not designed up front.** openpyxl writes stay in memory until an explicit save — nothing
+flushes them to the scratch file on disk mid-run on its own — so without this, a crash after
+several successful steps left the scratch copy no more informative than the untouched original:
+none of the in-progress work was actually on disk yet. `runner.py`'s step loop (§6.1) now calls
+`checkpoint()` after every step, not only at the very end, so the recovery artifact (PRD
+§6.3.1) genuinely contains everything that succeeded before a crash. Both `checkpoint()` and
+`commit_all()` share one private helper that saves every staged session where `dirty` is true
+and then clears the flag — `commit_all()` keeps its own save pass too even though per-step
+checkpointing usually makes it a no-op by the time a run reaches there, as the final safety net
+at the actual commit boundary, not removed just because it's often redundant.
 
 **`path: str` was missing from the original sketch and had to be added** — `save` needs to know
 *where* to save to, and there's no way to derive that without the session carrying its own
@@ -503,7 +516,9 @@ hit a line count — see AGENTS.md), wrapped in `try`/`finally` for the crash-sa
    calls `registry[step.action].fn(session=session, **remaining_kwargs)`; `copy` is dispatched
    separately (`_dispatch_copy`), resolving *both* `source.workbook` and `target.workbook` into
    two sessions, exactly the special-case wiring §4/§5.1 flagged as still owed. Every step gets
-   an audit record (§6.2) regardless of outcome.
+   an audit record (§6.2) regardless of outcome, and — added after a failing crash-safety test,
+   not part of the original design — every step also gets a `session_manager.checkpoint()` call
+   (§5.2), persisting whatever it just wrote to the scratch file before moving on.
 6. **An action returning `ActionResult(status="error")` does not stop the loop** — this was an
    open design question, resolved by what `if:` conditions are actually for: PRD's own
    `if: "{{ steps.refresh.status == 'success' }}"` example only makes sense if a failed step
@@ -584,12 +599,20 @@ here as one function.
   empty/unused unless a real need for a static fixture shows up. COM-backed actions/tests will
   be marked `@pytest.mark.skipif` on platform/Excel-availability (PRD §4's "test what's
   testable on macOS now, finish on Windows later") once any exist — none do yet.
-- **Still owed, not built in item 7**: a dedicated integration test that deliberately crashes a
-  run mid-step and asserts no orphaned Excel process, no file lock on the original workbook,
-  real files unmodified, scratch copies present — the concrete test for PRD §6.3/§6.3.1's
-  crash-safety requirement, not just the design note. `tests/integration/test_run_workflow.py`
-  does cover "a step returning an error result never gets committed," but not yet "the process
-  is interrupted mid-step" specifically.
+- **Crash-safety test — built, as a follow-up to item 7**: `TestCrashSafety` in
+  `tests/integration/test_run_workflow.py` deliberately triggers a raised exception mid-run
+  (`write_row`'s positional mode without `start_column` — a real, already-covered way to
+  produce one) and asserts: the real file is completely untouched; the scratch copy survives
+  and actually contains the prior step's write (not just whatever existed at staging time —
+  see §5.2/§6.1's `checkpoint()` correction, found by this very test failing on the first
+  attempt); the audit log survives too; and — the strongest cross-platform evidence that
+  sessions were genuinely closed — a second, valid run against the same real file afterward
+  just works. **"No orphaned Excel process" is explicitly not tested** — there's no COM
+  backend yet, so no Excel process is ever spawned by the current action set; that part of
+  PRD §6.3's requirement gets a real test once build order item 9 exists. Directly detecting
+  an OS-level file lock was deliberately not attempted either — meaningful mainly on Windows
+  (PRD §4), not reliably testable on macOS, so the "does a later run succeed" check stands in
+  for it as the behavior that actually matters.
 
 ## 8. Build order
 
@@ -632,7 +655,9 @@ time within it.
    resolution) and one real typing gap (§5.1's note: the capability decorators erasing every
    action's parameter types, switched to `ParamSpec`). First genuine
    `tests/integration/test_run_workflow.py` written — see §7's corrections to the original
-   testing-approach sketch. Still owed: the dedicated mid-run-crash integration test (§7).
+   testing-approach sketch. The dedicated mid-run-crash integration test (§7) is also **done**
+   — it found and fixed a real gap in the scratch-copy model itself (`SessionManager.checkpoint()`,
+   §5.2), not just a missing test.
 8. `runner.py` §6.3 — the public surface, once there's a working engine underneath it to expose.
 9. **Later phase (Windows-dependent COM work)**: `backends.py`'s COM-backend functions and
    `OwnedInstanceRegistry` (§3.1), and the COM actions in `actions.py` (`recalculate`,

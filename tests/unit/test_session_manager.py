@@ -176,6 +176,65 @@ class TestCloseAll:
         assert closed_b is True
 
 
+class TestCheckpoint:
+    """checkpoint() persists in-progress writes to the scratch file mid-run, so a later crash
+    leaves everything that succeeded so far visible in the recovery artifact (PRD sec 6.3.1) —
+    found necessary via a failing integration test: without this, the scratch file on disk
+    only ever reflected whatever was there at staging time, since openpyxl writes stay in
+    memory until an explicit save and nothing else triggers one mid-run."""
+
+    def test_checkpoint_saves_a_dirty_staged_session_to_its_scratch_file(self, tmp_path: Path) -> None:
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        session = manager.get_or_open("manip", mode="read_write")
+        session.handle["Sheet"]["A1"] = "in progress"
+        session.dirty = True
+
+        manager.checkpoint()
+
+        assert openpyxl.load_workbook(session.path)["Sheet"]["A1"].value == "in progress"
+
+    def test_checkpoint_does_not_touch_the_real_path(self, tmp_path: Path) -> None:
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        session = manager.get_or_open("manip", mode="read_write")
+        session.handle["Sheet"]["A1"] = "in progress"
+        session.dirty = True
+
+        manager.checkpoint()
+
+        assert openpyxl.load_workbook(real)["Sheet"]["A1"].value == "original"
+
+    def test_checkpoint_clears_the_dirty_flag(self, tmp_path: Path) -> None:
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        session = manager.get_or_open("manip", mode="read_write")
+        session.dirty = True
+
+        manager.checkpoint()
+
+        assert session.dirty is False
+
+    def test_checkpoint_skips_a_non_dirty_session(self, tmp_path: Path) -> None:
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager.get_or_open("manip", mode="read_write")
+
+        manager.checkpoint()  # should not raise
+
+    def test_checkpoint_skips_read_only_sessions(self, tmp_path: Path) -> None:
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager.get_or_open("manip", mode="read_only")
+
+        manager.checkpoint()  # should not raise
+
+
 class TestCommitAll:
     def test_saves_dirty_staged_sessions_and_commits_them_to_the_real_path(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")

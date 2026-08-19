@@ -190,6 +190,14 @@ something to carefully engineer step by step:
   real file was never in the loop until a full, successful commit. The scratch copies are left
   in place (not cleaned up) on failure, so they — plus the audit log (§6.7) — are the
   recovery/debugging artifact, which is safer than trying to reconstruct state from a log alone.
+  **Correction found via a crash-safety integration test: this requires periodic checkpointing,
+  not just "leave the scratch copy alone."** openpyxl writes stay in memory until an explicit
+  save — nothing writes them to the scratch file on disk mid-run on its own — so without an
+  explicit fix, a crash after several successful steps would leave a scratch copy no more
+  informative than the untouched original: none of the in-memory progress would actually be on
+  disk. Fixed by saving every dirty, staged workbook to its scratch file after *each* step
+  (Specification.md §5.2/§6.1), not only at the very end — so the recovery artifact actually
+  contains everything that succeeded before the crash, not just what existed at staging time.
 - **On success**, scratch copies are cleaned up by default after commit; keeping them (for
   inspection, or to visualize session state during development) should be an option, not the
   default.

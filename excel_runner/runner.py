@@ -194,6 +194,12 @@ def run_workflow(path: str | Path, env_overrides: dict[str, Any] | None = None) 
             audit.record_step(step, step_result, started_at, datetime.now())
             step_results.append(step_result)
             step_outputs[step.id] = {"status": step_result.status, "output": step_result.output}
+            # Persist this step's writes to the scratch file now, not just at the end — so a
+            # later step crashing still leaves everything that succeeded so far visible in the
+            # recovery artifact (PRD sec 6.3.1). Found necessary via a failing crash-safety
+            # integration test: without this, an in-memory-only write is invisible on disk
+            # until commit_all(), which never runs on a crash.
+            session_manager.checkpoint()
 
         if not any_failed:
             session_manager.commit_all()

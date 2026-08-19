@@ -2,8 +2,8 @@
 
 ## Last Session (2026-08-19)
 **Status:** In Progress
-**Working on:** Build order items 1–7 (Spec §8) all done (items 4/5/6 for what's cleanly
-buildable now). Git repo initialized, seven commits on `main`.
+**Working on:** Build order items 1–7 (Spec §8) all done, plus the crash-safety integration
+test the user asked to build before moving on. Git repo initialized, eight commits on `main`.
 
 **Items 1–6, summarized** (full detail in git log / Spec §2–§5 correction notes): data model +
 errors (1); loading/templating, found the whole-file "render then parse" plan couldn't work for
@@ -15,41 +15,43 @@ pending tier 2, coverage caught a missing-`mkdir` bug (5); both validation tiers
 §9.1's fourth example message isn't implementable without workbook access — corrected, not
 faked (6).
 
-**Item 7 (`runner.py` — orchestration + audit logging, Spec §6.1/§6.2)** — built, and this is
-where several things deferred since items 3–6 finally got resolved for real: `copy`'s
-two-session dispatch, the `workbook`-field-stripping translation, and (a genuine open design
-question until now) whether an action's `ActionResult(status="error")` halts the run — resolved
-by what `if:` is actually for: PRD's own `if: steps.x.status == 'success'` example only makes
-sense if a failed step *doesn't* abort the run before later steps can check it. So the loop
-continues past a failed step, but `RunResult.status` is `"error"` if any step failed, and
-nothing gets committed in that case — only a *raised* exception aborts the loop outright.
+**Item 7 (`runner.py` — orchestration + audit logging, Spec §6.1/§6.2)** — built. Resolved
+`copy`'s two-session dispatch and the `workbook`-field-stripping translation deferred since
+items 3–4, plus a genuine open design question: an action's `ActionResult(status="error")`
+does *not* stop the loop — resolved by what `if:` is actually for (PRD's own
+`if: steps.x.status == 'success'` example only makes sense if a failed step doesn't abort the
+run before later steps can check it). `RunResult.status` is `"error"` if any step failed, and
+that (not loop completion) gates whether anything commits — only a *raised* exception aborts
+the loop outright. Surfaced three real bugs, all fixed with regression tests: the audit log was
+being written inside the directory `ScratchManager.cleanup()` deletes, so a successful run
+deleted its own audit trail; a dict output key literally named `"values"` (`read_range`'s own
+PRD §10.4 output shape) was shadowed by Python's real `dict.values()` method under Jinja2's
+default attribute resolution, fixed generically (a custom Jinja `Environment` trying item
+access first) rather than by renaming around the one collision; and `@file_action`/
+`@com_action` were erasing every action's parameter types (`Callable[..., ActionResult]`),
+silently defeating mypy at every call site — switched to `ParamSpec`, which then let us catch
+and fix `read_metadata` quietly mishandling an unsupported `target` instead of rejecting it.
+First genuine end-to-end suite, `tests/integration/test_run_workflow.py`; fixture workbooks
+generated in code, not committed as static files (correction to the original `tests/data/`
+plan, Spec §7).
 
-Two real bugs surfaced writing the first integration test, both fixed with tests, not patched
-around: the audit log was being written inside the same directory `ScratchManager.cleanup()`
-deletes, so a *successful* run deleted its own audit trail (fixed by splitting scratch/ from
-the parent run dir); and a dict output key literally named `"values"` (`read_range`'s own
-output shape, PRD §10.4) was shadowed by Python's real `dict.values()` method under Jinja2's
-default attribute resolution — `{{ steps.x.output.values }}` silently returned the bound method
-instead. Fixed generically (a custom Jinja `Environment` that tries item access before
-attribute access), not by renaming around the one collision, since any future action's output
-key could hit the same class of bug. Also found and fixed a real typing gap while adding a
-regression test: `@file_action`/`@com_action` were erasing every action's parameter types via
-`Callable[..., ActionResult]`, silently defeating mypy at every call site — switched to
-`ParamSpec`, which surfaced (and let us fix) `read_metadata` silently mishandling an
-unsupported `target` value instead of rejecting it.
+**Crash-safety follow-up (user-requested before moving to item 8)** — found a fourth real bug,
+the most significant one this session: **the scratch copy left behind after a crash didn't
+actually contain any in-progress work.** openpyxl writes stay in memory until an explicit save,
+and nothing was flushing them to the scratch file mid-run — so the "recovery artifact" PRD
+§6.3.1 promises was, in practice, just an unchanged copy of the original. Fixed with
+`SessionManager.checkpoint()`, called after every step in the loop, saving each dirty staged
+session to its scratch file as it goes — found by writing the crash test properly (asserting
+the scratch file's *content*, not just its existence) and watching it fail on the first
+attempt. `TestCrashSafety` now covers: real file untouched, scratch copy genuinely has the
+prior step's work, audit log survives, and — the strongest cross-platform proof sessions were
+actually closed — a later valid run against the same file just works. "No orphaned Excel
+process" stays untested until a COM backend exists (item 9) to spawn one.
 
-`tests/integration/test_run_workflow.py` is the first genuine end-to-end suite — real
-`workflow.yaml` text run through `run_workflow()` against real openpyxl workbooks, exactly the
-shape agreed on with the user. Fixture workbooks are generated in code, not committed as static
-files in `tests/data/` (a correction to the original testing-approach sketch, Spec §7) — more
-reviewable, consistent with every other test in this codebase.
-
-All quality gates pass: 220/220 tests, ruff clean, mypy --strict clean (`excel_runner` +
+All quality gates pass: 227/227 tests, ruff clean, mypy --strict clean (`excel_runner` +
 `tests`), radon cc clean, vulture clean, **100% branch coverage** across all 6 modules.
-**Next step:** Still owed before moving on, per the user's "pause for integration testing"
-request: a dedicated mid-run-crash integration test (PRD §6.3/§6.3.1's actual crash-safety
-requirement, not just the design note — Spec §7). Then build order item 8 — `runner.py` §6.3,
-the public API surface (`__init__.py` re-exports, `list_actions()`).
+**Next step:** Build order item 8 — `runner.py` §6.3, the public API surface (`__init__.py`
+re-exports, `list_actions()`).
 **Notes:** `aggregate` and `update_summary_table`'s exact parameters are still explicitly
 flagged as open in the PRD — don't block on them. Tracker below stays function/class-granular
 even though source files are consolidated — see Spec §7.
@@ -121,8 +123,9 @@ even though source files are consolidated — see Spec §7.
 |---|---|---|---|---|---|
 | `AuditLogger` — `runner.py` §6.2 | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `run_workflow` orchestration — `runner.py` §6.1 | ⏭️ | ✅ | ✅ | ⏭️ | ✅ |
+| `SessionManager.checkpoint()` — `engine.py` §5.2 | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Public API surface (`__init__.py` re-exports) — `runner.py` §6.3 | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Crash-safety (mid-run interruption) integration test (Spec §7) | ⏭️ | ⏭️ | ❌ | ⏭️ | ❌ |
+| Crash-safety (mid-run interruption) integration test (Spec §7) | ⏭️ | ⏭️ | ✅ | ⏭️ | ✅ |
 
 ## Phase 7 — COM (Windows-dependent, later phase per PRD §8)
 

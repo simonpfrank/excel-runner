@@ -320,3 +320,120 @@ class TestAuditLog:
         lines = result.audit_log_path.read_text().splitlines()
         assert len(lines) == 2
         assert [json.loads(line)["step_id"] for line in lines] == ["s1", "s2"]
+
+
+class TestCrashSafety:
+    """PRD sec 6.3/6.3.1's actual crash-safety requirement: a run interrupted mid-step must
+    never leave the real files touched, must leave the scratch copies in place as the
+    recovery/debugging artifact, and must not leave anything in a state that blocks a later,
+    valid run against the same workbook. "No orphaned Excel process" (PRD sec 6.3) isn't
+    testable yet — there's no COM backend built, so no Excel process is ever spawned by the
+    current (file-backend only) action set; that part of the requirement gets a real test once
+    build order item 9 exists.
+
+    A raised exception (not an ActionResult(status="error")) is what "crashes" a run, per the
+    error-handling policy established in Spec sec 4/runner.py's design — write_row's positional
+    mode without start_column is used here as a realistic, already-covered way to trigger one.
+    """
+
+    def test_crash_mid_run_leaves_real_file_untouched_and_scratch_copy_in_place(
+        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+    ) -> None:
+        real = _make_workbook(tmp_path / "output" / "manip.xlsx")
+        run_dir = tmp_path / "run_dir"
+        run_dir.mkdir()
+        # Deterministic run directory instead of a fresh tempfile.mkdtemp() location per run,
+        # so the test can find the surviving scratch copy without globbing the system temp dir
+        # (which could pick up unrelated leftovers from other test runs).
+        monkeypatch.setattr("excel_runner.runner.tempfile.mkdtemp", lambda prefix=None: str(run_dir))
+
+        workflow_path = _write_yaml(
+            tmp_path / "workflow.yaml",
+            """
+            env:
+              output_folder: "./output"
+            workbooks:
+              manip:
+                file: "{{ env.output_folder }}/manip.xlsx"
+            steps:
+              - id: write_first
+                action: write_cell
+                workbook: manip
+                sheet: "Sheet"
+                cell: "B1"
+                value: "in progress"
+              - id: crash_here
+                action: write_row
+                workbook: manip
+                sheet: "Sheet"
+                row: 1
+                values: ["a", "b"]
+            """,
+        )
+
+        with pytest.raises(ActionExecutionError):
+            run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+
+        # the real file is completely untouched by the in-progress write
+        assert openpyxl.load_workbook(real)["Sheet"]["B1"].value is None
+
+        # the scratch copy survives as the recovery artifact, with the in-progress work intact
+        scratch_file = run_dir / "scratch" / "manip.xlsx"
+        assert scratch_file.exists()
+        assert openpyxl.load_workbook(scratch_file)["Sheet"]["B1"].value == "in progress"
+
+        # the audit log survives too — it lives outside scratch/ specifically so cleanup (which
+        # never even runs on this path) couldn't take it with it (Spec sec 6.1's bug fix)
+        assert (run_dir / "audit.jsonl").exists()
+
+    def test_a_later_valid_run_against_the_same_workbook_succeeds_after_a_crash(
+        self, tmp_path: Path
+    ) -> None:
+        """The strongest cross-platform evidence that sessions were actually closed and no
+        lingering handle survives a crash: a subsequent run against the same real file just
+        works. Directly detecting an OS-level file lock would be meaningful mainly on Windows
+        (PRD sec 4) and isn't reliably testable on macOS, so this is the real behavior that
+        matters, tested directly instead."""
+        real = _make_workbook(tmp_path / "output" / "manip.xlsx")
+        crashing_workflow = _write_yaml(
+            tmp_path / "crash.yaml",
+            """
+            env:
+              output_folder: "./output"
+            workbooks:
+              manip:
+                file: "{{ env.output_folder }}/manip.xlsx"
+            steps:
+              - id: crash_here
+                action: write_row
+                workbook: manip
+                sheet: "Sheet"
+                row: 1
+                values: ["a", "b"]
+            """,
+        )
+        with pytest.raises(ActionExecutionError):
+            run_workflow(crashing_workflow, env_overrides={"output_folder": str(tmp_path / "output")})
+
+        valid_workflow = _write_yaml(
+            tmp_path / "valid.yaml",
+            """
+            env:
+              output_folder: "./output"
+            workbooks:
+              manip:
+                file: "{{ env.output_folder }}/manip.xlsx"
+            steps:
+              - id: write_it
+                action: write_cell
+                workbook: manip
+                sheet: "Sheet"
+                cell: "C1"
+                value: "worked"
+            """,
+        )
+
+        result = run_workflow(valid_workflow, env_overrides={"output_folder": str(tmp_path / "output")})
+
+        assert result.status == "success"
+        assert openpyxl.load_workbook(real)["Sheet"]["C1"].value == "worked"

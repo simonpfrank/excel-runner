@@ -242,13 +242,33 @@ class SessionManager:
         at_path.parent.mkdir(parents=True, exist_ok=True)
         backends.create_workbook(str(at_path), template_path=template_path)
 
+    def _save_dirty_staged_sessions(self) -> None:
+        for session in self._sessions.values():
+            if session.scratch_path is not None and session.dirty:
+                backends.save_workbook(session.handle, session.path)
+                session.dirty = False
+
+    def checkpoint(self) -> None:
+        """Persist every dirty staged session's in-memory state to its scratch file.
+
+        openpyxl writes stay in memory until an explicit save — nothing else flushes them to
+        disk mid-run — so without this, a crash after a successful step would leave the
+        scratch copy (the recovery artifact, PRD sec 6.3.1) no more informative than the
+        original file. `runner.py` calls this after every step, not just at the end (Spec
+        sec 6.1) — found necessary via a failing crash-safety integration test, not designed
+        up front.
+        """
+        self._save_dirty_staged_sessions()
+
     def commit_all(self) -> None:
         """Save every staged session's in-memory state, then commit scratch copies to their
         real paths (PRD sec 6.3.1). Read-only sessions were never staged and aren't touched.
+        Redundant with per-step `checkpoint()` calls in the normal case (both are dirty-gated,
+        so this is mostly a no-op by the time a run reaches here) — kept anyway as the final
+        safety net at the commit boundary, not something to remove just because it's usually
+        a no-op.
         """
-        for session in self._sessions.values():
-            if session.scratch_path is not None:
-                backends.save_workbook(session.handle, session.path)
+        self._save_dirty_staged_sessions()
         self._scratch.commit_all()
 
     def close_all(self) -> None:
