@@ -212,3 +212,16 @@ def run_workflow(path: str | Path, env_overrides: dict[str, Any] | None = None) 
         step_results=tuple(step_results),
         audit_log_path=audit_log_path,
     )
+
+
+def list_actions() -> tuple[engine.ActionSpec, ...]:
+    """List every built action's name, capability, description, and parameter schema.
+
+    What a future agent/CLI wrapper would iterate over to generate its own tool definitions
+    (PRD sec 6.1's "close to free" schema reuse) — just `discover_actions` wired to the real
+    `actions` module, not a second source of truth.
+
+    Returns:
+        One `ActionSpec` per built action.
+    """
+    return tuple(engine.discover_actions(actions_module).values())

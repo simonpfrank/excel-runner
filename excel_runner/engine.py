@@ -30,13 +30,17 @@ from excel_runner.core import (
 
 @dataclass(frozen=True)
 class ActionSpec:
-    """A discovered action: its name, callable, capability, and parameter schema.
+    """A discovered action: its name, callable, capability, description, and parameter schema.
 
     Args:
         name: The action's name, matching an `action:` field in a workflow step.
         fn: The action function itself.
         capability: Which backend this action needs. "depends_on_param" is a named, single
             exception (PRD sec 7's `read_metadata`) — not a general mechanism.
+        description: The action's docstring, first line only — what a future agent-tool
+            wrapper would show as the tool's description (PRD sec 6.1's "close to free" tool
+            schema generation). Added after the fact: the field didn't exist until §6.3's
+            `list_actions()` was being built and needed it.
         param_schema: `{"properties": {name: {"type": ...}}, "required": [...]}`, derived from
             `fn`'s signature (excluding `session`).
     """
@@ -44,6 +48,7 @@ class ActionSpec:
     name: str
     fn: Callable[..., ActionResult]
     capability: Literal["file", "com", "depends_on_param"]
+    description: str
     param_schema: dict[str, Any]
 
 
@@ -79,9 +84,14 @@ def discover_actions(module: ModuleType) -> dict[str, ActionSpec]:
             name=name,
             fn=fn,
             capability=capability,
+            description=_first_line(inspect.getdoc(fn) or ""),
             param_schema=_generate_param_schema(fn),
         )
     return registry
+
+
+def _first_line(docstring: str) -> str:
+    return docstring.split("\n", 1)[0].strip()
 
 
 # --- Scratch-copy execution model (Spec sec 5.3, PRD sec 6.3.1) --------------------------

@@ -59,6 +59,7 @@ actions.write_row
 backends.open_workbook
 
 engine.ActionSpec.param_schema
+engine.ActionSpec.description
 engine.discover_actions
 engine.ScratchManager.cleanup
 engine.SessionManager

@@ -32,6 +32,19 @@ class TestDiscoverActions:
         registry = discover_actions(actions)
         assert isinstance(registry["open"], ActionSpec)
 
+    def test_action_spec_carries_a_description_from_the_docstring(self) -> None:
+        """The stated purpose of the registry (PRD sec 6.1: "close to free" tool-schema
+        generation for a future agent wrapper) needs a description, not just a param schema —
+        was missing from ActionSpec entirely until this was checked while building list_actions()
+        (Spec sec 6.3)."""
+        registry = discover_actions(actions)
+        assert registry["read_range"].description == "Read a cell or range of cells."
+
+    def test_description_is_the_first_line_only_not_the_whole_docstring(self) -> None:
+        registry = discover_actions(actions)
+        assert "\n" not in registry["write_row"].description
+        assert registry["write_row"].description.startswith("Write a row of values")
+
     def test_action_spec_carries_the_real_callable(self) -> None:
         registry = discover_actions(actions)
         assert registry["read_range"].fn is actions.read_range

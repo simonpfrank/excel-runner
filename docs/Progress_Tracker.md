@@ -1,15 +1,18 @@
 # excel_runner — Progress Tracker
 
 ## Last Session (2026-08-19)
-**Status:** In Progress
-**Working on:** Build order items 1–7 (Spec §8) all done, plus the crash-safety integration
-test the user asked to build before moving on. Git repo initialized, eight commits on `main`.
+**Status:** Ready for Next Phase
+**Working on:** Build order items 1–8 (Spec §8) — the entire v1 file-backend core engine — are
+now done, plus the crash-safety integration test. Git repo initialized, nine commits on `main`.
+Only item 9 (COM phase, Windows-dependent, later) and item 10 (deferred/flagged items) remain
+from the original build order.
 
 **Items 1–6, summarized** (full detail in git log / Spec §2–§5 correction notes): data model +
 errors (1); loading/templating, found the whole-file "render then parse" plan couldn't work for
 `{{ steps.* }}` (2); action registry + first 5 actions, found `ActionResult`/`WorkbookSession`
 needed to live in `core.py` to avoid a circular import (3); 9 more actions taking the total to
-14, established the `ActionResult(status="error")` vs. raised-exception policy, found
+15 (miscounted as 14 at the time — corrected in item 8's notes below), established the
+`ActionResult(status="error")` vs. raised-exception policy, found
 `read_links` empirically broken (4); `SessionManager`/`ScratchManager`, mode caller-specified
 pending tier 2, coverage caught a missing-`mkdir` bug (5); both validation tiers, found PRD
 §9.1's fourth example message isn't implementable without workbook access — corrected, not
@@ -48,10 +51,24 @@ prior step's work, audit log survives, and — the strongest cross-platform proo
 actually closed — a later valid run against the same file just works. "No orphaned Excel
 process" stays untested until a COM backend exists (item 9) to spawn one.
 
-All quality gates pass: 227/227 tests, ruff clean, mypy --strict clean (`excel_runner` +
+**Item 8 (public API surface, Spec §6.3)** — built: `excel_runner/__init__.py` re-exports
+(`run_workflow`, `RunResult`, `StepResult`, `Workflow`, `Step`, `WorkbookRef`, `list_actions`,
+`ActionSpec`), and `list_actions()` itself (`discover_actions` wired to the real module — not a
+second source of truth). Found a real gap: `ActionSpec` never actually had the `description`
+field the original design's own words assumed ("name/docstring/param_schema") — without it,
+`list_actions()` couldn't fulfill its one stated purpose (a future agent-tool wrapper needs a
+description, not just a name and parameter shape). Fixed: `description` is now populated from
+each action's docstring, first line only. Also caught, via a test asserting the real action
+count: the "14 actions" repeated across items 4–7's notes was an off-by-one — it's 15. Corrected
+in Spec §5.1/§6.3 and above; not rewriting git history for it.
+
+All quality gates pass: 239/239 tests, ruff clean, mypy --strict clean (`excel_runner` +
 `tests`), radon cc clean, vulture clean, **100% branch coverage** across all 6 modules.
-**Next step:** Build order item 8 — `runner.py` §6.3, the public API surface (`__init__.py`
-re-exports, `list_actions()`).
+**Next step:** A README (user-requested) — short prose, simple run instructions, YAML details
+starting with simple examples, then a comprehensive action reference with examples per action.
+After that: build order item 9 (COM phase, Windows-dependent) or item 10 (deferred items:
+`update_summary_table`, `aggregate`, `export_pdf`, AI-authoring inspection actions) — not yet
+decided which.
 **Notes:** `aggregate` and `update_summary_table`'s exact parameters are still explicitly
 flagged as open in the PRD — don't block on them. Tracker below stays function/class-granular
 even though source files are consolidated — see Spec §7.
@@ -124,7 +141,7 @@ even though source files are consolidated — see Spec §7.
 | `AuditLogger` — `runner.py` §6.2 | ✅ | ✅ | ✅ | ✅ | ✅ |
 | `run_workflow` orchestration — `runner.py` §6.1 | ⏭️ | ✅ | ✅ | ⏭️ | ✅ |
 | `SessionManager.checkpoint()` — `engine.py` §5.2 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Public API surface (`__init__.py` re-exports) — `runner.py` §6.3 | ❌ | ❌ | ❌ | ❌ | ❌ |
+| Public API surface (`__init__.py` re-exports, `list_actions()`, `ActionSpec.description`) — `runner.py` §6.3 | ✅ | ✅ | ✅ | ✅ | ✅ |
 | Crash-safety (mid-run interruption) integration test (Spec §7) | ⏭️ | ⏭️ | ✅ | ⏭️ | ✅ |
 
 ## Phase 7 — COM (Windows-dependent, later phase per PRD §8)

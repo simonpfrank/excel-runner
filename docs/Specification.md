@@ -238,10 +238,12 @@ the one touched most often. Two things keep it navigable without adding source f
   lookup → aggregate → links → COM), with a one-line comment banner per group, so the physical
   layout still mirrors the catalog even without file boundaries doing it.
 
-**14 built so far**: `open`, `save`, `close`, `copy`, `read_range`, `read_metadata`
-(properties/cells sub-cases), `write_cell`, `write_range`, `write_row` (base + positional
-modes), `insert_range` (whole-row/whole-column only), `set_column_width`, `find_headers_row`,
-`find_row`, `find_column`, `find_columns`. All green, 100% branch coverage.
+**15 built so far** (corrected — earlier notes across items 4–7 said 14, an off-by-one
+miscount not caught until `list_actions()` (§6.3) asserted the real count directly): `open`,
+`save`, `close`, `copy`, `read_range`, `read_metadata` (properties/cells sub-cases),
+`write_cell`, `write_range`, `write_row` (base + positional modes), `insert_range`
+(whole-row/whole-column only), `set_column_width`, `find_headers_row`, `find_row`,
+`find_column`, `find_columns`. All green, 100% branch coverage.
 
 **Error-handling policy, established while building this batch**: an action returns
 `ActionResult(status="error", error=ErrorDetail(...))` for an outcome that's a normal,
@@ -560,7 +562,7 @@ always available; a minor, deliberate deviation from the original "resolved para
 phrasing. Not a `logging`-module handler — deliberately a separate, structured artifact
 (PRD §6.7 explains why).
 
-### 6.3 Public API surface
+### 6.3 Public API surface — **built**
 
 The only symbols other Python code (or a future CLI/MCP wrapper, PRD §5) should import,
 re-exported from the package's `__init__.py`:
@@ -568,14 +570,28 @@ re-exported from the package's `__init__.py`:
 ```python
 from excel_runner import run_workflow, RunResult, StepResult
 from excel_runner import Workflow, Step, WorkbookRef   # for programmatic construction
-from excel_runner import list_actions                   # -> tuple[ActionSpec, ...]
+from excel_runner import list_actions, ActionSpec        # list_actions() -> tuple[ActionSpec, ...]
 ```
 
 Everything else in the package tree is an implementation detail and may change without notice;
-this surface is the versioned contract (PRD §3/§9/§12). `list_actions()` exposing `ActionSpec`
-(name/docstring/param_schema) is what a later MCP/CLI wrapper would iterate over to generate
-its own tool definitions — the "close to free" schema reuse PRD §6.1 promises, made concrete
-here as one function.
+this surface is the versioned contract (PRD §3/§9/§12). **`ActionSpec` itself had to join the
+re-exports** — not in the original sketch, but `list_actions()`'s return value is a tuple of
+`ActionSpec` instances, so calling code needs the type itself to work with the result
+meaningfully (e.g. `isinstance` checks), not just the function.
+
+**A real gap found while building this: `ActionSpec` had no `description` field at all.** The
+original plan's own words — "`list_actions()` exposing `ActionSpec` (name/**docstring**/
+param_schema)" — assumed a field that was never actually added back in §5.1. Without it,
+`list_actions()` couldn't fulfill its one stated purpose (PRD §6.1's "close to free" schema
+generation for a future agent-tool wrapper) — a tool definition needs a description, not just a
+name and parameter shape. Fixed: `ActionSpec.description` is now populated from each action's
+docstring, first line only (`inspect.getdoc(fn)`, then split on the first newline) — every
+action already had a clean one-line summary to start with, so no action docstrings needed
+rewriting to support this.
+
+`list_actions()` itself is `tuple(discover_actions(actions_module).values())` — deliberately
+just `discover_actions` (§5.1) wired to the real `actions` module, not a second source of truth
+that could drift from it.
 
 ## 7. Testing approach
 
@@ -658,7 +674,11 @@ time within it.
    testing-approach sketch. The dedicated mid-run-crash integration test (§7) is also **done**
    — it found and fixed a real gap in the scratch-copy model itself (`SessionManager.checkpoint()`,
    §5.2), not just a missing test.
-8. `runner.py` §6.3 — the public surface, once there's a working engine underneath it to expose.
+8. `runner.py` §6.3 — the public surface. **Done** — `excel_runner/__init__.py` re-exports,
+   `list_actions()`, and `ActionSpec.description` (a real gap the original sketch's own words
+   implied but never actually added — see §6.3's note). This is also where the "14 actions"
+   count repeated across items 4–7's notes turned out to be an off-by-one for "15" —
+   `list_actions()` asserting the real count directly is what caught it.
 9. **Later phase (Windows-dependent COM work)**: `backends.py`'s COM-backend functions and
    `OwnedInstanceRegistry` (§3.1), and the COM actions in `actions.py` (`recalculate`,
    `run_macro`, `refresh_links`, `write_links`, `read_metadata`'s textbox sub-case).
