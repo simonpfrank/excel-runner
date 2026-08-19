@@ -29,3 +29,22 @@ class TestReadMetadataAction:
     ) -> None:
         with pytest.raises(ActionExecutionError):
             read_metadata_action(session=richer_file_session, target="cells")
+
+    def test_unsupported_target_raises_explicitly_rather_than_silently_acting_as_cells(
+        self, richer_file_session: WorkbookSession
+    ) -> None:
+        """Regression test: target="textboxes" used to silently fall through to the "cells"
+        handling (anything not "properties" was treated as "cells"). mypy now catches this at
+        a literal call site like this one (file_action/com_action switched to ParamSpec so the
+        decorator no longer erases parameter types, Spec sec 4/5.1) — the `type: ignore` below
+        is deliberate, simulating the runner's actual dispatch, which calls every action via
+        `**kwargs` unpacked from a dynamically-typed dict that no amount of ParamSpec can check.
+        The runtime guard this test verifies is the only real defense on that path."""
+        with pytest.raises(ActionExecutionError) as exc_info:
+            read_metadata_action(
+                session=richer_file_session,
+                target="textboxes",  # type: ignore[arg-type]
+                sheet="Summary",
+                cells=["A1"],
+            )
+        assert "textboxes" in exc_info.value.detail.message

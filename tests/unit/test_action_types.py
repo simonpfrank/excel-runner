@@ -74,5 +74,5 @@ class TestCapabilityTagging:
         def _example_action(session: WorkbookSession) -> ActionResult:
             return ActionResult(status="success", output={"marker": True})
 
-        result = _example_action(session=None)
+        result = _example_action(session=None)  # type: ignore[arg-type]  # this function ignores session
         assert result.output == {"marker": True}

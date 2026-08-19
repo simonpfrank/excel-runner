@@ -1,0 +1,208 @@
+"""The composition root, audit logging, and (once built, §6.3) the public API surface.
+See docs/Specification.md sec 6.
+
+This module currently covers sec 6.1 (orchestration) and sec 6.2 (audit logging) — the public
+surface (sec 6.3, build order item 8) isn't built yet.
+"""
+
+import json
+import tempfile
+from dataclasses import asdict, dataclass
+from datetime import datetime
+from pathlib import Path
+from typing import Any, Literal
+
+from excel_runner import actions as actions_module
+from excel_runner import core, engine
+from excel_runner.core import ActionResult, ErrorDetail, Step, WorkbookSession, Workflow
+
+
+@dataclass(frozen=True)
+class StepResult:
+    """The outcome of one step — a superset of ActionResult's statuses, since a step can also
+    be "skipped" (its `if:` was false), which never reaches an action at all.
+
+    Args:
+        step_id: The step's id.
+        status: "success", "error" (a normal, anticipated "didn't work" outcome — see the
+            error-handling policy in Spec sec 4 — or an exception would have been raised
+            instead and this StepResult would never be constructed), or "skipped".
+        output: The action's output, or `{}` if skipped.
+        error: Present when status is "error".
+    """
+
+    step_id: str
+    status: Literal["success", "error", "skipped"]
+    output: dict[str, Any]
+    error: ErrorDetail | None = None
+
+
+@dataclass(frozen=True)
+class RunResult:
+    """The outcome of a full run.
+
+    Args:
+        status: "success" iff every step succeeded or was deliberately skipped — "error" if
+            any step's action returned an error result, even though the run continued past it.
+        step_results: One StepResult per step, in execution order.
+        audit_log_path: Where the structured, per-step JSONL audit log was written.
+    """
+
+    status: Literal["success", "error"]
+    step_results: tuple[StepResult, ...]
+    audit_log_path: Path
+
+
+class AuditLogger:
+    """Writes one structured JSON record per step to a JSONL file (Spec sec 6.2).
+
+    Args:
+        path: Where to write the audit log. Parent directories are created if needed.
+    """
+
+    def __init__(self, path: Path) -> None:
+        self._path = path
+        self._path.parent.mkdir(parents=True, exist_ok=True)
+
+    def record_step(self, step: Step, result: StepResult, started_at: Any, ended_at: Any) -> None:
+        """Append one step's outcome to the audit log.
+
+        Args:
+            step: The step that ran (or was skipped).
+            result: Its outcome.
+            started_at: When the step started — logged as-is (a datetime or a plain string).
+            ended_at: When the step ended — logged as-is.
+        """
+        record = {
+            "step_id": step.id,
+            "action": step.action,
+            "params": step.params,
+            "status": result.status,
+            "output": result.output,
+            "error": asdict(result.error) if result.error is not None else None,
+            "started_at": str(started_at),
+            "ended_at": str(ended_at),
+        }
+        with self._path.open("a") as handle:
+            handle.write(json.dumps(record, default=str) + "\n")
+
+
+def _dispatch_copy(
+    resolved_params: dict[str, Any], session_manager: engine.SessionManager, plan: engine.ExecutionPlan
+) -> ActionResult:
+    """Resolve copy's two nested workbook refs into two sessions and call the action.
+
+    `copy` is the one action whose YAML shape (`source:`/`target:` dicts) doesn't map to a
+    single `workbook:` field — see Spec sec 4's correction — so it's handled separately from
+    every other action's dispatch.
+    """
+    source = resolved_params["source"]
+    target = resolved_params["target"]
+    source_session = session_manager.get_or_open(source["workbook"], mode=plan.modes[source["workbook"]])
+    target_session = session_manager.get_or_open(target["workbook"], mode=plan.modes[target["workbook"]])
+    return actions_module.copy(
+        session=source_session,
+        target=target_session,
+        source_sheet=source["sheet"],
+        source_range=source.get("range"),
+        target_sheet=target["sheet"],
+        target_range=target["range"],
+    )
+
+
+def _dispatch(
+    step: Step,
+    context: dict[str, Any],
+    registry: dict[str, engine.ActionSpec],
+    session_manager: engine.SessionManager,
+    plan: engine.ExecutionPlan,
+) -> ActionResult:
+    """Resolve one step's params and call its action.
+
+    `workbook` is resolved into a `WorkbookSession` and never forwarded to the action function
+    itself (Spec sec 4) — every other resolved param is passed through as a keyword argument.
+    """
+    resolved = core.resolve_value(step.params, context)
+    if step.action == "copy":
+        return _dispatch_copy(resolved, session_manager, plan)
+    workbook_name = resolved["workbook"]
+    session: WorkbookSession = session_manager.get_or_open(workbook_name, mode=plan.modes[workbook_name])
+    kwargs = {key: value for key, value in resolved.items() if key != "workbook"}
+    return registry[step.action].fn(session=session, **kwargs)
+
+
+def run_workflow(path: str | Path, env_overrides: dict[str, Any] | None = None) -> RunResult:
+    """Load, validate, and execute a workflow YAML file end to end.
+
+    A step's action returning `ActionResult(status="error")` is a normal, anticipated outcome
+    (Spec sec 4's error-handling policy) — the run continues so later steps can branch on it
+    via `if:` — but the overall `RunResult.status` is still "error" if any step failed, and the
+    run is never committed to the real workbook files in that case (PRD sec 6.3.1). A raised
+    exception (a genuine authoring mistake, not a normal "didn't work") propagates to the
+    caller instead of being captured in the result — session cleanup still runs regardless.
+
+    Args:
+        path: Path to the workflow YAML file.
+        env_overrides: Values merged over (and taking precedence over) the file's own `env:`
+            block (PRD sec 6.6).
+
+    Returns:
+        The RunResult, once every step has run (or been skipped) without raising.
+
+    Raises:
+        ValidationError: If the workflow fails tier-1 or tier-2 validation. Nothing is opened
+            or touched before this check completes.
+        ActionExecutionError: If an action raises during execution — a genuine mistake, not a
+            normal "didn't work" outcome. The real workbook files are left untouched either way.
+    """
+    workflow: Workflow = core.load(path, env_overrides)
+    registry = engine.discover_actions(actions_module)
+    engine.validate_static(workflow, registry)
+    plan = engine.plan(workflow)
+
+    # audit.jsonl lives in the parent run dir, not inside scratch/ — scratch.cleanup() wipes
+    # the whole scratch dir on success (PRD sec 6.3.1), and the audit log must survive that
+    # (found via a failing test: a successful run was deleting its own audit trail).
+    run_dir = Path(tempfile.mkdtemp(prefix="excel_runner_"))
+    scratch = engine.ScratchManager(run_dir / "scratch")
+    session_manager = engine.SessionManager(workflow.workbooks, scratch)
+    audit_log_path = run_dir / "audit.jsonl"
+    audit = AuditLogger(audit_log_path)
+
+    step_outputs: dict[str, dict[str, Any]] = {}
+    step_results: list[StepResult] = []
+    any_failed = False
+
+    try:
+        for step in workflow.steps:
+            context = {"env": workflow.env, "steps": step_outputs}
+            started_at = datetime.now()
+
+            if step.if_expr is not None and not core.evaluate_condition(step.if_expr, context):
+                step_result = StepResult(step_id=step.id, status="skipped", output={})
+            else:
+                action_result = _dispatch(step, context, registry, session_manager, plan)
+                step_result = StepResult(
+                    step_id=step.id,
+                    status=action_result.status,
+                    output=action_result.output,
+                    error=action_result.error,
+                )
+                if action_result.status == "error":
+                    any_failed = True
+
+            audit.record_step(step, step_result, started_at, datetime.now())
+            step_results.append(step_result)
+            step_outputs[step.id] = {"status": step_result.status, "output": step_result.output}
+
+        if not any_failed:
+            session_manager.commit_all()
+            scratch.cleanup(keep_on_failure=False)
+    finally:
+        session_manager.close_all()
+
+    return RunResult(
+        status="error" if any_failed else "success",
+        step_results=tuple(step_results),
+        audit_log_path=audit_log_path,
+    )

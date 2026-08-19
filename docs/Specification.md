@@ -124,6 +124,18 @@ Functions in this module:
 - `evaluate_condition(if_expr: str, context: dict) -> bool` — for `Step.if_expr`; accepts the
   expression with or without a surrounding `{{ }}` wrapper.
 
+**A real bug found while building `runner.py` (§6.1): a dict field literally named `"values"`
+(exactly `read_range`'s own output key, PRD §10.4) was shadowed by Python dict's real
+`.values()` method.** Jinja2's default attribute resolution tries `getattr(obj, name)` before
+`obj[name]` — and every dict has real `.keys()`/`.values()`/`.items()`/etc. methods — so
+`{{ steps.x.output.values }}` returned the bound method, not the output dict's `"values"`
+entry. Fixed generically, not by renaming around the one collision: `_ENV` is now a
+`_DictItemFirstEnvironment` subclass overriding `getattr` to try item access first, falling
+back to real attribute access only when the object isn't subscriptable. Correct here — not a
+hack — because every value flowing through these templates (`env`, `steps`, an action's
+output) is a plain dict or list, never an object whose real attributes should take priority
+over its data.
+
 ### 2.3 Error types
 
 ```python
@@ -292,6 +304,21 @@ class ActionSpec:
 
 (`ActionResult` itself is imported from `core.py` — see §4's correction.)
 
+**A real gap found while adding a regression test in `runner.py`'s build: `@file_action`/
+`@com_action` were typed as `Callable[..., ActionResult] -> Callable[..., ActionResult]`,
+which erases every decorated action's actual parameter types to "accepts anything" — silently
+defeating mypy --strict at every call site, not just inside the action itself.** A call like
+`read_metadata(session=s, target="textboxes")` — invalid, `target` is
+`Literal["properties", "cells"]` — type-checked clean under the old decorator typing. Fixed
+with `ParamSpec` (`Callable[P, ActionResult] -> Callable[P, ActionResult]`), which preserves
+the exact signature through the decorator; mypy now genuinely catches a bad call to any action.
+One caveat this doesn't and can't fix: the runner's actual dispatch calls every action via
+`fn(session=session, **kwargs)` with `kwargs` built from a dynamically-typed dict — no amount
+of decorator typing can check that path, which is exactly why the actions themselves still
+need their own runtime guards for genuinely invalid input (e.g. `read_metadata`'s explicit
+rejection of an unsupported `target`, found via this same investigation and fixed in
+`actions.py`).
+
 `capability="depends_on_param"` is a **named, single exception**, not a general mechanism —
 only `read_metadata` uses it (PRD §7: file for `properties`/`cells`, COM for `textboxes`), and
 isn't built yet. `runner.py` (not built yet) will check for this literal case explicitly rather
@@ -451,7 +478,7 @@ into once `runner.py` exists to wire them together.
 The composition root, the audit trail, and the one public contract — grouped because together
 they're "the layer that actually executes a run and is safe for other code to depend on."
 
-### 6.1 Orchestration
+### 6.1 Orchestration — **built**
 
 ```python
 def run_workflow(path: str | Path, env_overrides: dict | None = None) -> RunResult:
@@ -459,41 +486,63 @@ def run_workflow(path: str | Path, env_overrides: dict | None = None) -> RunResu
 
 One linear sequence (per project convention: a composition root doesn't need splitting just to
 hit a line count — see AGENTS.md), wrapped in `try`/`finally` for the crash-safety guarantee
-(PRD §6.3):
+(PRD §6.3). Actual steps, corrected against what got built:
 
-1. `core.load(path, env_overrides)` → `Workflow`
-2. Tier-1 validation (§5.4) → raises with PRD §9.1-style errors on failure, before anything
-   else runs
-3. Tier-2 validation (§5.4) → `ExecutionPlan`
-4. `session = SessionManager(); scratch = ScratchManager()`
-5. `scratch.stage(...)` for every workbook the plan marked read-write
-6. For each `Step` in order:
-   a. if `step.if_expr` set, `core.evaluate_condition(...)` against accumulated step outputs —
-      skip the step (record `status: "skipped"`) if false
-   b. `core.resolve_value(...)` over `step.params`
-   c. look up `ActionSpec` in the registry (§5.1), resolve capability (promoting the workbook's
-      session if needed), call the action function
-   d. record the `ActionResult` into the run's step-output context (for later `{{ }}`
-      references) and into the audit log (§6.2)
-7. On full success: `session.commit_all()` (→ `scratch.commit_all()`), then
-   `scratch.cleanup(keep_on_failure=False)`
-8. `finally`: `session.close_all()` unconditionally (file handles *and* any COM instances via
-   `OwnedInstanceRegistry.close_owned()`, §3.1) — runs whether step 6 succeeded, raised, or the
-   process was interrupted, satisfying PRD §6.3's hard requirement. On failure, scratch copies
-   are deliberately **not** cleaned up (PRD §6.3.1) — left as the recovery artifact.
+1. `core.load(path, env_overrides)` → `Workflow`.
+2. Tier-1 validation (§5.4) → raises before anything is opened.
+3. Tier-2 validation (§5.4) → `ExecutionPlan`.
+4. Create a run directory (`tempfile.mkdtemp()`); `scratch = ScratchManager(run_dir/"scratch")`;
+   `session_manager = SessionManager(workflow.workbooks, scratch)`. **No separate upfront
+   staging loop** — the original sketch's "stage every read-write workbook" step doesn't exist
+   as its own thing; staging happens lazily, inside `SessionManager.get_or_open`, the first
+   time each workbook is actually referenced. The runner's only job here is to pass the right
+   `mode` (from `plan.modes[name]`) into each `get_or_open` call.
+5. For each `Step` in order: if `if_expr` is set and evaluates false, record a `"skipped"`
+   `StepResult` and move on. Otherwise: `core.resolve_value(step.params, context)`, then
+   dispatch — every action except `copy` resolves its `workbook` field into one session and
+   calls `registry[step.action].fn(session=session, **remaining_kwargs)`; `copy` is dispatched
+   separately (`_dispatch_copy`), resolving *both* `source.workbook` and `target.workbook` into
+   two sessions, exactly the special-case wiring §4/§5.1 flagged as still owed. Every step gets
+   an audit record (§6.2) regardless of outcome.
+6. **An action returning `ActionResult(status="error")` does not stop the loop** — this was an
+   open design question, resolved by what `if:` conditions are actually for: PRD's own
+   `if: "{{ steps.refresh.status == 'success' }}"` example only makes sense if a failed step
+   doesn't abort the run before later steps get a chance to check its status. So the loop
+   continues, but `RunResult.status` is `"error"` if *any* step failed, and that governs
+   whether anything gets committed — not whether the loop finished. A *raised* exception
+   (`ActionExecutionError`, `ValidationError`) is the only thing that actually aborts the loop,
+   consistent with the error-handling policy from §4: a raised exception means a genuine
+   mistake, not a normal "didn't work" outcome.
+7. If no step failed: `session_manager.commit_all()` (saves every staged session, then
+   `scratch.commit_all()` moves each scratch file to its real path atomically), then
+   `scratch.cleanup(keep_on_failure=False)`.
+8. `finally: session_manager.close_all()` — unconditionally, whether the loop finished, a step
+   failed, or an exception propagated. On failure (of either kind), `scratch.cleanup()` is
+   simply never called — the scratch copies are left in place as the recovery artifact
+   (PRD §6.3.1), exactly as designed.
 
-`RunResult` = `{status, step_results: list[StepResult], audit_log_path}`.
+`OwnedInstanceRegistry.close_owned()` isn't wired in here — there's no COM backend yet (§3.1,
+build order item 9), so there's nothing to close on that front.
 
-### 6.2 Audit logging
+**A real bug found while writing the first integration test**: the audit log was originally
+written inside the same directory `ScratchManager.cleanup()` deletes — so a *successful* run
+was deleting its own audit trail. Fixed by splitting the run directory into `run_dir/scratch/`
+(what `cleanup()` touches) and `run_dir/audit.jsonl` (what it doesn't).
+
+### 6.2 Audit logging — **built**
 
 ```python
 class AuditLogger:
-    def record_step(self, step: Step, result: ActionResult, started_at, ended_at) -> None: ...
+    def record_step(self, step: Step, result: StepResult, started_at, ended_at) -> None: ...
 ```
 
-One JSON object per line (JSONL) written to the scratch/run directory, per PRD §6.7. The
-orchestration loop (§6.1) calls this once per step, success or failure, before deciding whether
-to continue. Not a `logging`-module handler — deliberately a separate, structured artifact
+Takes a `StepResult`, not an `ActionResult` as first sketched — `StepResult` is the superset
+that also covers `"skipped"`, which never produces an `ActionResult` at all (the action never
+runs). One JSON object per line (JSONL), written to `run_dir/audit.jsonl` (see §6.1's bug fix
+above for why not inside the scratch dir). Logs the step's *raw* params, not resolved ones —
+resolved values aren't available uniformly for a skipped step, and raw params are simpler and
+always available; a minor, deliberate deviation from the original "resolved parameters"
+phrasing. Not a `logging`-module handler — deliberately a separate, structured artifact
 (PRD §6.7 explains why).
 
 ### 6.3 Public API surface
@@ -517,20 +566,30 @@ here as one function.
 
 - **`tests/unit/`** stays fine-grained even though `excel_runner/` doesn't — one test file per
   action (`tests/unit/actions/test_read_range.py`, ...), per class (`test_session_manager.py`,
-  `test_scratch_manager.py`, ...), per concern within `core.py` (`test_templating.py`,
-  `test_schema.py`, ...). Backends are mocked in action unit tests; `backends.py`'s own file
-  side is unit-tested against a real in-memory openpyxl workbook (openpyxl needs no live Excel,
-  so this isn't a "mock" in the disallowed sense — it's exercising a real dependency that's
-  cheap and fast, same spirit as the project convention's "no mocks in integration tests," just
-  applied at the unit level where that's affordable).
-- **`tests/integration/`** — zero mocks, per project convention. File-backend actions run
-  against real fixture workbooks in `tests/data/`. COM-backed actions/tests are marked
-  `@pytest.mark.skipif` on platform/Excel-availability (PRD §4's "test what's testable on macOS
-  now, finish on Windows later") — they skip cleanly, never mock the COM layer.
-- A dedicated integration test deliberately crashes a run mid-step and asserts: no orphaned
-  Excel process, no file lock on the original workbook, real files unmodified, scratch copies
-  present — this is the concrete test for PRD §6.3/§6.3.1's crash-safety requirement, not just
-  a design note.
+  `test_scratch.py`, ...), per concern within `core.py` (`test_templating.py`,
+  `test_schema.py`, ...). **Correction: nothing is ever mocked, not even in unit tests** — the
+  original plan said action unit tests would mock `backends.py`; in practice every action test
+  uses a real `WorkbookSession` wrapping a real openpyxl workbook (via a shared `conftest.py`
+  fixture), same as `backends.py`'s own tests. openpyxl needs no live Excel, so this is a real
+  dependency exercised cheaply, not a mock — turned out to be just as easy as mocking would
+  have been, with no risk of the mock drifting from real behavior.
+- **`tests/integration/`** — zero mocks, per project convention, now built (build order item
+  7): `tests/integration/test_run_workflow.py` runs real `workflow.yaml` text through
+  `run_workflow()` against real openpyxl workbooks, exactly the shape the user and Claude
+  agreed on — a runnable YAML fixture *is* the integration test, more realistic than testing
+  components in isolation. **Correction: fixture workbooks are generated in code
+  (openpyxl, written to `tmp_path`), not committed as static binary files in `tests/data/`** as
+  first sketched — more reviewable (visible in a diff, no binary blobs), easier to vary per
+  test, and every other test in this codebase already does it this way. `tests/data/` stays
+  empty/unused unless a real need for a static fixture shows up. COM-backed actions/tests will
+  be marked `@pytest.mark.skipif` on platform/Excel-availability (PRD §4's "test what's
+  testable on macOS now, finish on Windows later") once any exist — none do yet.
+- **Still owed, not built in item 7**: a dedicated integration test that deliberately crashes a
+  run mid-step and asserts no orphaned Excel process, no file lock on the original workbook,
+  real files unmodified, scratch copies present — the concrete test for PRD §6.3/§6.3.1's
+  crash-safety requirement, not just the design note. `tests/integration/test_run_workflow.py`
+  does cover "a step returning an error result never gets committed," but not yet "the process
+  is interrupted mid-step" specifically.
 
 ## 8. Build order
 
@@ -566,6 +625,14 @@ time within it.
    tier as designed (needs workbook access, both tiers are explicitly workbook-access-free),
    carried to PRD §12 as an open item.
 7. `runner.py` §6.1/§6.2 — first end-to-end real run of a multi-step file-backend workflow.
+   **Done.** Resolved the deferred `copy` two-session wiring and `workbook`-field-stripping
+   translation flagged since item 3/4. Surfaced two real bugs (§6.1/§2.2's notes: the audit
+   log being deleted by its own success-path cleanup; a dict output key named `"values"`
+   shadowed by Python's real `dict.values()` method under Jinja2's default attribute
+   resolution) and one real typing gap (§5.1's note: the capability decorators erasing every
+   action's parameter types, switched to `ParamSpec`). First genuine
+   `tests/integration/test_run_workflow.py` written — see §7's corrections to the original
+   testing-approach sketch. Still owed: the dedicated mid-run-crash integration test (§7).
 8. `runner.py` §6.3 — the public surface, once there's a working engine underneath it to expose.
 9. **Later phase (Windows-dependent COM work)**: `backends.py`'s COM-backend functions and
    `OwnedInstanceRegistry` (§3.1), and the COM actions in `actions.py` (`recalculate`,

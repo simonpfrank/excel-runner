@@ -154,6 +154,18 @@ def read_metadata(
     """
     if target == "properties":
         return ActionResult(status="success", output=backends.read_properties(session.handle))
+    if target != "cells":
+        # Python doesn't enforce type hints at runtime, and this function is directly
+        # importable/callable on its own (PRD sec 3/sec 9's library goal) — so an unsupported
+        # target must be rejected explicitly here, not silently fall through to the "cells"
+        # handling below just because it wasn't "properties". Found while reasoning about
+        # target="textboxes" specifically: it used to be mishandled exactly this way.
+        raise ActionExecutionError(
+            ErrorDetail(
+                message=f'read_metadata: target "{target}" is not supported yet.',
+                technical_reason=f"read_metadata called with unsupported target {target!r}",
+            )
+        )
     if sheet is None or cells is None:
         raise ActionExecutionError(
             ErrorDetail(

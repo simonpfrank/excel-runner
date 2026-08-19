@@ -2,46 +2,54 @@
 
 ## Last Session (2026-08-19)
 **Status:** In Progress
-**Working on:** Build order items 1–6 (Spec §8) all done (items 4/5/6 for what's cleanly
-buildable now). Git repo initialized, six commits on `main`.
+**Working on:** Build order items 1–7 (Spec §8) all done (items 4/5/6 for what's cleanly
+buildable now). Git repo initialized, seven commits on `main`.
 
-**Earlier items, summarized** (full detail in git log / Spec §2–§5 correction notes):
-item 1 — data model + errors in `core.py`. Item 2 — loading/templating; found the whole-file
-"render then parse" plan couldn't work for `{{ steps.* }}`, corrected to parse-then-resolve-
-per-field. Item 3 — action registry + first 5 actions; found `ActionResult`/`WorkbookSession`
-needed to live in `core.py` to avoid a circular import, `workbook` gets stripped before an
-action is called, actions call `backends.py` directly. Item 4 — 9 more actions (14 total);
-established the `ActionResult(status="error")` vs. raised-exception policy; found `read_links`
-empirically broken (openpyxl can't create the relationship it would need to read back);
-`copy` needed a two-session signature. Item 5 — `SessionManager`/`ScratchManager`; mode is
-caller-specified for now (tier 2 wasn't built yet); coverage caught a real missing-`mkdir` bug
-on the read-only + `create_if_missing` path.
+**Items 1–6, summarized** (full detail in git log / Spec §2–§5 correction notes): data model +
+errors (1); loading/templating, found the whole-file "render then parse" plan couldn't work for
+`{{ steps.* }}` (2); action registry + first 5 actions, found `ActionResult`/`WorkbookSession`
+needed to live in `core.py` to avoid a circular import (3); 9 more actions taking the total to
+14, established the `ActionResult(status="error")` vs. raised-exception policy, found
+`read_links` empirically broken (4); `SessionManager`/`ScratchManager`, mode caller-specified
+pending tier 2, coverage caught a missing-`mkdir` bug (5); both validation tiers, found PRD
+§9.1's fourth example message isn't implementable without workbook access — corrected, not
+faked (6).
 
-**Item 6 (both validation tiers, Spec §5.4)** — built, with one real gap found and corrected
-rather than papered over: **PRD §9.1's fourth example message (checking a range against a
-workbook's real defined names) isn't actually implementable in either tier** — it needs to
-open the workbook, which contradicts both tiers' own "no workbook access" premise. The other
-three examples are genuinely workbook-access-free and are what tier 1 builds: action-exists
-(with a fuzzy "did you mean" suggestion), no-unrecognized-params, no-missing-required-params,
-param-type-matches (handles `Literal`/`Union`/generic annotations, not just plain types), and
-step-id-reference resolution (exists + defined earlier, with a fuzzy suggestion). `copy` is
-exempt from the param-schema checks — its raw YAML shape (`source:`/`target:` dicts) still
-doesn't match its Python signature, same reason as item 4's note, unresolved until the runner's
-translation layer exists. Tier 2 (`plan()`) checks every referenced workbook is declared and
-infers read/write mode via a small static write-actions lookup table (deliberately simple, not
-deep analysis) — `copy` again gets the safe-fallback treatment (every workbook it touches
-marked `read_write`, since source vs. target can't be told apart statically yet). PRD §9.1/§12
-corrected to record the workbook-access gap as an open item.
+**Item 7 (`runner.py` — orchestration + audit logging, Spec §6.1/§6.2)** — built, and this is
+where several things deferred since items 3–6 finally got resolved for real: `copy`'s
+two-session dispatch, the `workbook`-field-stripping translation, and (a genuine open design
+question until now) whether an action's `ActionResult(status="error")` halts the run — resolved
+by what `if:` is actually for: PRD's own `if: steps.x.status == 'success'` example only makes
+sense if a failed step *doesn't* abort the run before later steps can check it. So the loop
+continues past a failed step, but `RunResult.status` is `"error"` if any step failed, and
+nothing gets committed in that case — only a *raised* exception aborts the loop outright.
 
-All quality gates pass: 201/201 tests, ruff clean, mypy --strict clean (`excel_runner` +
-`tests`), radon cc clean, vulture clean, **100% branch coverage** across all 4 modules — two
-lines needed an honest `# pragma: no cover` (structurally unreachable via the current design,
-documented why) rather than a contrived test.
-**Next step:** Build order item 7 (Spec §8) — `runner.py` §6.1/§6.2: the orchestration loop
-(`run_workflow`) and audit logging. This is also the point `copy`'s two-session wiring and the
-`workbook`-field-stripping translation actually get implemented for real, and the first point
-genuine end-to-end YAML-driven integration tests become possible (discussed with the user —
-plan is to pause for integration testing once this item and item 8 land, before the COM phase).
+Two real bugs surfaced writing the first integration test, both fixed with tests, not patched
+around: the audit log was being written inside the same directory `ScratchManager.cleanup()`
+deletes, so a *successful* run deleted its own audit trail (fixed by splitting scratch/ from
+the parent run dir); and a dict output key literally named `"values"` (`read_range`'s own
+output shape, PRD §10.4) was shadowed by Python's real `dict.values()` method under Jinja2's
+default attribute resolution — `{{ steps.x.output.values }}` silently returned the bound method
+instead. Fixed generically (a custom Jinja `Environment` that tries item access before
+attribute access), not by renaming around the one collision, since any future action's output
+key could hit the same class of bug. Also found and fixed a real typing gap while adding a
+regression test: `@file_action`/`@com_action` were erasing every action's parameter types via
+`Callable[..., ActionResult]`, silently defeating mypy at every call site — switched to
+`ParamSpec`, which surfaced (and let us fix) `read_metadata` silently mishandling an
+unsupported `target` value instead of rejecting it.
+
+`tests/integration/test_run_workflow.py` is the first genuine end-to-end suite — real
+`workflow.yaml` text run through `run_workflow()` against real openpyxl workbooks, exactly the
+shape agreed on with the user. Fixture workbooks are generated in code, not committed as static
+files in `tests/data/` (a correction to the original testing-approach sketch, Spec §7) — more
+reviewable, consistent with every other test in this codebase.
+
+All quality gates pass: 220/220 tests, ruff clean, mypy --strict clean (`excel_runner` +
+`tests`), radon cc clean, vulture clean, **100% branch coverage** across all 6 modules.
+**Next step:** Still owed before moving on, per the user's "pause for integration testing"
+request: a dedicated mid-run-crash integration test (PRD §6.3/§6.3.1's actual crash-safety
+requirement, not just the design note — Spec §7). Then build order item 8 — `runner.py` §6.3,
+the public API surface (`__init__.py` re-exports, `list_actions()`).
 **Notes:** `aggregate` and `update_summary_table`'s exact parameters are still explicitly
 flagged as open in the PRD — don't block on them. Tracker below stays function/class-granular
 even though source files are consolidated — see Spec §7.
@@ -111,10 +119,10 @@ even though source files are consolidated — see Spec §7.
 
 | Component | Unit Tests | Code | Integration Tests | Unit Results | Integration Results |
 |---|---|---|---|---|---|
-| `AuditLogger` — `runner.py` §6.2 | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `run_workflow` orchestration — `runner.py` §6.1 | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `AuditLogger` — `runner.py` §6.2 | ✅ | ✅ | ✅ | ✅ | ✅ |
+| `run_workflow` orchestration — `runner.py` §6.1 | ⏭️ | ✅ | ✅ | ⏭️ | ✅ |
 | Public API surface (`__init__.py` re-exports) — `runner.py` §6.3 | ❌ | ❌ | ❌ | ❌ | ❌ |
-| Crash-safety integration test (Spec §7) | ⏭️ | ⏭️ | ❌ | ⏭️ | ❌ |
+| Crash-safety (mid-run interruption) integration test (Spec §7) | ⏭️ | ⏭️ | ❌ | ⏭️ | ❌ |
 
 ## Phase 7 — COM (Windows-dependent, later phase per PRD §8)
 

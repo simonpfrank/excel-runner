@@ -22,6 +22,36 @@ class TestResolveValueNonTemplated:
         assert resolve_value(3.5, {}) == 3.5
 
 
+class TestResolveValueDictKeysThatShadowDictMethods:
+    """Regression test for a real bug: a dict field named "values" (read_range's actual
+    output key, PRD sec 10.4) was shadowed by Python dict's built-in .values() method under
+    plain Jinja2 attribute resolution — {{ x.values }} returned the bound method, not the
+    dict's "values" entry. Covers the other common method-name collisions too."""
+
+    def test_values_key_resolves_to_the_item_not_the_dict_method(self) -> None:
+        context = {"steps": {"get_a1": {"output": {"values": "hello"}}}}
+        result = resolve_value("{{ steps.get_a1.output.values }}", context)
+        assert result == "hello"
+
+    def test_keys_key_resolves_to_the_item_not_the_dict_method(self) -> None:
+        context = {"steps": {"s1": {"output": {"keys": "some value"}}}}
+        assert resolve_value("{{ steps.s1.output.keys }}", context) == "some value"
+
+    def test_items_key_resolves_to_the_item_not_the_dict_method(self) -> None:
+        context = {"steps": {"s1": {"output": {"items": [1, 2, 3]}}}}
+        assert resolve_value("{{ steps.s1.output.items }}", context) == [1, 2, 3]
+
+    def test_real_attribute_access_still_works_for_non_dict_objects(self) -> None:
+        """The item-first override only applies where item access (`obj[attr]`) succeeds —
+        for anything that isn't subscriptable, real attribute access is still the fallback."""
+
+        class _Point:
+            x = 5
+
+        result = resolve_value("{{ p.x }}", {"p": _Point()})
+        assert result == 5
+
+
 class TestResolveValueWholeExpression:
     """A field whose entire value is one {{ }} expression resolves to the native
     Python object, not a stringified render (Ansible-style native types, PRD sec 10.1)."""

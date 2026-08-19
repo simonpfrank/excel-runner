@@ -10,7 +10,7 @@ code, so vulture can't see that they're used at all. Run: `vulture excel_runner
 vulture_whitelist.py`.
 """
 
-from excel_runner import actions, backends, engine
+from excel_runner import actions, backends, engine, runner
 from excel_runner.core import (
     ActionExecutionError,
     ActionResult,
@@ -66,3 +66,6 @@ engine.SessionManager.get_or_open
 engine.SessionManager.close_all
 engine.validate_static
 engine.plan
+
+runner.StepResult.step_id
+runner.run_workflow

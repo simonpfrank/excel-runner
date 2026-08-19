@@ -12,7 +12,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal
+from typing import Any, Literal, ParamSpec
 
 import jinja2
 import yaml
@@ -107,7 +107,26 @@ class ActionExecutionError(ExcelRunnerError):
 
 # --- Templating -------------------------------------------------------------------------
 
-_ENV = jinja2.Environment(undefined=jinja2.StrictUndefined)
+class _DictItemFirstEnvironment(jinja2.Environment):
+    """A dict field named "values"/"keys"/"items"/etc. would otherwise be shadowed by the real
+    dict method of the same name — Jinja2's default `getattr` tries attribute access before
+    item access, and every dict has real `.values()`/`.keys()`/etc. methods. Found via a real
+    bug: `{{ steps.x.output.values }}` returned the bound `dict.values` method instead of the
+    output dict's "values" entry (PRD sec 10.4's own output-shape convention for `read_range`).
+    Every value flowing through our templates — env, steps, an action's output — is a plain
+    dict/list, never an object whose real attributes we'd want prioritized over its data, so
+    item-first is the *correct* order for this templating engine's actual use, not a patch
+    around one unlucky field name.
+    """
+
+    def getattr(self, obj: Any, attribute: str) -> Any:
+        try:
+            return obj[attribute]
+        except (TypeError, LookupError):
+            return super().getattr(obj, attribute)
+
+
+_ENV = _DictItemFirstEnvironment(undefined=jinja2.StrictUndefined)
 _WHOLE_EXPRESSION_RE = re.compile(r"^\{\{(.*)\}\}$", re.DOTALL)
 
 
@@ -323,16 +342,22 @@ class WorkbookSession:
 
 ACTION_CAPABILITIES: dict[str, Literal["file", "com", "depends_on_param"]] = {}
 
-_ActionFn = Callable[..., ActionResult]
+_P = ParamSpec("_P")
 
 
-def file_action(fn: _ActionFn) -> _ActionFn:
-    """Register a function as a file-backend (openpyxl) action for discovery (Spec sec 5.1)."""
+def file_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]:
+    """Register a function as a file-backend (openpyxl) action for discovery (Spec sec 5.1).
+
+    Typed with ParamSpec, not `Callable[..., ActionResult]`, so the decorated function keeps
+    its real parameter signature for mypy — found the hard way: an untyped `...` erased every
+    action's params to "accepts anything", silently defeating static type checking at every
+    call site, not just inside the action itself.
+    """
     ACTION_CAPABILITIES[fn.__name__] = "file"
     return fn
 
 
-def com_action(fn: _ActionFn) -> _ActionFn:
+def com_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]:
     """Register a function as a COM-backend (xlwings) action for discovery (Spec sec 5.1)."""
     ACTION_CAPABILITIES[fn.__name__] = "com"
     return fn
