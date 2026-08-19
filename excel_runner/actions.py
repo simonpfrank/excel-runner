@@ -11,10 +11,12 @@ banners, since there's no file boundary to do it now that actions live in one mo
 (docs/Specification.md sec 4).
 """
 
-from typing import Any
+from typing import Any, Literal
+
+from openpyxl.utils import column_index_from_string, get_column_letter
 
 from excel_runner import backends
-from excel_runner.core import ActionResult, WorkbookSession, file_action
+from excel_runner.core import ActionExecutionError, ActionResult, ErrorDetail, WorkbookSession, file_action
 
 # --- basic -------------------------------------------------------------------------------
 
@@ -71,6 +73,38 @@ def close(session: WorkbookSession) -> ActionResult:
 
 
 @file_action
+def copy(
+    session: WorkbookSession,
+    target: WorkbookSession,
+    source_sheet: str,
+    target_sheet: str,
+    target_range: str,
+    source_range: str | None = None,
+) -> ActionResult:
+    """Copy a range — or, if `source_range` is omitted, the whole sheet — into another session.
+
+    The one action needing two open sessions at once. The (not-yet-built) runner will need
+    special-case wiring to resolve both `source.workbook` and `target.workbook` into `session`
+    and `target` before calling this — every other action's single `workbook:` field maps to
+    one `session` param, but copy's YAML shape has two nested workbook refs (PRD sec 7/sec 11).
+
+    Args:
+        session: The source workbook session.
+        target: The target workbook session.
+        source_sheet: Source worksheet name.
+        target_sheet: Target worksheet name.
+        target_range: Where to start writing — only the top-left cell is used.
+        source_range: An A1-style range, or None to copy the whole sheet.
+
+    Returns:
+        A success result with no meaningful output.
+    """
+    backends.copy_range(session.handle, source_sheet, source_range, target.handle, target_sheet, target_range)
+    target.dirty = True
+    return ActionResult(status="success", output={})
+
+
+@file_action
 def read_range(session: WorkbookSession, sheet: str, range: str) -> ActionResult:
     """Read a cell or range of cells.
 
@@ -91,6 +125,46 @@ def read_range(session: WorkbookSession, sheet: str, range: str) -> ActionResult
 
 
 @file_action
+def read_metadata(
+    session: WorkbookSession,
+    target: Literal["properties", "cells"],
+    sheet: str | None = None,
+    cells: list[str] | None = None,
+) -> ActionResult:
+    """Read document properties, or a scattered list of specific cells.
+
+    The `textboxes` sub-target from PRD sec 7 is COM-only (openpyxl can't see live control
+    state) and not built here — deferred to the COM phase (Spec sec 8). `sheet` is a
+    clarification found during implementation: PRD sec 7's catalog didn't list it for the
+    `cells` sub-case, but reading specific cells needs to know which worksheet they're on,
+    same as every other cell-addressing action.
+
+    Args:
+        session: The workbook session to read from.
+        target: "properties" for document properties, "cells" for a scattered cell list.
+        sheet: Worksheet name — required if target is "cells".
+        cells: A1-style cell references to read — required if target is "cells".
+
+    Returns:
+        `{"values": ...}`-style keyed output: document properties by name, or cell reference
+        to value, depending on `target`.
+
+    Raises:
+        ActionExecutionError: If target is "cells" but `sheet`/`cells` weren't given.
+    """
+    if target == "properties":
+        return ActionResult(status="success", output=backends.read_properties(session.handle))
+    if sheet is None or cells is None:
+        raise ActionExecutionError(
+            ErrorDetail(
+                message='read_metadata: target "cells" requires both `sheet` and `cells`.',
+                technical_reason="read_metadata called with target=cells but sheet or cells was None",
+            )
+        )
+    return ActionResult(status="success", output=backends.read_cells(session.handle, sheet, cells))
+
+
+@file_action
 def write_cell(session: WorkbookSession, sheet: str, cell: str, value: Any) -> ActionResult:
     """Write a value to a single cell.
 
@@ -106,3 +180,235 @@ def write_cell(session: WorkbookSession, sheet: str, cell: str, value: Any) -> A
     backends.write_cell(session.handle, sheet, cell, value)
     session.dirty = True
     return ActionResult(status="success", output={})
+
+
+@file_action
+def write_range(session: WorkbookSession, sheet: str, range: str, values: list[list[Any]]) -> ActionResult:
+    """Write a 2D block of values, anchored at the top-left cell of `range`.
+
+    Args:
+        session: The workbook session to write to.
+        sheet: Worksheet name.
+        range: An A1-style cell or range — only the top-left cell is used as the anchor.
+        values: A 2D list of row values to write.
+
+    Returns:
+        A success result with no meaningful output.
+    """
+    backends.write_range(session.handle, sheet, range, values)
+    session.dirty = True
+    return ActionResult(status="success", output={})
+
+
+@file_action
+def write_row(
+    session: WorkbookSession,
+    sheet: str,
+    row: int,
+    values: dict[str, Any] | list[Any],
+    start_column: str | None = None,
+) -> ActionResult:
+    """Write a row of values, either by explicit column mapping or positionally.
+
+    The by-header mode (`values_by_header` + `headers_from`, PRD sec 7/sec 11 item 9) isn't
+    built here — it needs another step's output, which doesn't exist as a concept until
+    runner.py threads step-output context through (Spec sec 4/8).
+
+    Args:
+        session: The workbook session to write to.
+        sheet: Worksheet name.
+        row: The row number to write into.
+        values: Either `{column: value}` (explicit mapping), or a plain ordered list written
+            left-to-right starting at `start_column` (positional mode).
+        start_column: Required when `values` is a list — the column to start writing at.
+
+    Returns:
+        A success result with no meaningful output.
+
+    Raises:
+        ActionExecutionError: If `values` is a list but `start_column` wasn't given.
+    """
+    if isinstance(values, dict):
+        for column, value in values.items():
+            backends.write_cell(session.handle, sheet, f"{column}{row}", value)
+    else:
+        if start_column is None:
+            raise ActionExecutionError(
+                ErrorDetail(
+                    message="write_row: positional `values` (a list) needs `start_column`.",
+                    technical_reason="write_row called with list values but start_column=None",
+                )
+            )
+        start_idx = column_index_from_string(start_column)
+        for offset, value in enumerate(values):
+            column = get_column_letter(start_idx + offset)
+            backends.write_cell(session.handle, sheet, f"{column}{row}", value)
+    session.dirty = True
+    return ActionResult(status="success", output={})
+
+
+# --- structure -----------------------------------------------------------------------------
+
+
+@file_action
+def insert_range(
+    session: WorkbookSession,
+    sheet: str,
+    at: str,
+    direction: Literal["rows", "columns"] | None = None,
+    header: dict[str, Any] | None = None,
+) -> ActionResult:
+    """Insert a whole row or whole column, shifting existing content.
+
+    A partial range (e.g. "C5:C10") isn't built yet (PRD sec 11 item 12's flagged cost) —
+    caught here and returned as a structured error, consistent with find_*'s "legitimately
+    didn't work" pattern below, rather than a raw exception escaping.
+
+    Args:
+        session: The workbook session to modify.
+        sheet: Worksheet name.
+        at: A whole-column reference (e.g. "C:C") or whole-row reference (e.g. "5:5").
+        direction: Unused for whole-row/whole-column inserts (unambiguous from `at` itself).
+        header: `{"row": int, "text": str}` — only meaningful for a column insert.
+
+    Returns:
+        A success result, or a structured error if `at` is a partial range.
+    """
+    try:
+        backends.insert_range(session.handle, sheet, at, direction, header)
+    except NotImplementedError as exc:
+        return ActionResult(
+            status="error",
+            output={},
+            error=ErrorDetail(message=str(exc), technical_reason=f"{type(exc).__name__}: {exc}"),
+        )
+    session.dirty = True
+    return ActionResult(status="success", output={})
+
+
+@file_action
+def set_column_width(
+    session: WorkbookSession, sheet: str, columns: str, width: float | Literal["autofit"]
+) -> ActionResult:
+    """Set the width of a column or range of columns.
+
+    Args:
+        session: The workbook session to modify.
+        sheet: Worksheet name.
+        columns: A single column letter (e.g. "B") or range (e.g. "A:C").
+        width: An explicit width, or "autofit".
+
+    Returns:
+        A success result with no meaningful output.
+    """
+    backends.set_column_width(session.handle, sheet, columns, width)
+    session.dirty = True
+    return ActionResult(status="success", output={})
+
+
+# --- lookup ----------------------------------------------------------------------------------
+
+
+@file_action
+def find_headers_row(
+    session: WorkbookSession, sheet: str, search_range: str, patterns: list[str]
+) -> ActionResult:
+    """Find the row within `search_range` where every pattern matches some cell in that row.
+
+    Args:
+        session: The workbook session to search.
+        sheet: Worksheet name.
+        search_range: An A1-style range to search within.
+        patterns: Regex patterns — every one must match a cell in a row for that row to count.
+
+    Returns:
+        `{"row": int, "headers": {pattern: column_letter}}`, or a structured error if no row
+        matches every pattern — a normal outcome of a search, not an unexpected failure.
+    """
+    result = backends.find_headers_row(session.handle, sheet, search_range, patterns)
+    if result is None:
+        return ActionResult(
+            status="error",
+            output={},
+            error=ErrorDetail(
+                message=f'No row in "{search_range}" of sheet "{sheet}" matches every pattern: {patterns}.',
+                technical_reason="find_headers_row: no row matched all patterns",
+            ),
+        )
+    row, headers = result
+    return ActionResult(status="success", output={"row": row, "headers": headers})
+
+
+@file_action
+def find_row(
+    session: WorkbookSession, sheet: str, column: str, search_value: Any, header_row: int | None = None
+) -> ActionResult:
+    """Find the row number where `column` equals `search_value`.
+
+    Args:
+        session: The workbook session to search.
+        sheet: Worksheet name.
+        column: A column letter (e.g. "B").
+        search_value: The value to match, by equality.
+        header_row: If given, search starts on the row after it.
+
+    Returns:
+        `{"row": int}`, or a structured error if not found.
+    """
+    row = backends.find_row(session.handle, sheet, column, search_value, header_row)
+    if row is None:
+        return ActionResult(
+            status="error",
+            output={},
+            error=ErrorDetail(
+                message=f'No row found in column "{column}" of sheet "{sheet}" matching "{search_value}".',
+                technical_reason="find_row: no matching row",
+            ),
+        )
+    return ActionResult(status="success", output={"row": row})
+
+
+@file_action
+def find_column(session: WorkbookSession, sheet: str, header_row: int, pattern: str) -> ActionResult:
+    """Find the column letter whose header (in `header_row`) matches `pattern`.
+
+    Args:
+        session: The workbook session to search.
+        sheet: Worksheet name.
+        header_row: The row number containing headers.
+        pattern: A regex pattern to match against each header cell's value.
+
+    Returns:
+        `{"column": str}`, or a structured error if not found.
+    """
+    column = backends.find_column(session.handle, sheet, header_row, pattern)
+    if column is None:
+        return ActionResult(
+            status="error",
+            output={},
+            error=ErrorDetail(
+                message=f'No column found in sheet "{sheet}" row {header_row} matching "{pattern}".',
+                technical_reason="find_column: no matching column",
+            ),
+        )
+    return ActionResult(status="success", output={"column": column})
+
+
+@file_action
+def find_columns(
+    session: WorkbookSession, sheet: str, header_row: int, patterns: dict[str, str]
+) -> ActionResult:
+    """Find multiple named columns by header pattern in one call.
+
+    Args:
+        session: The workbook session to search.
+        sheet: Worksheet name.
+        header_row: The row number containing headers.
+        patterns: Logical name to regex pattern.
+
+    Returns:
+        Logical name to column letter, for every pattern that matched. Names whose pattern
+        didn't match anything are simply absent — not an error at this level (PRD sec 10.4).
+    """
+    result = backends.find_columns(session.handle, sheet, header_row, patterns)
+    return ActionResult(status="success", output=result)

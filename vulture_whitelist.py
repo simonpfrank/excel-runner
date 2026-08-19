@@ -4,9 +4,10 @@ Dataclass fields are read via attribute access on instances (e.g. ``ref.name``),
 vulture's static analysis doesn't trace, so every dataclass field looks "unused" to it.
 Exception/data classes and functions only consumed by modules not built yet (runner.py, later
 increments per docs/Specification.md's build order) also flag until those land — including
-`actions.open`, which is only ever called dynamically via `engine.discover_actions`'s
-`inspect.getmembers` scan, never by direct name from other source code, so vulture can't see
-that it's used at all. Run: `vulture excel_runner vulture_whitelist.py`.
+several `actions.*` functions, which are only ever called dynamically via
+`engine.discover_actions`'s `inspect.getmembers` scan, never by direct name from other source
+code, so vulture can't see that they're used at all. Run: `vulture excel_runner
+vulture_whitelist.py`.
 """
 
 from excel_runner import actions, backends, engine
@@ -51,6 +52,9 @@ WorkbookSession.dirty
 com_action
 
 actions.open
+actions.copy
+actions.read_metadata
+actions.write_row
 
 backends.open_workbook
 

@@ -32,3 +32,35 @@ def file_session(workbook_path: Path) -> Iterator[WorkbookSession]:
     yield WorkbookSession(
         name="manip", backend="file", handle=handle, path=str(workbook_path), mode="read_write"
     )
+
+
+@pytest.fixture
+def richer_workbook_path(tmp_path: Path) -> Path:
+    """A fixture with a real header row + data rows, for find_*/read_metadata tests."""
+    path = tmp_path / "richer_fixture.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.title = "Summary"
+    sheet["A1"] = "Notes"
+    sheet["A2"] = "Region"
+    sheet["B2"] = "Total"
+    sheet["C2"] = "Status"
+    sheet["A3"] = "North"
+    sheet["B3"] = 100
+    sheet["C3"] = "PASS"
+    sheet["A4"] = "South"
+    sheet["B4"] = 200
+    sheet["C4"] = "FAIL"
+    workbook.properties.title = "Q1 Report"
+    workbook.properties.creator = "Simon"
+    workbook.save(path)
+    return path
+
+
+@pytest.fixture
+def richer_file_session(richer_workbook_path: Path) -> Iterator[WorkbookSession]:
+    handle = backends.open_workbook(str(richer_workbook_path), mode="read_write")
+    yield WorkbookSession(
+        name="manip", backend="file", handle=handle, path=str(richer_workbook_path), mode="read_write"
+    )

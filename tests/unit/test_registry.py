@@ -10,7 +10,23 @@ from excel_runner.engine import ActionSpec, discover_actions
 class TestDiscoverActions:
     def test_finds_every_capability_tagged_function(self) -> None:
         registry = discover_actions(actions)
-        assert set(registry) == {"open", "save", "close", "read_range", "write_cell"}
+        assert set(registry) == {
+            "open",
+            "save",
+            "close",
+            "copy",
+            "read_range",
+            "read_metadata",
+            "write_cell",
+            "write_range",
+            "write_row",
+            "insert_range",
+            "set_column_width",
+            "find_headers_row",
+            "find_row",
+            "find_column",
+            "find_columns",
+        }
 
     def test_each_entry_is_an_action_spec(self) -> None:
         registry = discover_actions(actions)

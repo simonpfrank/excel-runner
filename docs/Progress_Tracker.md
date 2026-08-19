@@ -2,8 +2,8 @@
 
 ## Last Session (2026-08-19)
 **Status:** In Progress
-**Working on:** Build order items 1–3 (Spec §8) all done. Git repo initialized, three commits
-on `main`.
+**Working on:** Build order items 1–4 (Spec §8) all done (item 4 for what's cleanly buildable
+now — see below). Git repo initialized, four commits on `main`.
 
 Item 2 surfaced a real design bug: PRD §10.1/Spec §2.2 originally said "render the whole YAML
 file as one Jinja2 text pass, then parse it" — can't work for `{{ steps.* }}` (no step has run
@@ -11,30 +11,41 @@ at load time). Corrected to: parse YAML directly, resolve `env:`/`workbooks:` on
 (env-only), `Step.params`/`if_expr` left raw and resolved per-step during execution (env +
 steps). Docs updated in place.
 
-Item 3 (action registry + first 5 actions: `open`, `save`, `close`, `read_range`, `write_cell`,
-plus the matching `backends.py` file-backend primitives) surfaced four more corrections, all
-recorded in Spec §4/§5.1/§5.2: `ActionResult`/`WorkbookSession` moved to `core.py` (avoids a
-circular import between `engine.py`'s registry and `actions.py`); no `workbook` param on action
-functions (the not-yet-built runner resolves it into `session` before calling); actions call
-`backends.py` directly rather than through a `session.<something>` indirection (the capability
-tag already fixes which backend, no runtime branching to hide); `WorkbookSession` needed a
-`path` field the original sketch missed. Also: the 5 built actions have a smaller param surface
-than PRD §7's full catalog (`open` without `update_links`/`mode`, `read_range` without
-`as: formulas`) — documented per-action as deferred until the machinery they depend on
-(COM, tier-2 validation) exists, not a permanent cut.
+Item 3 (action registry + first 5 actions) surfaced four corrections, all recorded in
+Spec §4/§5.1/§5.2: `ActionResult`/`WorkbookSession` moved to `core.py` (avoids a circular import
+between `engine.py`'s registry and `actions.py`); no `workbook` param on action functions (the
+not-yet-built runner resolves it into `session` before calling); actions call `backends.py`
+directly rather than through a `session.<something>` indirection; `WorkbookSession` needed a
+`path` field the original sketch missed.
 
-All quality gates pass: 96/96 tests, ruff clean, mypy --strict clean (`excel_runner` + `tests`),
-radon cc clean, vulture clean, **100% branch coverage** across `core.py`, `backends.py`,
-`actions.py`, `engine.py`.
-**Next step:** Build order item 4 (Spec §8) — fill out `backends.py`'s remaining file-backend
-primitives alongside the rest of the v1 file-backend actions (`copy`, `write_range`,
-`write_row`, `write_table`, `insert_range`, `set_column_width`, `find_headers_row`, `find_row`,
-`find_column`, `find_columns`, `aggregate`, `read_links`, `read_metadata`'s file sub-case).
+Item 4 (remaining v1 file-backend actions) built 9 more: `copy`, `write_range`, `write_row`
+(base + positional modes), `insert_range` (whole-row/column only), `set_column_width`,
+`find_headers_row`, `find_row`, `find_column`, `find_columns`, `read_metadata` (properties/cells
+sub-cases) — 14 actions built in total now. This batch established the error-handling policy
+(structured `ActionResult(status="error")` for a normal "search found nothing" outcome vs. a
+raised exception for a genuine authoring mistake — Spec §4) and surfaced real deferrals:
+- `write_table`, `write_row`'s by-header mode, and `aggregate` all need step-output context
+  (`source`/`headers_from` are step-id references, not templated values) that doesn't exist
+  until `runner.py` threads it through — item 7, not blocking now.
+- `read_links` — **empirically** (not just theoretically) downgraded: a spike showed openpyxl
+  never creates an external-link relationship from a written formula, only reflects one already
+  in a real-Excel-created file. Moved into the same deferred bucket as `write_links`. PRD §7/§8
+  and §12 corrected — the earlier "resolved: reading looks solid" call was wrong, based on docs
+  not a real test.
+- `copy` needed two `WorkbookSession` params (source + target) — its YAML shape has two nested
+  workbook refs, not one flat `workbook:` field. Built and tested; `runner.py` will need
+  matching two-session wiring later.
+- `read_metadata`'s `cells` sub-case needed a `sheet` param the original PRD §7 catalog didn't
+  list.
+
+All quality gates pass: 152/152 tests, ruff clean, mypy --strict clean (`excel_runner` +
+`tests`), radon cc clean, vulture clean, **100% branch coverage** across all 4 modules.
+**Next step:** Build order item 5 (Spec §8) — `engine.py`'s `SessionManager` (multi-workbook
+lifecycle: lazy-open, promotion, close-all) and `ScratchManager` (scratch-copy execution model,
+PRD §6.3.1). The `WorkbookSession` data shape is already built; `SessionManager` itself isn't.
 **Notes:** `aggregate` and `update_summary_table`'s exact parameters are still explicitly
-flagged as open in the PRD — don't block on them, they're late in the build order (Spec §8
-items 4 and 10 — note item 4's action list above still needs `aggregate` built even though its
-exact param design is flagged, since the base shape from PRD §11.17 is usable now). Tracker
-below stays function/class-granular even though source files are consolidated — see Spec §7.
+flagged as open in the PRD — don't block on them. Tracker below stays function/class-granular
+even though source files are consolidated — see Spec §7.
 
 ## Status legend
 ❌ Not Done · 🟡 In Progress · ✅ Done — Results: ✅ Pass · ❌ Fail · ⏭️ N/A
@@ -65,20 +76,22 @@ below stays function/class-granular even though source files are consolidated �
 
 | Component | Unit Tests | Code | Integration Tests | Unit Results | Integration Results |
 |---|---|---|---|---|---|
-| File-backend primitives — `backends.py` §3 | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `copy` action | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `write_range` action | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `write_row` action | ❌ | ❌ | ❌ | ❌ | ❌ |
+| File-backend primitives for this batch — `backends.py` §3 | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `copy` action (two-session signature — see notes above) | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `write_range` action | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `write_row` action (base + positional modes) | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `write_row` by-header mode | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `write_table` action | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `insert_range` action | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `set_column_width` action | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `find_headers_row` action | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `find_row` action | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `find_column` action | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `find_columns` action | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `insert_range` action (whole-row/column only) | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `insert_range` partial-range support | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `set_column_width` action | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `find_headers_row` action | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `find_row` action | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `find_column` action | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `find_columns` action | ✅ | ✅ | ❌ | ✅ | ❌ |
 | `aggregate` action | ❌ | ❌ | ❌ | ❌ | ❌ |
 | `read_links` action | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `read_metadata` action (properties/cells only) | ❌ | ❌ | ❌ | ❌ | ❌ |
+| `read_metadata` action (properties/cells) | ✅ | ✅ | ❌ | ✅ | ❌ |
 
 ## Phase 4 — Execution model (Spec §5.2, §5.3)
 
@@ -120,7 +133,8 @@ below stays function/class-granular even though source files are consolidated �
 | Item | Status |
 |---|---|
 | `update_summary_table` — exact parameters | Not designed yet, deliberately deferred |
-| `aggregate` | Flagged for discussion, not resolved |
+| `aggregate`, `write_table`, `write_row` by-header mode | Need step-output context — blocked on `runner.py` (build order item 7), not just deferred by choice |
+| `read_links` (+ already-deferred `write_links`) | Blocked on a real Excel-generated fixture (or manual XML/zip surgery) — empirically confirmed openpyxl can't create the relationship itself |
 | `export_pdf` | Backlog |
 | AI-authoring inspection actions (`list_sheets`, `describe_sheet`) | Planned, next phase after core engine works (PRD §9) |
 | Instance-ownership tagging mechanism across crashes (PRD §6.2.1/§12) | Open question |

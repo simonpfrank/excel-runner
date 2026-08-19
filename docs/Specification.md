@@ -226,6 +226,49 @@ the one touched most often. Two things keep it navigable without adding source f
   lookup → aggregate → links → COM), with a one-line comment banner per group, so the physical
   layout still mirrors the catalog even without file boundaries doing it.
 
+**14 built so far**: `open`, `save`, `close`, `copy`, `read_range`, `read_metadata`
+(properties/cells sub-cases), `write_cell`, `write_range`, `write_row` (base + positional
+modes), `insert_range` (whole-row/whole-column only), `set_column_width`, `find_headers_row`,
+`find_row`, `find_column`, `find_columns`. All green, 100% branch coverage.
+
+**Error-handling policy, established while building this batch**: an action returns
+`ActionResult(status="error", error=ErrorDetail(...))` for an outcome that's a normal,
+anticipated result of trying — a search that legitimately finds nothing (`find_row`,
+`find_column`, `find_headers_row`), or a documented not-yet-supported case
+(`insert_range`'s partial range). It *raises* `ActionExecutionError`/`ValidationError` for a
+genuine authoring mistake the action can't proceed from at all (`write_row`'s positional mode
+called without `start_column`; `read_metadata`'s `cells` target called without `sheet`/`cells`).
+The line: would a workflow author reasonably want to branch on this with `if:` (structured
+result), or is it just wrong and should stop the run (exception)? Deliberately not
+wrapping every possible exception into a result — that's the "defensive fallback layers" PRD §1
+names as a root cause to avoid, not a pattern to bring back under a different name.
+
+**Deferred, with reasons found during implementation**:
+- `write_table`, `write_row`'s by-header mode, and `aggregate` all need **step-output context**
+  a standalone action call doesn't have — `write_table`'s `source: [step_ids]` and `aggregate`'s
+  `source` are step-id references (not templated values `resolve_value` would catch), and
+  `write_row`'s `headers_from` is the same shape. All three become buildable once `runner.py`
+  threads accumulated step outputs through to action calls (build order item 7). `aggregate`
+  was already flagged "discuss when we get to it" in PRD §7/§11.17 — this compounds that, it
+  doesn't newly block it.
+- `read_links` — **empirically downgraded**, not just theoretically uncertain. A quick spike
+  during implementation: writing a formula string containing an external reference
+  (`=[Source.xlsx]Sheet1!A1`) via openpyxl and reopening the file leaves
+  `workbook._external_links` empty — openpyxl never creates the underlying relationship from a
+  formula, it only reflects one already present in a file created by real Excel. Reading may
+  still work *given* such a file, but verifying that needs a real Excel-generated fixture (or
+  manual zip/XML surgery to fabricate one) — a real task, not a quick addition. Moved into the
+  same deferred bucket as `write_links` (PRD §7/§8 updated to match). Any notes from a future
+  spike go in the private, gitignored file per §0 — not named here.
+- `copy` needed a genuinely different signature — two `WorkbookSession` params
+  (`session`=source, `target`=target), since its YAML shape has two nested workbook refs
+  (`source: {...}`, `target: {...}`) rather than one flat `workbook:` field. The action itself
+  is built and tested; `runner.py` will need matching special-case wiring to resolve *two*
+  sessions for this one action, not the usual one (build order item 7).
+- `read_metadata`'s `cells` sub-case needed a `sheet` parameter the original PRD §7 catalog
+  didn't list — reading specific cells needs to know which worksheet they're on, same as every
+  other cell-addressing action. PRD §7 updated.
+
 ## 5. Engine layer — `engine.py`
 
 Everything that prepares and manages a run *before and during* action dispatch — registry
@@ -437,9 +480,12 @@ time within it.
    §4/§5.1/§5.2 (shared types moved to `core.py`, `workbook` param dropped from action
    signatures, actions call `backends.py` directly, `WorkbookSession` needed a `path` field).
 4. `backends.py`'s remaining file-backend functions, filled out alongside the remaining v1
-   file-backend actions in `actions.py` (PRD §7/§8: `copy`, `write_range`, `write_row`,
-   `write_table`, `insert_range`, `set_column_width`, `find_headers_row`, `find_row`,
-   `find_column`, `find_columns`, `aggregate`, `read_links`, `read_metadata`'s file sub-case).
+   file-backend actions in `actions.py`. **Done, for what's cleanly buildable now** — `copy`,
+   `write_range`, `write_row` (base + positional modes), `insert_range` (whole-row/column),
+   `set_column_width`, `find_headers_row`, `find_row`, `find_column`, `find_columns`,
+   `read_metadata`'s file sub-case. `write_table`, `aggregate`, `write_row`'s by-header mode,
+   and `read_links` deferred with concrete reasons — see §4's "Deferred, with reasons found
+   during implementation."
 5. `engine.py` §5.2/§5.3 — the `SessionManager` class (multi-workbook lifecycle: lazy-open,
    promotion, close-all — the `WorkbookSession` data shape itself is already built, §5.2) and
    scratch-copy layer, now that there are real actions to run through it.

@@ -280,7 +280,7 @@ Three things that apply to every row below, not repeated per-row:
 | `close` | file/COM | workbook | Optional — see §6.3 implicit close. A forgotten close is still handled automatically. |
 | `copy` | file | source: {workbook, sheet, range}, target: {workbook, sheet, range} | `range` optional on `source` — omit for the whole sheet. |
 | `read_range` | file | workbook, sheet (string, or a list for multi-sheet, or `all`), range, as: values\|formulas (optional) | Multi-sheet: an explicit list (`["North", "South"]`) is the real mechanism; `all` is authoring sugar that expands to the full sheet list before execution — one code path underneath either way. |
-| `read_metadata` | file (properties/cells) or COM (textboxes) | workbook, target: properties\|textboxes\|cells, cells (list, if target=cells) | Two distinct things live behind one action: (a) workbook/document properties (author, title, custom doc properties — file-backend), (b) the current value of an embedded ActiveX/form control (COM-only — openpyxl can't see live control state). Capability depends on `target:`, not fixed per-action (§6.1 exception). |
+| `read_metadata` | file (properties/cells) or COM (textboxes) | workbook, target: properties\|textboxes\|cells, sheet (required if target=cells — clarification found during implementation, missing from the original catalog), cells (list, if target=cells) | Two distinct things live behind one action: (a) workbook/document properties (author, title, custom doc properties — file-backend), (b) the current value of an embedded ActiveX/form control (COM-only — openpyxl can't see live control state). Capability depends on `target:`, not fixed per-action (§6.1 exception). |
 | `write_cell` | file | workbook, sheet, cell, value | Single-cell write. `value` can be a literal or a step-output reference (§10), resolved by the templating engine — no special encoding needed. |
 | `write_range` | file | workbook, sheet, range, values (2D list) | Writes a computed block of values in one shot — the gap between single-cell `write_cell` and row/table-oriented `write_row`/`write_table`. |
 | `write_row` | file | workbook, sheet, row, values: {column: value, ...} — or values_by_header + headers_from — or start_column + positional values | Three modes: explicit column-letter mapping (base form), by-header-name (using a prior `find_columns` step's output), and positional (an ordered list from a start column, no mapping at all). All three in v1. |
@@ -293,7 +293,7 @@ Three things that apply to every row below, not repeated per-row:
 | `find_columns` | file | workbook, sheet, header_row, patterns: {name: pattern, ...} | Multiple named patterns → a mapping of logical name to column letter, in one step. |
 | `aggregate` — **flagged for discussion when we get to it, not resolved now** | file (pandas, in-memory) | source (step ref), group_by, value_column, operation: count\|sum\|avg | No workbook access — pure in-memory aggregation of a prior step's data. |
 | `update_summary_table` — **kept as a dedicated action; exact parameters deliberately deferred, not a phase-1 design task** | file | *(not designed yet)* | Conceptually composes `find_headers_row` + `find_row` + `find_columns` + `aggregate` + `write_row` — see §11 item 19 for a worked composed-vs-wrapper comparison kept for reference. |
-| `read_links` | file | workbook | Reads current external-link target paths — openpyxl exposes `ExternalLink`/`file_link` for reading. |
+| `read_links` | file — **status downgraded, see below** | workbook | Reads current external-link target paths. |
 | `write_links` | COM | workbook, links: {link_id or old_path: new_path} | Rewrites external-link target paths. COM-backed (`ChangeLink`/`LinkSources`) rather than file-backend — openpyxl's write support for external links isn't confirmed reliable enough to depend on. Enables the move-rewrite-refresh-restore scenario in §11 item 18. |
 | `refresh_links` | COM | workbook | Forces Excel to actually re-pull values through the links — distinct from just changing where they point (`read_links`/`write_links` above). |
 | `recalculate` | COM | workbook, mode: normal\|full\|full_rebuild (optional, default normal) | `mode: normal` uses xlwings' portable `app.calculate()` (works on Mac and Windows). `full`/`full_rebuild` require the raw COM object (`app.api.CalculateFull()`/`CalculateFullRebuild()`) — **Windows-only**; requesting either on Mac raises a clear unsupported-platform error, never a silent downgrade. |
@@ -302,12 +302,23 @@ Three things that apply to every row below, not repeated per-row:
 
 ## 8. v1 vs. later phases
 
-- **v1 (file-backend, no COM)**: open, save, close, copy, read_range (incl. multi-sheet mode),
-  read_metadata (document-properties sub-case only), write_cell, write_range, write_row (incl.
-  header-based and positional modes), write_table, insert_range, set_column_width,
-  find_headers_row, find_row, find_column, find_columns, aggregate, read_links.
+Updated against actual build progress (Specification.md §8/§4 track this in detail):
+
+- **v1, built**: open, save, close, copy, read_range (single-range mode; multi-sheet mode still
+  TBD, see §7), read_metadata (properties/cells sub-cases), write_cell, write_range, write_row
+  (base column-mapping + positional modes), insert_range (whole-row/whole-column only —
+  partial-range returns a structured error, not built), set_column_width, find_headers_row,
+  find_row, find_column, find_columns.
 - **v1, but COM-required rather than file-backend**: read_metadata (textbox-control sub-case
-  only — openpyxl can't see live control state).
+  only — openpyxl can't see live control state). Not built yet — COM phase.
+- **Deferred — needs cross-step data access `runner.py` doesn't provide yet**: `write_table`
+  (its `source: [step_ids]` param means "look up these steps' outputs", not a literal value),
+  `write_row`'s by-header mode (`headers_from` is the same kind of step-id reference),
+  `aggregate` (its `source` param is likewise a step reference — this compounds its existing
+  "flagged for discussion" status from §7/§11.17). All three become buildable once `runner.py`
+  threads accumulated step-output context through to action calls.
+- **Deferred — empirically confirmed openpyxl limitation, see §7's `read_links` note**:
+  `read_links`, alongside the already-deferred `write_links`.
 - **Later phase (COM promotion)**: recalculate, run_macro, refresh_links, write_links.
 - **Kept, syntax deferred (not phase-1 design work)**: update_summary_table.
 - **Backlog**: export_pdf.
@@ -879,9 +890,18 @@ anything is still pending:
   rather than reaching into implementation details.
 - ~~Full templating/expression grammar depth~~ — **resolved by §10.1**: real Jinja2 gives
   `if:` comparisons/booleans for free, no bespoke evaluator to design.
-- ~~Whether openpyxl supports reading/writing external-link target paths~~ — **resolved**:
-  reading looks solid (`read_links` stays file-backend); writing isn't confirmed reliable, so
-  `write_links` is COM-backed instead of gambling on it (§7, §8).
+- **Whether openpyxl supports reading/writing external-link target paths — reopened, was
+  wrongly marked resolved.** The earlier "reading looks solid" call was based on reading
+  openpyxl's docs, not on testing it. Empirical test during implementation: writing a formula
+  string containing an external reference (`=[Source.xlsx]Sheet1!A1`) via openpyxl and
+  reopening the file leaves `workbook._external_links` empty — openpyxl doesn't create the
+  underlying external-link relationship from a formula at all, it only reflects one that
+  already exists in a file created by real Excel. Reading may still work *given* such a file,
+  but there's no way to build or verify that without a real Excel-generated fixture (or manual
+  zip/XML surgery to fabricate one) — a real task, not a quick check. `read_links` is
+  downgraded from "resolved: file-backend" to **deferred, same bucket as `write_links`**, until
+  that fixture work happens. Implementation notes in a private, gitignored file — see
+  `docs/Specification.md` §0.
 - ~~Exact xlwings API for recalculation depth~~ — **resolved**: `mode: normal` uses
   `app.calculate()` (cross-platform); `full`/`full_rebuild` require the raw COM object and are
   Windows-only (§7).
