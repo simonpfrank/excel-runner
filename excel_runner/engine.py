@@ -169,13 +169,44 @@ class ScratchManager:
 # --- Session management (Spec sec 5.2) ----------------------------------------------------
 
 
+def _needed_backend(
+    capability: Literal["file", "xlw", "com", "depends_on_param", "none"],
+) -> Literal["file", "xlw"]:
+    """Which `WorkbookSession.backend` a given action capability needs (PRD sec 6.2.2).
+
+    `"com"` needs an `xlw`-backed session too — the action itself reaches deeper via xlwings'
+    `.api`, so `SessionManager` never needs a distinct backend state for it. `"depends_on_param"`
+    (`read_metadata`'s own runtime resolution, Spec sec 5.1) and `"none"` (control actions, PRD
+    sec 6.9 — never call `get_or_open` at all, no `workbook:` field) can't be mapped to a
+    concrete backend here.
+
+    Raises:
+        ActionExecutionError: For `"depends_on_param"` or `"none"` — not yet resolvable, or
+            never actually reachable from here.
+    """
+    if capability == "file":
+        return "file"
+    if capability in ("xlw", "com"):
+        return "xlw"
+    raise ActionExecutionError(
+        ErrorDetail(
+            message=f'Action capability "{capability}" can\'t be resolved to a session backend yet.',
+            technical_reason=(
+                f"_needed_backend: unsupported capability {capability!r} (PRD sec 6.2.2/Spec sec 5.1)"
+            ),
+        )
+    )
+
+
 class SessionManager:
     """Tracks one WorkbookSession per logical workbook name for the duration of a run.
 
     Read/write mode is caller-specified, not statically inferred — tier-2 validation
     (Spec sec 5.4, not built yet) will compute that and hand it in later; for now the caller
-    decides. `promote_to_com` (file -> COM, mid-run) isn't built yet either — it needs the
-    COM backend, which doesn't exist until the later COM phase (PRD sec 8, Spec sec 8 item 9).
+    decides. Bidirectional backend switching (file <-> xlw mid-run, PRD sec 6.2.2) isn't built
+    yet either — it needs the remaining live-Excel-phase pieces (PRD sec 8, Spec sec 8 item 10)
+    — `get_or_open` currently raises rather than switching when a capability doesn't match a
+    session's current backend, see below.
 
     Args:
         workbooks: The workflow's `workbooks:` registry, name to WorkbookRef.
@@ -188,7 +219,10 @@ class SessionManager:
         self._sessions: dict[str, WorkbookSession] = {}
 
     def get_or_open(
-        self, name: str, mode: Literal["read_only", "read_write"] = "read_write"
+        self,
+        name: str,
+        mode: Literal["read_only", "read_write"] = "read_write",
+        capability: Literal["file", "xlw", "com", "depends_on_param", "none"] = "file",
     ) -> WorkbookSession:
         """Return the session for `name`, opening it on first reference.
 
@@ -200,26 +234,50 @@ class SessionManager:
             name: The workbook's logical name, matching a key in the `workbooks:` registry.
             mode: Ignored if a session for `name` is already open — the mode it was first
                 opened with sticks for the rest of the run.
+            capability: The dispatching action's capability (Spec sec 5.1) — determines which
+                backend (`_needed_backend`, PRD sec 6.2.2) this session must be on. Every
+                session opens on the file backend today (bidirectional switching isn't built
+                yet), so this only matters for detecting a mismatch, not yet for resolving one.
 
         Returns:
-            The (possibly newly-opened) WorkbookSession.
+            The (possibly newly-opened) WorkbookSession, on the backend `capability` needs.
 
         Raises:
-            ActionExecutionError: If `name` isn't in the registry, or its file doesn't exist
-                and `create_if_missing` isn't set.
+            ActionExecutionError: If `name` isn't in the registry, its file doesn't exist and
+                `create_if_missing` isn't set, or the session would need a backend switch that
+                isn't built yet (PRD sec 6.2.2).
         """
         if name in self._sessions:
-            return self._sessions[name]
-        if name not in self._workbooks:
+            session = self._sessions[name]
+        else:
+            if name not in self._workbooks:
+                raise ActionExecutionError(
+                    ErrorDetail(
+                        message=f'Workbook "{name}" is not declared in the workbooks: registry.',
+                        technical_reason=f"SessionManager.get_or_open: unknown workbook name {name!r}",
+                    )
+                )
+            ref = self._workbooks[name]
+            session = (
+                self._open_read_write(name, ref) if mode == "read_write" else self._open_read_only(name, ref)
+            )
+            self._sessions[name] = session
+
+        needed = _needed_backend(capability)
+        if session.backend != needed:
             raise ActionExecutionError(
                 ErrorDetail(
-                    message=f'Workbook "{name}" is not declared in the workbooks: registry.',
-                    technical_reason=f"SessionManager.get_or_open: unknown workbook name {name!r}",
+                    message=(
+                        f'Workbook "{name}" is open on the "{session.backend}" backend, but this '
+                        f'step needs "{needed}" — switching backends mid-run isn\'t built yet '
+                        "(PRD sec 6.2.2)."
+                    ),
+                    technical_reason=(
+                        f"SessionManager.get_or_open: capability {capability!r} needs backend "
+                        f"{needed!r}, session {name!r} is currently on {session.backend!r}"
+                    ),
                 )
             )
-        ref = self._workbooks[name]
-        session = self._open_read_write(name, ref) if mode == "read_write" else self._open_read_only(name, ref)
-        self._sessions[name] = session
         return session
 
     def _open_read_write(self, name: str, ref: WorkbookRef) -> WorkbookSession:

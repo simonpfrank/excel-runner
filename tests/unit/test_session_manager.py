@@ -12,6 +12,7 @@ from pathlib import Path
 import openpyxl
 import pytest
 
+from excel_runner import engine
 from excel_runner.core import ActionExecutionError, WorkbookRef, WorkbookSession
 from excel_runner.engine import ScratchManager, SessionManager
 
@@ -81,6 +82,82 @@ class TestGetOrOpen:
         with pytest.raises(ActionExecutionError) as exc_info:
             manager.get_or_open("manip")
         assert "missing.xlsx" in exc_info.value.detail.message
+
+
+class TestNeededBackend:
+    """PRD sec 6.2.2's capability -> backend mapping, as a standalone pure function."""
+
+    def test_file_capability_needs_file_backend(self) -> None:
+        assert engine._needed_backend("file") == "file"
+
+    def test_xlw_capability_needs_xlw_backend(self) -> None:
+        assert engine._needed_backend("xlw") == "xlw"
+
+    def test_com_capability_needs_xlw_backend_too(self) -> None:
+        """com reaches deeper via xlwings' .api on an xlw-backed session — SessionManager
+        never needs a distinct backend state for it (PRD sec 6.2.2)."""
+        assert engine._needed_backend("com") == "xlw"
+
+    def test_depends_on_param_capability_is_not_resolvable_here(self) -> None:
+        """read_metadata's real capability depends on its target: param at runtime — that
+        resolution isn't built yet (Spec sec 5.1), so this can't be mapped to a backend yet."""
+        with pytest.raises(ActionExecutionError):
+            engine._needed_backend("depends_on_param")
+
+    def test_none_capability_is_not_resolvable_here(self) -> None:
+        """Control actions (stop) never reach get_or_open at all — no workbook: field — so this
+        is defensive, not a real path (PRD sec 6.9)."""
+        with pytest.raises(ActionExecutionError):
+            engine._needed_backend("none")
+
+
+class TestCapabilityBackendMismatch:
+    """PRD sec 6.2.2: bidirectional backend switching isn't built yet, so a capability that
+    doesn't match a session's current backend must raise clearly rather than silently return
+    the wrong backend or crash unhelpfully."""
+
+    def test_matching_capability_returns_the_session_normally(self, tmp_path: Path) -> None:
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+
+        session = manager.get_or_open("manip", capability="file")
+
+        assert session.backend == "file"
+
+    def test_default_capability_is_file_unchanged_from_before_this_param_existed(
+        self, tmp_path: Path
+    ) -> None:
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+
+        session = manager.get_or_open("manip")  # no capability given
+
+        assert session.backend == "file"
+
+    def test_mismatched_capability_on_a_brand_new_session_raises_clearly(self, tmp_path: Path) -> None:
+        """A brand-new session always opens file-backend today (Spec sec 5.2) — an xlw/com
+        capability request against it can't be served without switching, which isn't built
+        yet (PRD sec 6.2.2)."""
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+
+        with pytest.raises(ActionExecutionError) as exc_info:
+            manager.get_or_open("manip", capability="xlw")
+
+        assert "manip" in exc_info.value.detail.message
+        assert "switch" in exc_info.value.detail.message.lower()
+
+    def test_mismatched_capability_on_an_already_open_session_raises_clearly(self, tmp_path: Path) -> None:
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager.get_or_open("manip", capability="file")  # opens it as file-backend first
+
+        with pytest.raises(ActionExecutionError):
+            manager.get_or_open("manip", capability="xlw")
 
 
 class TestCreateIfMissing:

@@ -132,7 +132,9 @@ def _dispatch(
         # No session to resolve — stop is pure control flow, no workbook: field (PRD sec 6.9).
         return registry[step.action].fn(**resolved)
     workbook_name = resolved["workbook"]
-    session: WorkbookSession = session_manager.get_or_open(workbook_name, mode=plan.modes[workbook_name])
+    session: WorkbookSession = session_manager.get_or_open(
+        workbook_name, mode=plan.modes[workbook_name], capability=registry[step.action].capability
+    )
     kwargs = {key: value for key, value in resolved.items() if key != "workbook"}
     return registry[step.action].fn(session=session, **kwargs)
 

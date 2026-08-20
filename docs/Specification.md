@@ -396,19 +396,22 @@ class WorkbookSession:      # lives in core.py — see §4's correction
     scratch_path: Path | None = None
     dirty: bool = False
 
+# module-level, engine.py — built (PRD sec 6.2.2)
+def _needed_backend(
+    capability: Literal["file", "xlw", "com", "depends_on_param", "none"],
+) -> Literal["file", "xlw"]: ...   # raises ActionExecutionError for the last two — see below
+
 class SessionManager:
     def get_or_open(
         self, name: str, mode: Literal["read_only","read_write"] = "read_write",
-        capability: Literal["file", "xlw", "com"] = "file",
-    ) -> WorkbookSession: ...
+        capability: Literal["file", "xlw", "com", "depends_on_param", "none"] = "file",
+    ) -> WorkbookSession: ...     # built — raises on a capability/backend mismatch, see below
     def checkpoint(self) -> None: ...     # save every dirty staged session's scratch file
     def commit_all(self) -> None: ...     # save-all (via checkpoint's helper) + ScratchManager commit, §5.3
     def close_all(self) -> None: ...      # always runs — see runner.py's try/finally, §6.1
-    # Bidirectional backend switching (PRD sec 6.2.2, decided 2026-08-20) is NOT built yet —
-    # needs the live-Excel phase's remaining pieces (§8 item 10). No stub for it; it's simply
-    # absent until then. Corrects the original one-way `promote_to_xlw` sketch, which assumed a
-    # workbook only ever moves file -> xlw once and stays there — insufficient once a real
-    # workflow needs to go back to file-backend afterward (PRD sec 6.2.2's recalculate example).
+    # _switch_backend (the actual save/close/reopen dance, PRD sec 6.2.2) is NOT built yet —
+    # needs the live-Excel phase's remaining pieces (§8 item 10) and a live Excel instance to
+    # verify for real. No stub for it; it's simply absent until then.
 ```
 
 **`checkpoint()` was added after the fact, found via a failing crash-safety integration test,
@@ -437,31 +440,30 @@ param is the seam that inference will feed into later — `mode="read_write"` to
 "the caller is telling me this workbook will be written to," which is exactly the condition
 PRD §6.3.1 stages against, whether a human or a validation pass decided it.
 
-**Bidirectional backend switching (PRD §6.2.2) — design, not yet built.** `get_or_open` gains a
-`capability` param (from the dispatching action's `ActionSpec.capability`, §5.1) alongside
-`mode`. When a session already exists for `name`, its logic becomes:
+**Bidirectional backend switching (PRD §6.2.2) — capability threading is built; the actual
+switch is not.** `get_or_open` gained a `capability` param (from the dispatching action's
+`ActionSpec.capability`, §5.1) alongside `mode`, threaded through from `runner.py`'s `_dispatch`
+(§6.1) — it already had the registry lookup to find `fn`, so passing `.capability` too was the
+only change needed on the dispatch side, no new information threaded in from elsewhere. A new
+module-level `_needed_backend(capability)` maps capability to the backend it needs (`file` →
+`file`; `xlw`/`com` → `xlw`, since `com` reaches deeper via xlwings' `.api` on an xlw-backed
+session rather than needing a distinct backend state). `get_or_open` now checks every returned
+session (newly-opened or cached) against this: **if the session's current backend doesn't match
+what the capability needs, it raises a clear `ActionExecutionError` rather than silently
+returning the wrong backend or switching** — the actual switch (save-if-dirty → close → reopen
+on the other side, PRD §6.2.2's `_switch_backend`) isn't built yet, so this is the honest
+boundary of what's supported today, not a stub. Every action built so far is `file`-capability,
+so this boundary is never hit in current real usage — proven by the full existing test/
+integration suite passing unchanged with `capability` defaulting to `"file"` everywhere it
+isn't explicitly passed.
 
-```python
-needed_backend = "file" if capability == "file" else "xlw"  # "com" also needs "xlw"
-if session.backend != needed_backend:
-    _switch_backend(session, needed_backend)  # save-if-dirty, close, reopen on the other side
-return session
-```
-
-`_switch_backend` is the one place that ever closes one backend's handle and opens the other's,
-at the *same* scratch path, updating `session.handle`/`session.backend` in place — mirrors the
-save-then-close-then-reopen sequence already used by `checkpoint()`/`close_all()`, just also
-triggered mid-run at the point a switch is actually needed, not only at step/run boundaries.
-`runner.py`'s `_dispatch` (§6.1) is the one caller that already knows each step's capability
-(from the registry lookup it does to find `fn` in the first place) — passing it through to
-`get_or_open` is the only change needed on the dispatch side; no new information has to be
-threaded in from elsewhere.
-
-The xlwings side of a switch goes through `OwnedInstanceRegistry` (§3.1) for the App instance —
-`SessionManager` will hold one registry per run, spawning its single shared App lazily on the
-first `xlw`/`com`-capability request, not one App per workbook. `close_all()` (below) needs to
-additionally call `self._xlw_registry.close_owned()` once this exists, so a run that spawned an
-App never leaves it running.
+**Still to build**: `_switch_backend` itself (save-then-close-then-reopen, mirroring the
+sequence already used by `checkpoint()`/`close_all()`, just also triggered mid-run at the exact
+point a switch is needed) and its `OwnedInstanceRegistry` (§3.1) integration — `SessionManager`
+will hold one registry per run, spawning its single shared App lazily on the first `xlw`/`com`
+request, not one App per workbook. `close_all()` (below) will need to additionally call
+`self._xlw_registry.close_owned()` once this exists. Needs a live Excel instance to build and
+verify for real — paused per the user's request (2026-08-20), see `docs/Progress_Tracker.md`.
 
 **`create_if_missing`/`template` resolution lives in `SessionManager._create()`**, called from
 both the read-write and read-only open paths when the target file doesn't exist yet. `template`

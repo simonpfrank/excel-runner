@@ -141,12 +141,28 @@ selection is never exposed to the author," extended to switching too). Reuses
 scratch-copy/checkpoint model with no new crash-safety mechanism needed. Written up in PRD
 §6.2.2 and Specification.md §5.2 — design only, not built yet.
 
-**Next step:** Build the bidirectional backend switching in `SessionManager` (PRD §6.2.2, Spec
-§5.2) via TDD — this needs to land before wiring any `xlw`/`com`-tier action to real session
-management, since building actions against the old one-way assumption would need rework. Given
-the Excel-spawning pause above, get as far as possible with what doesn't need a live Excel
-instance (the `capability`-param threading, the switch logic's structure) and flag clearly
-whatever step actually needs a real spawn-and-verify before running it.
+**Capability-param threading built** (the first of the two "no Excel yet" pieces above).
+`SessionManager.get_or_open` gained a `capability` param, threaded through from `runner.py`'s
+`_dispatch` (which already looked up the registry entry to find `fn`, so passing `.capability`
+too was the only change needed there). New `_needed_backend(capability)` maps capability to the
+backend it needs (`file`→`file`; `xlw`/`com`→`xlw` — `com` reaches deeper via xlwings' `.api` on
+an xlw-backed session, no distinct backend state needed). `get_or_open` now raises a clear
+`ActionExecutionError` — not a stub, not a silent wrong-backend return — whenever a session's
+current backend doesn't match what the capability needs, since the actual switch
+(`_switch_backend`: save-if-dirty → close → reopen) isn't built yet. Every action built so far
+is `file`-capability, so this boundary is never hit in real usage today — the full existing
+suite (258 tests, non-Excel portion) passes unchanged. 8 new tests, all real (no mocks),
+covering `_needed_backend`'s full mapping and `get_or_open`'s match/mismatch behavior on both a
+brand-new and an already-open session. Also fixed a stale docstring found along the way:
+`SessionManager`'s class docstring still said `promote_to_com`/"COM phase (PRD sec 8, Spec sec 8
+item 9)" — a leftover from before both the com/xlw rename and the item-9→10 renumbering, missed
+by the earlier sweeps since it's source-code, not a docs file.
+
+**Next step:** Build `_switch_backend` itself (PRD §6.2.2, Spec §5.2) — the actual
+save-if-dirty → close → reopen mechanism, plus `SessionManager` holding an `OwnedInstanceRegistry`
+per run. This is the second "no Excel yet" piece, and it's the point where that stops being
+possible — verifying a real switch needs a live Excel instance. Hold here until the user lifts
+the Excel-spawning pause.
 **Notes:** `aggregate` and `update_summary_table`'s exact parameters are still explicitly
 flagged as open in the PRD — don't block on them. Five things parked in PRD §12, none designed
 or scheduled: grouped `if:` blocks; a "replay nice" desktop-comfort mode (visible Excel replay
