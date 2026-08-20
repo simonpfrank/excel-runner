@@ -96,9 +96,9 @@ dev Mac, so real testing is possible here for what actually works). Along the wa
 but serious environment bug — this project's venv lived under `~/Documents` (iCloud-synced),
 which was silently breaking `.pth`-file processing (editable installs, `appscript`) via macOS's
 hidden-file flag being repeatedly reapplied by the iCloud daemon; fixed by relocating the venv
-to `~/.venvs/excel-runner` (symlinked back as `.venv`) and documented in
-`/Users/simonfrank/Documents/dev/python/CLAUDE.md` so every future project in this tree gets it
-right from the start. Confirmed empirically: open/read/write cell values work reliably via
+to `~/.venvs/excel-runner` (symlinked back as `.venv`) and documented in the dev-tree-wide
+CLAUDE.md so every future project in this tree gets it right from the start. Confirmed
+empirically: open/read/write cell values work reliably via
 xlwings on macOS; `save()` does not (`Parameter error -50`, reproduced consistently, matches
 known xlwings GitHub issues) — real write-path testing needs the Windows environment the
 user will provide. Two Mac-specific `quit()` behaviors found and documented in Spec §3.1 (async
