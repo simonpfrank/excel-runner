@@ -29,6 +29,9 @@ dependencies = [
 Homepage = "https://github.com/simonpfrank/excel-runner"
 Repository = "https://github.com/simonpfrank/excel-runner"
 
+[project.scripts]
+excel-runner = "excel_runner.cli:main"
+
 [project.optional-dependencies]
 dev = [
     "pytest>=8.0",
@@ -37,6 +40,9 @@ dev = [
     "ruff>=0.6",
     "radon>=6.0",
     "vulture>=2.11",
+    "pyright>=1.1",
+    "types-PyYAML>=6.0",
+    "types-openpyxl>=3.1",
 ]
 
 [build-system]
@@ -63,6 +69,13 @@ python_version = "3.11"
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]
+# pytest's built-in faulthandler plugin dumps a full C stack trace for every non-fatal Windows
+# SEH exception it observes — including the RPC_E_SERVERFAULT (0x800706ba) errors that fire
+# when a stale win32com proxy for an already-quit Excel process gets garbage-collected
+# (xlwings/pywin32 on Windows, tests/unit/test_owned_instance_registry.py). Cosmetic only (all
+# tests still pass/report normally) but floods the terminal at interpreter shutdown — disabled
+# here since it adds no real diagnostic value for this project's own test failures.
+addopts = ["-p", "no:faulthandler"]
 
 [tool.coverage.run]
 branch = true

@@ -1,6 +1,99 @@
 # excel_runner — Progress Tracker
 
-## Last Session (2026-08-20)
+## Last Session (2026-08-20c, Windows)
+**Status:** Ready for Next Phase
+**Working on:** Fixed two CLI usability issues (`cli.py` had no direct-run guard, and `--env`'s
+help text didn't explain it's repeatable, not comma/semicolon-separated). Then ran the full
+quality-gate suite (pytest, ruff, mypy --strict, pyright, vulture, radon) on Windows for the
+first time — all clean, after installing `types-PyYAML`, `types-openpyxl`, and `pyright` as
+dev dependencies (none were previously in `pyproject.toml`'s `dev` extra; `mypy --strict` failed
+on missing stubs until installed, `pyright` wasn't installed at all).
+**Next step:** Commit this session's work (Windows reliability fix, CLI entrypoint, quality-gate
+tooling). Then resume `_switch_backend` (PRD §6.2.2, Spec §5.2).
+
+**CLI fixes**: `cli.py` had no `if __name__ == "__main__":` guard of its own (only
+`__main__.py` did), so `python excel_runner\cli.py --help` silently did nothing — it imported
+the module and defined `main()` without ever calling it. Added the guard directly to `cli.py`
+too, since a UiPath xaml step is likely to invoke a script path directly rather than
+`python -m excel_runner`. Also clarified the `--env` help text: repeat the flag once per
+KEY=VALUE pair (`--env a=1 --env b=2`), not comma/semicolon-separated — not obvious from the
+original one-line help text.
+
+**Quality gates, first Windows run**: `mypy --strict excel_runner` failed with
+`import-untyped` errors for `yaml` and `openpyxl` (no stubs installed) plus two
+`no-any-return` errors in `find_row`/`find_column` that turned out to be a consequence of the
+same missing stubs (openpyxl's `Any` types propagating) — installing `types-PyYAML` and
+`types-openpyxl` resolved all of it, no source changes needed. `pyright` wasn't installed at
+all yet; installed it, 0 errors. `vulture --min-confidence 60 excel_runner
+vulture_whitelist.py` and `radon cc --min C excel_runner` were already clean (the whitelist
+already covered `OwnedInstanceRegistry` and the `xlw_*` functions from the previous session).
+Added `types-PyYAML`, `types-openpyxl`, and `pyright` to `pyproject.toml`'s `dev` extra so
+they're installed automatically via `pip install -e ".[dev]"` from now on.
+
+## Last Session (2026-08-20b, Windows)
+**Status:** Ready for Next Phase
+**Working on:** First Windows session (previously Mac-only). Set up the venv with pip (not
+uv) per user's request. Root-caused and fixed a real, reproducible (~50% of runs) intermittent
+hang in `OwnedInstanceRegistry.close_owned()` on Windows, added a CLI entrypoint, fixed two
+now-stale tests, and fixed a syntax error I introduced mid-session in a previous incomplete edit.
+**Next step:** Run the full quality-gate suite (ruff, mypy --strict, pyright, vulture, radon)
+on Windows for the first time and confirm they're clean here too — hasn't been checked on this
+platform yet, only pytest. Then resume `_switch_backend` (PRD §6.2.2, Spec §5.2), now unblocked.
+
+**Reliability bug: `OwnedInstanceRegistry.close_owned()` intermittently hanging on Windows.**
+`app.quit()` on the `xw.App` object returned by `spawn()` would hang indefinitely roughly half
+the time, even though the underlying Excel process was confirmed (via `tasklist` and direct
+visual observation) to still be a real, quickly-terminating process. Root cause, found by
+comparing against an older, previously-reliable reference implementation
+(`Risk Demo/src/excel_core.py`, a different project) and testing hypotheses one at a time
+against real spawned Excel instances: `spawn()` was using `add_book=False` (a bookless
+instance), and a bookless `xw.App` **never registers in `xw.apps` at all** — confirmed directly
+by spawning two bookless instances and finding `xw.apps` empty immediately after. Quitting an
+instance xlwings itself doesn't know about is what caused the hang. Fix: `spawn()` now uses
+`add_book=True` (an initial "Book1" is created and the instance registers immediately), and
+`close_owned()` quits via a fresh `xw.apps[pid]` lookup (falling back to the stored object's own
+`.quit()` for anything not in `xw.apps`, e.g. the fake in
+`test_one_failing_close_does_not_prevent_others_from_closing`). Verified reliable across
+repeated spawn/quit cycles (multiple runs, zero hangs) before and after applying to
+`backends.py`. Not expected to affect macOS — `add_book`/`xw.apps[pid]` are both part of
+xlwings' portable API, not the Windows-only COM layer, and the old reference code used
+`add_book=True` as its own cross-platform default.
+
+**Consequence of the fix, caught by the full suite**: `test_backends_xlw.py`'s
+`test_closes_the_book_without_quitting_the_app` assumed a fresh spawn has zero books — no longer
+true with `add_book=True`. Fixed the test's assumption (checks the *opened* book is gone, not
+that the book list is empty), not the new behavior.
+
+**Also fixed**: `test_owned_instance_registry.py`'s `_process_alive` helper used
+`os.kill(pid, 0)`, a POSIX idiom that raises `OSError: [WinError 87]` on Windows instead of a
+clean liveness signal — first time this suite has run on Windows. Fixed with `ctypes`/
+`OpenProcess` on `os.name == "nt"`, stdlib only, no new dependency.
+
+**Self-inflicted bug, also fixed**: an earlier edit this session (adding then abandoning a
+timeout+force-kill approach to `close_owned()`) had accidentally deleted the
+`class OwnedInstanceRegistry:` line and its docstring's opening — a real `SyntaxError` on
+import, caught by re-running the full suite, not by static checks (the broken state hadn't been
+imported since the edit). Restored. Also removed the now-unused `subprocess`/`sys`/`threading`
+imports left over from the abandoned approach.
+
+**CLI entrypoint added** (`excel_runner/cli.py`, `excel_runner/__main__.py`, `excel-runner`
+console script in `pyproject.toml`) — the actual driver for this: the user needs to invoke a
+workflow from a UiPath xaml workflow as an external process. `main(argv)` parses a workflow path
+and repeatable `--env KEY=VALUE` overrides, calls `run_workflow()`, prints the `RunResult` as
+JSON to stdout, and returns 0 (success) or 1 (any step errored, or the workflow itself failed to
+load/validate/execute — caught as `ExcelRunnerError` and printed as structured JSON too). 4 new
+unit tests (mocking `run_workflow` itself — the zero-mock convention is for the actions/backends
+layer, not for testing the CLI's own argument-parsing/formatting responsibility, which is what
+these test). A separate `visible` config surface (YAML/CLI flag to show the Excel window) was
+discussed but deliberately not built yet — `spawn(visible=...)` already accepts it, but nothing
+upstream (`SessionManager`) calls `spawn()` yet, so there's no live call site to wire it to
+without adding an unused stub.
+
+All 271 tests pass (was 258 pre-session; +4 CLI, +9 elsewhere from this session's changes),
+verified on Windows for the first time. Quality gates beyond pytest not yet re-run on this
+platform (see Next step above).
+
+
 **Status:** Ready for Next Phase
 **Working on:** Build order items 1–8 (Spec §8) — the entire v1 file-backend core engine — are
 now done, plus the crash-safety integration test. Git repo initialized, nine commits on `main`.

@@ -41,7 +41,9 @@ class TestXlwOpenWorkbook:
         app = registry.spawn()
         try:
             with pytest.raises(FileNotFoundError):
-                backends.xlw_open_workbook(app, str(tmp_path / "does_not_exist.xlsx"), mode="read_write")
+                backends.xlw_open_workbook(
+                    app, str(tmp_path / "does_not_exist.xlsx"), mode="read_write"
+                )
         finally:
             registry.close_owned()
 
@@ -55,7 +57,10 @@ class TestXlwCloseWorkbook:
         try:
             book = backends.xlw_open_workbook(app, str(path), mode="read_write")
             backends.xlw_close_workbook(book)
-            assert len(app.books) == 0
+            # spawn() spawns with add_book=True (a Windows reliability fix, see
+            # OwnedInstanceRegistry.spawn's docstring) — the app's own initial "Book1"
+            # is expected to remain; the one this test opened and closed must not.
+            assert "fixture.xlsx" not in [b.name for b in app.books]
         finally:
             registry.close_owned()
 

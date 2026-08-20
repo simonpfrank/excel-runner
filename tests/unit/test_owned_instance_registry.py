@@ -17,6 +17,23 @@ _TERMINATION_GRACE_SECONDS = 5.0
 
 
 def _process_alive(pid: int) -> bool:
+    """Check whether `pid` is still running.
+
+    `os.kill(pid, 0)` is a POSIX idiom that doesn't work on Windows for arbitrary PIDs
+    (raises `OSError: [WinError 87]` instead of a clean liveness signal) — found empirically
+    running this suite on Windows for the first time. Uses `ctypes`/`OpenProcess` there
+    instead, stdlib only, no new dependency for a two-line test helper.
+    """
+    if os.name == "nt":
+        import ctypes
+
+        handle = ctypes.windll.kernel32.OpenProcess(
+            0x1000, False, pid
+        )  # PROCESS_QUERY_LIMITED_INFORMATION
+        if not handle:
+            return False
+        ctypes.windll.kernel32.CloseHandle(handle)
+        return True
     try:
         os.kill(pid, 0)
     except ProcessLookupError:
@@ -111,4 +128,6 @@ class TestCloseOwned:
         with pytest.raises(ExceptionGroup):
             registry.close_owned()
 
-        assert _wait_until_dead(still_alive.pid)  # proves it still got a real close attempt
+        assert _wait_until_dead(
+            still_alive.pid
+        )  # proves it still got a real close attempt

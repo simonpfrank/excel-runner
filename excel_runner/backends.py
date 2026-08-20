@@ -112,7 +112,9 @@ def write_cell(workbook: Workbook, sheet: str, cell: str, value: Any) -> None:
     workbook[sheet][cell] = value
 
 
-def write_range(workbook: Workbook, sheet: str, range: str, values: list[list[Any]]) -> None:
+def write_range(
+    workbook: Workbook, sheet: str, range: str, values: list[list[Any]]
+) -> None:
     """Write a 2D block of values, anchored at the top-left cell of `range`.
 
     The block's size comes from `values`, not from parsing the full extent of `range` — so
@@ -128,10 +130,14 @@ def write_range(workbook: Workbook, sheet: str, range: str, values: list[list[An
     start_row, start_col = anchor.row, anchor.column
     for row_offset, row_values in enumerate(values):
         for col_offset, value in enumerate(row_values):
-            workbook[sheet].cell(row=start_row + row_offset, column=start_col + col_offset, value=value)
+            workbook[sheet].cell(
+                row=start_row + row_offset, column=start_col + col_offset, value=value
+            )
 
 
-def set_column_width(workbook: Workbook, sheet: str, columns: str, width: float | Literal["autofit"]) -> None:
+def set_column_width(
+    workbook: Workbook, sheet: str, columns: str, width: float | Literal["autofit"]
+) -> None:
     """Set the width of a column or range of columns.
 
     "autofit" approximates Excel's real autofit (which needs a rendering engine openpyxl
@@ -146,10 +152,16 @@ def set_column_width(workbook: Workbook, sheet: str, columns: str, width: float 
     worksheet = workbook[sheet]
     start_letter, _, end_letter = columns.partition(":")
     end_letter = end_letter or start_letter
-    for idx in range(column_index_from_string(start_letter), column_index_from_string(end_letter) + 1):
+    for idx in range(
+        column_index_from_string(start_letter), column_index_from_string(end_letter) + 1
+    ):
         letter = get_column_letter(idx)
         if width == "autofit":
-            lengths = [len(str(cell.value)) for cell in worksheet[letter] if cell.value is not None]
+            lengths = [
+                len(str(cell.value))
+                for cell in worksheet[letter]
+                if cell.value is not None
+            ]
             worksheet.column_dimensions[letter].width = max(lengths, default=8) + 2
         else:
             worksheet.column_dimensions[letter].width = width
@@ -220,9 +232,11 @@ def copy_range(
         values = [[cell.value for cell in row] for row in source_worksheet.iter_rows()]
     else:
         selection = source_worksheet[source_range]
-        values = [[selection.value]] if isinstance(selection, _SingleCell) else [
-            [cell.value for cell in row] for row in selection
-        ]
+        values = (
+            [[selection.value]]
+            if isinstance(selection, _SingleCell)
+            else [[cell.value for cell in row] for row in selection]
+        )
     write_range(target_workbook, target_sheet, target_range, values)
 
 
@@ -255,7 +269,11 @@ def find_headers_row(
 
 
 def find_row(
-    workbook: Workbook, sheet: str, column: str, search_value: Any, header_row: int | None = None
+    workbook: Workbook,
+    sheet: str,
+    column: str,
+    search_value: Any,
+    header_row: int | None = None,
 ) -> int | None:
     """Find the row number where `column` equals `search_value`.
 
@@ -272,13 +290,17 @@ def find_row(
     worksheet = workbook[sheet]
     col_idx = column_index_from_string(column)
     start_row = (header_row or 0) + 1
-    for (cell,) in worksheet.iter_rows(min_row=start_row, min_col=col_idx, max_col=col_idx):
+    for (cell,) in worksheet.iter_rows(
+        min_row=start_row, min_col=col_idx, max_col=col_idx
+    ):
         if cell.value == search_value:
             return cell.row
     return None
 
 
-def find_column(workbook: Workbook, sheet: str, header_row: int, pattern: str) -> str | None:
+def find_column(
+    workbook: Workbook, sheet: str, header_row: int, pattern: str
+) -> str | None:
     """Find the column letter whose header (in `header_row`) matches `pattern`.
 
     Args:
@@ -351,7 +373,9 @@ def read_cells(workbook: Workbook, sheet: str, cells: list[str]) -> dict[str, An
     return {cell: worksheet[cell].value for cell in cells}
 
 
-def xlw_open_workbook(app: xw.App, path: str, mode: Literal["read_only", "read_write"]) -> xw.Book:
+def xlw_open_workbook(
+    app: xw.App, path: str, mode: Literal["read_only", "read_write"]
+) -> xw.Book:
     """Open an existing workbook in a live Excel App instance.
 
     Args:
@@ -393,8 +417,7 @@ def xlw_save_workbook(book: xw.Book) -> None:
 
 
 class OwnedInstanceRegistry:
-    """Tracks Excel App instances a run has spawned itself, so cleanup only ever touches
-    instances it owns.
+    """Tracks Excel App instances this run has spawned itself, so it only ever closes those.
 
     xlwings (and the underlying Excel COM/Apple Event API) will happily attach to whatever
     Excel instance is already running rather than spawning its own — dangerous when more than
@@ -410,7 +433,8 @@ class OwnedInstanceRegistry:
     @property
     def pids(self) -> tuple[int, ...]:
         """Process IDs of every instance currently owned — the run's audit trail of what it
-        spawned (PRD sec 6.2.1's "records that instance's process ID against the run")."""
+        spawned (PRD sec 6.2.1's "records that instance's process ID against the run").
+        """
         return tuple(self._owned)
 
     def spawn(self, visible: bool = False) -> xw.App:
@@ -424,7 +448,16 @@ class OwnedInstanceRegistry:
         Returns:
             The newly spawned App.
         """
-        app = xw.App(visible=visible, add_book=False)
+        # add_book=True, not False: found via a real, reproducible Windows-only bug (~50% of
+        # runs) where a bookless instance's own `App.quit()` handle would hang indefinitely.
+        # A bookless xw.App() is never registered in `xw.apps` at all (confirmed directly:
+        # spawning two bookless instances left `xw.apps` empty), and closing an instance
+        # xlwings itself doesn't know about is what caused the intermittent hang. With
+        # add_book=True the instance gets an initial "Book1" and registers immediately —
+        # verified reliable across repeated spawn/quit cycles. Matches the always-add_book
+        # default of the older, previously-reliable reference implementation this project
+        # replaces (Risk Demo's excel_core.py).
+        app = xw.App(visible=visible, add_book=True)
         self._owned[app.pid] = app
         return app
 
@@ -439,11 +472,22 @@ class OwnedInstanceRegistry:
                 chance to close too.
         """
         errors: list[Exception] = []
-        for app in self._owned.values():
+        for pid, app in tuple(self._owned.items()):
             try:
-                app.quit()
+                # Quit through a fresh xw.apps[pid] lookup, not the stored App object directly
+                # — this is the same fix as `add_book=True` above: the instance is registered
+                # in xw.apps now, so this is the reliable, verified-repeatedly path. Fall back
+                # to the stored object's own quit() if it's not in xw.apps (e.g. a test double,
+                # or an instance closed by some other means already) — that fallback path can
+                # still raise, and is still caught and surfaced below like any other failure.
+                try:
+                    xw.apps[pid].quit()
+                except KeyError:
+                    app.quit()
             except Exception as exc:  # noqa: BLE001 - intentional, see docstring
                 errors.append(exc)
         self._owned.clear()
         if errors:
-            raise ExceptionGroup("failed to quit one or more owned Excel instances", errors)
+            raise ExceptionGroup(
+                "failed to quit one or more owned Excel instances", errors
+            )
