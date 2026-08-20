@@ -383,13 +383,13 @@ with an entry in `core.py`'s `ACTION_CAPABILITIES` dict (populated by the `@file
 `param_schema` is derived from the function's signature, skipping `session` and marking any
 parameter with no default as required.
 
-### 5.2 Session management — **built** (except `promote_to_xlw`, see below)
+### 5.2 Session management — **built** (except bidirectional backend switching, see below)
 
 ```python
 @dataclass
 class WorkbookSession:      # lives in core.py — see §4's correction
     name: str
-    backend: Literal["file", "com"]
+    backend: Literal["file", "xlw"]
     handle: Any                      # openpyxl Workbook | xlwings Book
     path: str                        # added during implementation — see below
     mode: Literal["read_only", "read_write"]
@@ -397,13 +397,18 @@ class WorkbookSession:      # lives in core.py — see §4's correction
     dirty: bool = False
 
 class SessionManager:
-    def get_or_open(self, name: str, mode: Literal["read_only","read_write"] = "read_write") -> WorkbookSession: ...
+    def get_or_open(
+        self, name: str, mode: Literal["read_only","read_write"] = "read_write",
+        capability: Literal["file", "xlw", "com"] = "file",
+    ) -> WorkbookSession: ...
     def checkpoint(self) -> None: ...     # save every dirty staged session's scratch file
     def commit_all(self) -> None: ...     # save-all (via checkpoint's helper) + ScratchManager commit, §5.3
     def close_all(self) -> None: ...      # always runs — see runner.py's try/finally, §6.1
-    # promote_to_xlw(name) is NOT built — needs the xlwings-backed session promotion, which
-    # doesn't exist until the later live-Excel phase (§8 item 10). No stub for it; it's simply
-    # absent until then.
+    # Bidirectional backend switching (PRD sec 6.2.2, decided 2026-08-20) is NOT built yet —
+    # needs the live-Excel phase's remaining pieces (§8 item 10). No stub for it; it's simply
+    # absent until then. Corrects the original one-way `promote_to_xlw` sketch, which assumed a
+    # workbook only ever moves file -> xlw once and stays there — insufficient once a real
+    # workflow needs to go back to file-backend afterward (PRD sec 6.2.2's recalculate example).
 ```
 
 **`checkpoint()` was added after the fact, found via a failing crash-safety integration test,
@@ -431,6 +436,32 @@ order. Rather than block session management on validation existing, `get_or_open
 param is the seam that inference will feed into later — `mode="read_write"` today just means
 "the caller is telling me this workbook will be written to," which is exactly the condition
 PRD §6.3.1 stages against, whether a human or a validation pass decided it.
+
+**Bidirectional backend switching (PRD §6.2.2) — design, not yet built.** `get_or_open` gains a
+`capability` param (from the dispatching action's `ActionSpec.capability`, §5.1) alongside
+`mode`. When a session already exists for `name`, its logic becomes:
+
+```python
+needed_backend = "file" if capability == "file" else "xlw"  # "com" also needs "xlw"
+if session.backend != needed_backend:
+    _switch_backend(session, needed_backend)  # save-if-dirty, close, reopen on the other side
+return session
+```
+
+`_switch_backend` is the one place that ever closes one backend's handle and opens the other's,
+at the *same* scratch path, updating `session.handle`/`session.backend` in place — mirrors the
+save-then-close-then-reopen sequence already used by `checkpoint()`/`close_all()`, just also
+triggered mid-run at the point a switch is actually needed, not only at step/run boundaries.
+`runner.py`'s `_dispatch` (§6.1) is the one caller that already knows each step's capability
+(from the registry lookup it does to find `fn` in the first place) — passing it through to
+`get_or_open` is the only change needed on the dispatch side; no new information has to be
+threaded in from elsewhere.
+
+The xlwings side of a switch goes through `OwnedInstanceRegistry` (§3.1) for the App instance —
+`SessionManager` will hold one registry per run, spawning its single shared App lazily on the
+first `xlw`/`com`-capability request, not one App per workbook. `close_all()` (below) needs to
+additionally call `self._xlw_registry.close_owned()` once this exists, so a run that spawned an
+App never leaves it running.
 
 **`create_if_missing`/`template` resolution lives in `SessionManager._create()`**, called from
 both the read-write and read-only open paths when the target file doesn't exist yet. `template`
@@ -722,10 +753,10 @@ time within it.
    during implementation."
 5. `engine.py` §5.2/§5.3 — `SessionManager` (lazy-open, `create_if_missing`/`template`,
    close-all) and `ScratchManager` (scratch-copy staging/atomic commit). **Done**, except
-   `promote_to_xlw` (needs the live-Excel phase, item 10) and mode inference (needs §5.4, item 6) —
-   mode is caller-specified for now, the seam validation will feed into later. See §5.2's notes
-   for the real bug this surfaced (missing parent-directory creation on one code path) and the
-   `ExceptionGroup`-based crash-safety design in `close_all()`.
+   bidirectional backend switching (PRD §6.2.2 — needs the live-Excel phase, item 10) and mode
+   inference (needs §5.4, item 6) — mode is caller-specified for now, the seam validation will
+   feed into later. See §5.2's notes for the real bug this surfaced (missing parent-directory
+   creation on one code path) and the `ExceptionGroup`-based crash-safety design in `close_all()`.
 6. `engine.py` §5.4 — both validation tiers. **Done**, except checking a range against a
    workbook's real defined names (PRD §9.1's fourth example) — not implementable in either
    tier as designed (needs workbook access, both tiers are explicitly workbook-access-free),

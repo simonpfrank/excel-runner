@@ -153,6 +153,53 @@ instance, and only ever tracks and acts on instances it created itself.** Built 
 - Relates to §6.3.1's flagged-but-unaddressed "two runs target the same workbook concurrently"
   cost — this section explains why that matters, without yet fully solving it.
 
+### 6.2.2 Transparent backend switching — DECIDED (2026-08-20)
+
+A single workflow can legitimately need to alternate one workbook between file-backend
+(openpyxl) and live-Excel (xlwings) operations more than once in one run — e.g. write cells
+(file) → `recalculate` (needs live Excel — openpyxl can't evaluate formulas, §6.5) → write more
+cells (file again), because the later writes need to read values the recalculation just
+produced. Each *action*'s capability tag is fixed (§6.1), but a *workbook*'s active backend
+needs to change over the course of a run to match whichever action is about to touch it next.
+
+**The risk if this isn't handled by the engine**: openpyxl and xlwings each hold their own
+independent view of the same file. Naively leaving both "open" across a switch, or switching
+without flushing first, risks stale reads, lost writes, or a file lock conflict — silently, with
+no clear error pointing at the cause. Forcing a workflow author to manage this by hand (explicit
+`close`/`open` steps bracketing every switch, remembering which action needs which backend)
+would violate §6.1's own "backend selection is never exposed to the author" principle — the
+switching mechanics need exactly the same invisibility as backend selection itself.
+
+**Decision: `SessionManager` performs a transparent flush-and-switch whenever a step's
+capability doesn't match its workbook session's *current* backend** — driven purely by each
+action's fixed capability tag, never something the workflow author manages:
+1. If the session is dirty, save on whichever backend is currently active.
+2. Close that handle.
+3. Open the *same* scratch path via the other backend.
+4. Update the session's live `handle`/`backend` in place (`WorkbookSession` is deliberately
+   mutable for exactly this, §6.2).
+
+This corrects and generalizes the originally-sketched `promote_to_xlw` (Specification.md §5.2),
+which only anticipated a *one-way* upgrade (file → xlw, then stay there for the rest of the
+run) — found insufficient once a real workflow needs to go back to file-backend afterward.
+"Promotion" was the wrong mental model; this is bidirectional switching, and it can happen more
+than once per workbook in a single run.
+
+Scope notes:
+- Only one backend is ever live for a given workbook session at a time — no concurrent
+  dual-backend access is needed, since every action's capability is fixed and steps execute
+  strictly in sequence (§6.1's runner loop).
+- `com`-tier actions (§6.1's raw-COM exception) need an xlw-backed session too, same switch
+  target as `xlw` — the action itself reaches deeper via xlwings' `.api`; `SessionManager` never
+  needs to know about `com` as a distinct backend state.
+- Reuses `OwnedInstanceRegistry` (§6.2.1) as-is: one shared Excel App instance per run, spawned
+  lazily on first need, not one per workbook — multiple workbooks needing `xlw` at once just
+  become separate open Books inside that one owned App.
+- Fits inside the existing scratch-copy/checkpoint model (§6.3.1) without a new mechanism: a
+  switch's own save-before-close step is itself an eager checkpoint, so no new crash-safety
+  design is needed — it's a stricter version of what `checkpoint()` already does after every
+  step, just also triggered mid-step, at the exact moment a switch is about to happen.
+
 ### 6.3 Implicit workbook lifecycle
 
 - Workbooks are **lazily opened** on first reference by any step — no mandatory `open` step.

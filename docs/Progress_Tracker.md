@@ -1,6 +1,6 @@
 # excel_runner — Progress Tracker
 
-## Last Session (2026-08-19)
+## Last Session (2026-08-20)
 **Status:** Ready for Next Phase
 **Working on:** Build order items 1–8 (Spec §8) — the entire v1 file-backend core engine — are
 now done, plus the crash-safety integration test. Git repo initialized, nine commits on `main`.
@@ -127,12 +127,26 @@ gap is exactly that skipped line, expected to close on Windows). All other gates
 more live-Excel test runs until told otherwise; anything needing real Excel verification should
 wait.
 
-**Next step:** Continue item 10 — the remaining live-Excel backend primitives (which tier each
-one lands in isn't fully decided until built — most will be `xlw_`; only a genuine raw-COM need,
-like `recalculate`'s full/full_rebuild modes, gets `com_`) and the corresponding actions in
-`actions.py`. Given the pause above, prefer non-Excel-spawning work first (design, docs, code
-that can be written and statically checked without running it) until the user says it's fine to
-resume live tests.
+**Design correction, 2026-08-20 — bidirectional backend switching (PRD §6.2.2).** User flagged a
+real gap: a workflow can legitimately need to alternate one workbook between file-backend and
+live-Excel operations more than once in a run (write → recalculate, which needs live Excel since
+openpyxl can't evaluate formulas → write more, reading the values recalculation just produced).
+The originally-sketched `promote_to_xlw` only anticipated a one-way upgrade (file → xlw, stay
+there) — insufficient here. Corrected design: `SessionManager.get_or_open` gains a `capability`
+param; whenever a step's capability doesn't match its workbook session's current backend, a new
+`_switch_backend` does save-if-dirty → close → reopen on the other backend, at the same scratch
+path, entirely automatic and invisible to the workflow author (matches PRD §6.1's "backend
+selection is never exposed to the author," extended to switching too). Reuses
+`OwnedInstanceRegistry` as-is (one shared App per run) and fits inside the existing
+scratch-copy/checkpoint model with no new crash-safety mechanism needed. Written up in PRD
+§6.2.2 and Specification.md §5.2 — design only, not built yet.
+
+**Next step:** Build the bidirectional backend switching in `SessionManager` (PRD §6.2.2, Spec
+§5.2) via TDD — this needs to land before wiring any `xlw`/`com`-tier action to real session
+management, since building actions against the old one-way assumption would need rework. Given
+the Excel-spawning pause above, get as far as possible with what doesn't need a live Excel
+instance (the `capability`-param threading, the switch logic's structure) and flag clearly
+whatever step actually needs a real spawn-and-verify before running it.
 **Notes:** `aggregate` and `update_summary_table`'s exact parameters are still explicitly
 flagged as open in the PRD — don't block on them. Five things parked in PRD §12, none designed
 or scheduled: grouped `if:` blocks; a "replay nice" desktop-comfort mode (visible Excel replay
@@ -198,7 +212,7 @@ Spec §7.
 
 | Component | Unit Tests | Code | Integration Tests | Unit Results | Integration Results |
 |---|---|---|---|---|---|
-| `SessionManager` — `engine.py` §5.2 (`promote_to_xlw` excluded — needs item 9) | ✅ | ✅ | ❌ | ✅ | ❌ |
+| `SessionManager` — `engine.py` §5.2 (bidirectional backend switching excluded — needs item 10, PRD §6.2.2) | ✅ | ✅ | ❌ | ✅ | ❌ |
 | `ScratchManager` — `engine.py` §5.3 | ✅ | ✅ | ❌ | ✅ | ❌ |
 | `backends.create_workbook` (supports `create_if_missing`) | ✅ | ✅ | ❌ | ✅ | ❌ |
 
