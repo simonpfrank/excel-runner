@@ -8,11 +8,22 @@ Design notes live in [`docs/PRD.md`](docs/PRD.md) and [`docs/Specification.md`](
 ## Status
 
 v1 file-backend engine is built and tested: loading, templating, validation, session/scratch
-management, 16 actions, and the orchestration loop (`run_workflow`). There is **no CLI yet** —
-this is a Python library, used from a script. Every action so far runs against files directly
-via openpyxl — no live Excel process involved, which is also why the action list below skips
-macros, recalculation, and a few other Excel-specific things (see
+management, 16 actions, and the orchestration loop (`run_workflow`). A CLI entrypoint is also
+available (`python -m excel_runner`, the `excel-runner` console script, or running
+`excel_runner/cli.py` directly) for triggering a run from outside Python. Every action so far
+runs against files directly via openpyxl — no live Excel process involved, which is also why
+the action list below skips macros, recalculation, and a few other Excel-specific things (see
 [Not yet available](#not-yet-available)). Live-Excel support (via xlwings) is in progress.
+
+## Changelog
+
+- **2026-08-20**: Fixed a real, intermittent (~50% of runs) hang in
+  `OwnedInstanceRegistry.close_owned()` on Windows (`spawn()` now uses `add_book=True` so
+  spawned instances register in `xw.apps`). Added a CLI entrypoint (`excel_runner/cli.py`,
+  `__main__.py`, `excel-runner` console script) to run a workflow YAML file and print its
+  result as JSON — driven by the need to invoke a workflow from a UiPath xaml workflow as an
+  external process. Full quality-gate suite (pytest, ruff, mypy --strict, pyright, vulture,
+  radon) confirmed clean on Windows for the first time.
 
 ## Install and run
 
