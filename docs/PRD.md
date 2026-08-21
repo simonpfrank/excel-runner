@@ -359,7 +359,7 @@ for Power Query. **Decided: Option 2** (user confirmed 2026-08-21). Power Query'
 support scope (likely: only connections whose source is a plain file-path parameter, documented
 as a named limitation otherwise) is still open — to be settled in Specification.md.
 
-### 6.2.4 Configurable, per-action timeouts for long-running Excel operations — **PROPOSED, pending decision (2026-08-21)**
+### 6.2.4 Configurable, per-action timeouts for long-running Excel operations — **DECIDED (2026-08-21)**
 
 **Problem, confirmed with user, not hypothetical**: some client workbooks have plugin/add-in
 formulas linking to large external datafiles, and a `recalculate` or `run_macro` against them
@@ -374,28 +374,55 @@ indefinitely — no default timeout is imposed.** This is a deliberate reversal 
 "always have a safety timeout" instinct, because a short default would be a bug here, not a
 safety net.
 
-**Research findings on detecting "still working" vs. "actually stuck"** (§6.2.3's hang-safety
-mechanism still applies underneath — this section is about what, if anything, can distinguish
-legitimate long-running work from a real hang while the timeout, if any, hasn't elapsed yet):
+**If a timeout *is* specified and it elapses: that's final, not a retry or a soft outcome.**
+The step is a hard failure, the run stops and doesn't commit (§6.8's raised-exception policy),
+the runner cleans up whatever it safely can (kills the worker process and its owned Excel
+instance, §6.2.3), and that's the end of it — no partial credit, no automatic retry. Simple and
+unambiguous, deliberately: an unreliable workbook needing a fundamentally different approach
+(§7's `write_table`-style composition instead of a monolithic macro, for instance) is the
+client's problem to fix, not something the engine should paper over with retry logic that could
+mask a real, worsening reliability problem.
+
+**Signal detection findings** — accepted as genuinely weak, not a reason to avoid using them:
 - `Application.CalculationState` (`xlDone`/`xlCalculating`/`xlPending`) and `Application.Ready`
-  are real, documented COM properties (Microsoft Learn) that could in principle signal
-  calculation progress.
-- **However, a real, recurring, independently-reported gotcha**: polling `CalculationState`
-  from the *same* procedure/thread that triggered the calculation is unreliable — multiple
-  independent forum reports (MrExcel, Spiceworks) describe it staying `xlPending` indefinitely,
-  because Excel's calculation runs on a background thread that the polling loop itself can
-  starve of the chance to update. A liveness check, if built, must come from a genuinely
-  separate watchdog thread/process with its own COM connection — not a poll loop inside the
-  same call that triggered the work. This dovetails with §6.2.3's process-isolation design:
-  the worker process makes the blocking `Calculate()`/macro call; a separate parent/watchdog
-  process is what could attempt a liveness probe, if one is built at all.
-- `run_macro` has **no equivalent progress signal** — an arbitrary VBA macro is opaque to us.
-  The only realistic signal is coarse: whether Excel still responds to any lightweight COM call
-  at all, not "is this specific macro nearly done." Not overstating what's detectable here.
-- **Not yet empirically verified** — docs and forum reports are a starting point, not proof for
-  *this* codebase's exact usage pattern. Needs hands-on testing against a real Excel instance
-  once the xlwings/COM phase (item 9) starts, before committing to a specific liveness-check
-  design in Specification.md.
+  are real, documented COM properties (Microsoft Learn), but a real, recurring,
+  independently-reported gotcha (MrExcel, Spiceworks forums) shows polling `CalculationState`
+  from the *same* procedure/thread that triggered the calculation can stay `xlPending`
+  indefinitely — Excel's calculation runs on a background thread the polling loop itself can
+  starve. Any liveness probe needs its own separate watchdog connection, not a poll loop inside
+  the same blocking call — dovetails with §6.2.3's process-isolation design (worker process
+  makes the blocking call; the parent/watchdog is what could probe it).
+- `run_macro` has **no equivalent progress signal at all** — an arbitrary VBA macro is opaque
+  to us. The only realistic signal is coarse: whether Excel still responds to any lightweight
+  COM call, not "is this specific macro nearly done."
+- **"We don't know what we don't know" — accepted as the honest starting position.** Rather
+  than trying to design a complete, confident signal-detection scheme up front (there isn't
+  enough real-world evidence to justify one), the decision is to capture whatever signal *is*
+  available at the activity/action level, log it, and keep the surrounding code easy to adjust
+  as real-world behavior is actually observed — not to guess now and lock it in.
+
+**Audit log summarization — DECIDED**: rather than a raw dump of every poll (noisy, and mostly
+redundant), each `recalculate`/`run_macro` step's audit record includes a compact summary:
+- `state_counts`: a small histogram of every distinct signal value observed during the wait
+  (e.g. `{"xlPending": 3, "xlCalculating": 118, "xlDone": 1}`) — richer than just "count + last
+  one" alone, since it shows *where* time was spent, not just how much.
+- `last_state`: the final observed value before completion, timeout, or "no signal available."
+- `poll_count` and `elapsed_seconds`: total polls taken and total wall-clock time waited.
+- `outcome`: `"completed"` / `"timed_out"` / `"no_signal_available"` (the `run_macro` case) —
+  keeps the schema meaningful across both actions even though only one has a real signal to
+  poll at all.
+
+**Implementation principle, not yet built**: the signal-polling/timeout-waiting logic must live
+in one small, clearly isolated place (not scattered across `recalculate`/`run_macro`'s own
+code) — poll interval, which signals are captured, and the summary shape are all expected to
+change as real behavior is observed, and that has to stay cheap to adjust, not a wide-reaching
+refactor each time.
+
+**Validation plan, not yet started**: soak-test real client workbooks with these plugin
+formulas — both on local desktops and inside actual xamls — to establish real-world reliability
+empirically, rather than assuming the docs/forum research above generalizes to this codebase's
+exact usage pattern. This is a testing activity to schedule once the xlwings/COM phase (item 9)
+is far enough along to soak-test against, not a blocker for finishing this design.
 
 ### 6.3.3 Commit-time failure when the real file is locked by something else — **PROPOSED, pending decision (2026-08-21)**
 

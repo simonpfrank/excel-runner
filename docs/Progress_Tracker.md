@@ -1,5 +1,26 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-08-21d, Windows)
+**Status:** Blocked — awaiting user approval on §6.3.3 (commit-failure structuring) only;
+everything else in this design thread is now decided
+**Working on:** Finalized §6.2.4 (timeouts/signal detection for `recalculate`/`run_macro`) with
+the user. Accepted up front that the underlying signals (`CalculationState`/`Ready`) are
+genuinely weak and unreliable ("we don't know what we don't know") — rather than trying to
+design a complete detection scheme now, the decision is to capture whatever signal *is*
+available, summarize it compactly in the audit log, and keep the surrounding code cheap to
+adjust as real-world behavior is observed. Audit summary shape decided: `state_counts`
+(histogram of observed signal values, richer than a flat count), `last_state`, `poll_count`,
+`elapsed_seconds`, `outcome` (`completed`/`timed_out`/`no_signal_available` — the last one
+covers `run_macro`, which has no progress signal at all). Timeout semantics confirmed as final:
+if a timeout is specified and elapses, that's a hard failure — no retry, no partial credit,
+clean up what's safely possible and stop. Soak-testing real client workbooks (desktop + xaml)
+to establish actual reliability is noted as a planned validation activity once xlwings/COM
+(item 9) is far enough along, not a blocker for the design itself.
+
+**Next step:** §6.3.3 (commit-time failure when the real file is locked elsewhere — points
+1/2/4; point 3 already superseded by §6.3.4) is the only remaining open item before writing
+Specification.md. Do not start building any of this yet.
+
 ## Last Session (2026-08-21c, Windows)
 **Status:** Blocked — awaiting user approval on remaining PRD design decisions (§6.2.4 timeout
 design, §6.3.3 commit-failure structuring) before Specification.md work
