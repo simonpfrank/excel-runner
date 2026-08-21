@@ -59,7 +59,9 @@ class TestHappyPath:
             """,
         )
 
-        result = run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+        result = run_workflow(
+            workflow_path, env_overrides={"output_folder": str(tmp_path / "output")}, working_dir=str(tmp_path)
+        )
 
         assert result.status == "success"
         reopened = openpyxl.load_workbook(real)
@@ -91,7 +93,9 @@ class TestHappyPath:
             """,
         )
 
-        result = run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+        result = run_workflow(
+            workflow_path, env_overrides={"output_folder": str(tmp_path / "output")}, working_dir=str(tmp_path)
+        )
 
         assert result.status == "success"
         assert openpyxl.load_workbook(real)["Sheet"]["B1"].value == "explicit"
@@ -125,7 +129,9 @@ class TestIfConditions:
             """,
         )
 
-        result = run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+        result = run_workflow(
+            workflow_path, env_overrides={"output_folder": str(tmp_path / "output")}, working_dir=str(tmp_path)
+        )
 
         assert result.status == "error"  # find_it itself failed
         skipped = [s for s in result.step_results if s.step_id == "write_if_found"][0]
@@ -158,7 +164,9 @@ class TestStepFailureDoesNotCrashTheRun:
             """,
         )
 
-        result = run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+        result = run_workflow(
+            workflow_path, env_overrides={"output_folder": str(tmp_path / "output")}, working_dir=str(tmp_path)
+        )
 
         assert result.status == "error"
         statuses = {s.step_id: s.status for s in result.step_results}
@@ -191,7 +199,9 @@ class TestStepFailureDoesNotCrashTheRun:
             """,
         )
 
-        result = run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+        result = run_workflow(
+            workflow_path, env_overrides={"output_folder": str(tmp_path / "output")}, working_dir=str(tmp_path)
+        )
 
         assert result.status == "error"
         assert openpyxl.load_workbook(real)["Sheet"]["B1"].value is None
@@ -224,7 +234,11 @@ class TestExceptionsPropagateAndStillCleanUp:
         )
 
         with pytest.raises(ActionExecutionError):
-            run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+            run_workflow(
+                workflow_path,
+                env_overrides={"output_folder": str(tmp_path / "output")},
+                working_dir=str(tmp_path),
+            )
 
         assert openpyxl.load_workbook(real)["Sheet"]["A1"].value == "hello"  # untouched
 
@@ -249,7 +263,11 @@ class TestValidationRunsBeforeAnyWorkbookIsTouched:
         )
 
         with pytest.raises(ValidationError):
-            run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+            run_workflow(
+                workflow_path,
+                env_overrides={"output_folder": str(tmp_path / "output")},
+                working_dir=str(tmp_path),
+            )
 
         assert openpyxl.load_workbook(real)["Sheet"]["A1"].value == "hello"
 
@@ -282,7 +300,9 @@ class TestCopyAcrossTwoWorkbooks:
             """,
         )
 
-        result = run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+        result = run_workflow(
+            workflow_path, env_overrides={"output_folder": str(tmp_path / "output")}, working_dir=str(tmp_path)
+        )
 
         assert result.status == "success"
         reopened = openpyxl.load_workbook(tmp_path / "output" / "manip.xlsx")
@@ -324,7 +344,9 @@ class TestStop:
             """,
         )
 
-        result = run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+        result = run_workflow(
+            workflow_path, env_overrides={"output_folder": str(tmp_path / "output")}, working_dir=str(tmp_path)
+        )
 
         assert result.status == "error"  # find_it itself failed
         statuses = {s.step_id: s.status for s in result.step_results}
@@ -363,7 +385,9 @@ class TestStop:
             """,
         )
 
-        result = run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+        result = run_workflow(
+            workflow_path, env_overrides={"output_folder": str(tmp_path / "output")}, working_dir=str(tmp_path)
+        )
 
         assert result.status == "success"
         statuses = {s.step_id: s.status for s in result.step_results}
@@ -394,7 +418,9 @@ class TestStop:
             """,
         )
 
-        result = run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+        result = run_workflow(
+            workflow_path, env_overrides={"output_folder": str(tmp_path / "output")}, working_dir=str(tmp_path)
+        )
 
         assert result.status == "success"
         statuses = {s.step_id: s.status for s in result.step_results}
@@ -421,7 +447,9 @@ class TestStop:
             """,
         )
 
-        result = run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+        result = run_workflow(
+            workflow_path, env_overrides={"output_folder": str(tmp_path / "output")}, working_dir=str(tmp_path)
+        )
 
         lines = result.audit_log_path.read_text().splitlines()
         records = {json.loads(line)["step_id"]: json.loads(line)["status"] for line in lines}
@@ -454,7 +482,9 @@ class TestAuditLog:
             """,
         )
 
-        result = run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+        result = run_workflow(
+            workflow_path, env_overrides={"output_folder": str(tmp_path / "output")}, working_dir=str(tmp_path)
+        )
 
         lines = result.audit_log_path.read_text().splitlines()
         assert len(lines) == 2
@@ -476,15 +506,13 @@ class TestCrashSafety:
     """
 
     def test_crash_mid_run_leaves_real_file_untouched_and_scratch_copy_in_place(
-        self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
+        self, tmp_path: Path
     ) -> None:
         real = _make_workbook(tmp_path / "output" / "manip.xlsx")
-        run_dir = tmp_path / "run_dir"
-        run_dir.mkdir()
-        # Deterministic run directory instead of a fresh tempfile.mkdtemp() location per run,
-        # so the test can find the surviving scratch copy without globbing the system temp dir
-        # (which could pick up unrelated leftovers from other test runs).
-        monkeypatch.setattr("excel_runner.runner.tempfile.mkdtemp", lambda prefix=None: str(run_dir))
+        # working_dir is now a fixed, deterministic path derived from the yaml's own filename
+        # (PRD sec 6.3.4), not a fresh tempfile.mkdtemp() location per run — passing tmp_path
+        # as the base gives a predictable place to find the surviving scratch copy.
+        run_dir = tmp_path / "excel_runner_runs" / "workflow"
 
         workflow_path = _write_yaml(
             tmp_path / "workflow.yaml",
@@ -511,7 +539,11 @@ class TestCrashSafety:
         )
 
         with pytest.raises(ActionExecutionError):
-            run_workflow(workflow_path, env_overrides={"output_folder": str(tmp_path / "output")})
+            run_workflow(
+                workflow_path,
+                env_overrides={"output_folder": str(tmp_path / "output")},
+                working_dir=str(tmp_path),
+            )
 
         # the real file is completely untouched by the in-progress write
         assert openpyxl.load_workbook(real)["Sheet"]["B1"].value is None
@@ -521,8 +553,9 @@ class TestCrashSafety:
         assert scratch_file.exists()
         assert openpyxl.load_workbook(scratch_file)["Sheet"]["B1"].value == "in progress"
 
-        # the audit log survives too — it lives outside scratch/ specifically so cleanup (which
-        # never even runs on this path) couldn't take it with it (Spec sec 6.1's bug fix)
+        # the audit log survives too — it lives outside scratch/ specifically so nothing ever
+        # takes it along with a deletion (Spec sec 6.1's bug fix); nothing in working_dir is
+        # ever auto-deleted now anyway (PRD sec 6.3.4)
         assert (run_dir / "audit.jsonl").exists()
 
     def test_a_later_valid_run_against_the_same_workbook_succeeds_after_a_crash(
@@ -552,7 +585,11 @@ class TestCrashSafety:
             """,
         )
         with pytest.raises(ActionExecutionError):
-            run_workflow(crashing_workflow, env_overrides={"output_folder": str(tmp_path / "output")})
+            run_workflow(
+                crashing_workflow,
+                env_overrides={"output_folder": str(tmp_path / "output")},
+                working_dir=str(tmp_path),
+            )
 
         valid_workflow = _write_yaml(
             tmp_path / "valid.yaml",
@@ -572,7 +609,9 @@ class TestCrashSafety:
             """,
         )
 
-        result = run_workflow(valid_workflow, env_overrides={"output_folder": str(tmp_path / "output")})
+        result = run_workflow(
+            valid_workflow, env_overrides={"output_folder": str(tmp_path / "output")}, working_dir=str(tmp_path)
+        )
 
         assert result.status == "success"
         assert openpyxl.load_workbook(real)["Sheet"]["C1"].value == "worked"

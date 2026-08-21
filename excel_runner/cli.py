@@ -9,6 +9,7 @@ formatting.
 
 import argparse
 import json
+import logging
 import sys
 from dataclasses import asdict
 from typing import Any
@@ -62,11 +63,24 @@ def main(argv: list[str] | None = None) -> int:
             "--env a=1 --env b=2 (not comma- or semicolon-separated)."
         ),
     )
+    parser.add_argument(
+        "--working-dir",
+        default=None,
+        help=(
+            "Base directory for this run's working_dir "
+            "(excel_runner_runs/<yaml_stem>/ is always appended). Defaults to cwd."
+        ),
+    )
+    parser.add_argument("--logging-level", help="DEBUG,INFO,WARNING,ERROR", default="INFO")
     args = parser.parse_args(argv)
     env_overrides = dict(args.env)
 
+    # Only sets the severity threshold — no handler/formatter configuration here at all, that's
+    # entirely the responsibility of whatever wraps this (Spec sec 6.2.1).
+    logging.getLogger("excel_runner").setLevel(getattr(logging, args.logging_level))
+
     try:
-        result = run_workflow(args.workflow, env_overrides or None)
+        result = run_workflow(args.workflow, env_overrides or None, working_dir=args.working_dir)
     except ExcelRunnerError as exc:
         print(json.dumps({"status": "error", "error": asdict(exc.detail)}, default=str))
         return 1

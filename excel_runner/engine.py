@@ -106,23 +106,24 @@ def _first_line(docstring: str) -> str:
 
 class ScratchManager:
     """Stages workbooks that will be written to into a scratch directory, and commits them
-    back to their real path atomically, only on success. Operates on plain file paths — no
-    knowledge of openpyxl/xlwings, so file-backend and (later) COM-backend sessions stage and
-    commit through the same code path (PRD sec 6.3.1).
+    back to their real path, only on success. Operates on plain file paths — no knowledge of
+    openpyxl/xlwings, so file-backend and (later) COM-backend sessions stage and commit through
+    the same code path (PRD sec 6.3.1).
 
     Args:
-        scratch_dir: Directory to stage scratch copies into. Created lazily on first `stage()`
-            call — never created just by constructing a `ScratchManager`.
+        working_dir: The run's working directory (PRD sec 6.3.4) — scratch copies are staged
+            into `working_dir/scratch/`, created lazily on first `stage()` call, never just by
+            constructing a `ScratchManager`.
     """
 
-    def __init__(self, scratch_dir: Path) -> None:
-        self._scratch_dir = scratch_dir
-        self._staged: dict[str, tuple[Path, Path]] = (
+    def __init__(self, working_dir: Path) -> None:
+        self._scratch_dir = working_dir / "scratch"
+        self._staged: dict[str, tuple[Path, Path, bool]] = (
             {}
-        )  # name -> (real_path, scratch_path)
-        self._all_committed = False
+        )  # name -> (real_path, scratch_path, writes)
+        self._backups: dict[str, Path] = {}  # name -> .bak path, only set during a commit_all()
 
-    def stage(self, name: str, real_path: Path) -> Path:
+    def stage(self, name: str, real_path: Path, writes: bool = True) -> Path:
         """Copy a workbook into the scratch dir, or reserve a scratch path for a new one.
 
         Args:
@@ -130,6 +131,10 @@ class ScratchManager:
             real_path: Its real file path. If it doesn't exist yet (a `create_if_missing`
                 workbook), no copy happens — the caller creates the workbook directly at the
                 returned scratch path instead.
+            writes: Whether this workbook may be written to and needs committing back later.
+                False for a read-only session (PRD sec 6.2.3's correction — staged too now, to
+                avoid holding a handle open on the real file, but never committed since
+                nothing about it ever changes).
 
         Returns:
             The scratch path to open/create the workbook at instead of `real_path`.
@@ -138,41 +143,102 @@ class ScratchManager:
         scratch_path = self._scratch_dir / f"{name}{real_path.suffix}"
         if real_path.exists():
             shutil.copy2(real_path, scratch_path)
-        self._staged[name] = (real_path, scratch_path)
+        self._staged[name] = (real_path, scratch_path, writes)
         return scratch_path
 
     def commit(self, name: str) -> None:
-        """Atomically move one staged workbook's scratch content back to its real path.
+        """Commit one staged workbook's scratch content back to its real path.
+
+        Rename-based, not copy-based (PRD sec 6.3.3): the new content is prepared at a `.tmp`
+        sibling *before* `real_path` is touched at all, so a failure at that step leaves
+        `real_path` completely untouched. If `real_path` already exists, it's renamed aside to
+        a `.bak` sibling (an instant, zero-copy move — the original was already sitting there
+        untouched pre-commit) before the `.tmp` file is renamed into place. The `.bak` is left
+        in place here — `commit_all()` deletes every one only after every workbook in the
+        batch has committed successfully, or uses it to roll back on a later failure.
 
         Args:
             name: The workbook's logical name, as passed to `stage()`.
         """
-        real_path, scratch_path = self._staged[name]
+        real_path, scratch_path, _ = self._staged[name]
         real_path.parent.mkdir(parents=True, exist_ok=True)
         tmp_path = real_path.with_name(real_path.name + ".tmp")
         shutil.copy2(scratch_path, tmp_path)
-        tmp_path.replace(real_path)
+        if real_path.exists():
+            bak_path = real_path.with_name(real_path.name + ".bak")
+            real_path.rename(bak_path)
+            self._backups[name] = bak_path
+        tmp_path.rename(real_path)
 
     def commit_all(self) -> None:
-        """Commit every staged workbook. Marks the run as fully committed for `cleanup()`."""
-        for name in self._staged:
-            self.commit(name)
-        self._all_committed = True
+        """Commit every staged, write-intent workbook, rolling back on a later failure (PRD
+        sec 6.3.3). Read-only staged workbooks (`stage(..., writes=False)`) are skipped
+        entirely — nothing about them ever changes, so there's nothing to commit back.
 
-    def cleanup(self, keep_on_failure: bool = True) -> None:
-        """Remove the scratch directory — but only if it's safe to.
+        No separate upfront precheck pass — each workbook's commit is attempted directly. If
+        one fails, every workbook already committed *in this call* is rolled back (its `.bak`
+        renamed back over `real_path`, reverse order), and whether each individual rollback
+        itself succeeded is recorded. A workbook whose rollback also fails needs a human — its
+        `.bak` is deliberately left in place rather than deleted, so the original content is
+        still recoverable from disk. On full success, every `.bak` created this call is deleted.
+
+        Raises:
+            ActionExecutionError: If any workbook's commit fails. The message names the
+                workbook that failed, and — if any earlier workbook's rollback in this same
+                call also failed — names which one(s) need manual attention.
+        """
+        committed: list[str] = []
+        for name, (_, _, writes) in self._staged.items():
+            if not writes:
+                continue
+            try:
+                self.commit(name)
+                committed.append(name)
+            except OSError as exc:
+                rollback_results = self._rollback(committed)
+                needs_human = [n for n, ok in rollback_results.items() if not ok]
+                rolled_back = [n for n, ok in rollback_results.items() if ok]
+                message = f'Workbook "{name}" could not be committed: {exc}.'
+                if rolled_back:
+                    message += f" Rolled back: {', '.join(rolled_back)}."
+                if needs_human:
+                    message += (
+                        f" MANUAL INTERVENTION NEEDED for: {', '.join(needs_human)} — "
+                        "their .bak file(s) hold the original content."
+                    )
+                raise ActionExecutionError(
+                    ErrorDetail(
+                        message=message,
+                        technical_reason=(
+                            f"{type(exc).__name__}: {exc}; rollback_results={rollback_results!r}"
+                        ),
+                    )
+                ) from exc
+        for bak_path in self._backups.values():
+            bak_path.unlink(missing_ok=True)
+        self._backups.clear()
+
+    def _rollback(self, committed_names: list[str]) -> dict[str, bool]:
+        """Undo every already-committed workbook in `committed_names`, reverse order.
 
         Args:
-            keep_on_failure: If True (default) and `commit_all()` hasn't successfully run,
-                the scratch dir is left in place as the recovery/debugging artifact
-                (PRD sec 6.3.1) instead of being deleted. Pass False to force deletion
-                regardless — the success path does this explicitly, since at that point
-                keeping it was never in question.
+            committed_names: Logical names committed so far in this `commit_all()` call.
+
+        Returns:
+            Logical name -> whether that workbook's rollback succeeded.
         """
-        if keep_on_failure and not self._all_committed:
-            return
-        if self._scratch_dir.exists():
-            shutil.rmtree(self._scratch_dir)
+        results: dict[str, bool] = {}
+        for name in reversed(committed_names):
+            real_path, _, _ = self._staged[name]
+            bak_path = self._backups.get(name)
+            try:
+                real_path.unlink(missing_ok=True)
+                if bak_path is not None:
+                    bak_path.rename(real_path)
+                results[name] = True
+            except OSError:
+                results[name] = False
+        return results
 
 
 # --- Session management (Spec sec 5.2) ----------------------------------------------------
@@ -310,15 +376,17 @@ class SessionManager:
 
     def _open_read_only(self, name: str, ref: WorkbookRef) -> WorkbookSession:
         real_path = Path(ref.file)
-        if not real_path.exists():
-            self._create(ref, real_path)
-        handle = backends.open_workbook(str(real_path), mode="read_only")
+        scratch_path = self._scratch.stage(name, real_path, writes=False)
+        if not scratch_path.exists():
+            self._create(ref, scratch_path)
+        handle = backends.open_workbook(str(scratch_path), mode="read_only")
         return WorkbookSession(
             name=name,
             backend="file",
             handle=handle,
-            path=str(real_path),
+            path=str(scratch_path),
             mode="read_only",
+            scratch_path=scratch_path,
         )
 
     def _create(self, ref: WorkbookRef, at_path: Path) -> None:

@@ -621,7 +621,7 @@ swallowed. This is a deliberate exception to "avoid defensive fallback layers" (
 distinction is inventing fallback *behavior* for bad input (the anti-pattern) vs. guaranteeing
 cleanup still runs and still reports what went wrong (the actual requirement).
 
-### 5.3 Scratch-copy execution model — **built, superseded by working_dir redesign below (not yet built)**
+### 5.3 Scratch-copy execution model — **built** (2026-08-21, supersedes the original tempfile-based design)
 
 Implements PRD §6.3.1, revised by §6.3.3/§6.3.4's decisions:
 
@@ -630,10 +630,12 @@ class ScratchManager:
     def __init__(self, working_dir: Path) -> None: ...
        # working_dir: <base>/excel_runner_runs/<yaml_stem>/ — see §6.1's note on where <base>
        # comes from. scratch/ workbook copies live at working_dir/scratch/.
-    def stage(self, name: str, real_path: Path) -> Path: ...
+    def stage(self, name: str, real_path: Path, writes: bool = True) -> Path: ...
        # copies real_path into working_dir/scratch/ if it exists; if not (create_if_missing
        # case), just reserves the scratch path for the caller to create the workbook at
        # directly. Called for BOTH read-write AND read-only sessions now — see correction below.
+       # writes=False (read-only) means commit_all() skips this workbook entirely.
+    def commit(self, name: str) -> None: ...     # one workbook's rename-based commit, see below
     def commit_all(self) -> None: ...
        # raises ActionExecutionError on any workbook's commit failure — see rollback design below
 ```
@@ -645,18 +647,23 @@ until `.close()`/process exit, and while a genuine crash self-heals (OS releases
 process teardown), a *hang* does not — the file stays locked for as long as the hang persists.
 Staging read-only opens too doesn't prevent the hang, but changes its blast radius from "a
 shared/production file is locked, someone has to notice and intervene" to "an orphaned copy in
-our own working_dir, harmless." `SessionManager._open_read_only` now calls `scratch.stage()`
-exactly like `_open_read_write` does; the only difference is it never gets committed back.
+our own working_dir, harmless." `SessionManager._open_read_only` now calls
+`scratch.stage(name, real_path, writes=False)` exactly like `_open_read_write` does (which uses
+the `writes=True` default); the only difference is `writes=False` means `commit_all()` skips it
+entirely — nothing about a read-only session's content ever changes, so there's nothing to
+commit back.
 
 **Correction (PRD §6.3.4): `working_dir` replaces the old `tempfile.mkdtemp()`-based scratch
 dir entirely** — a fixed, predictable location (`<base>/excel_runner_runs/<yaml_stem>/`) instead
-of a random per-run temp path, so external tooling (e.g. a 3rd patry workflow system) can construct the path itself
-from just the yaml's filename, without reading any output field. See §6.1 for exactly how
-`<base>` is resolved (cwd default, `--working-dir` CLI flag, or `working_dir:` YAML field).
-Re-running the same yaml overwrites the previous run's `working_dir` contents automatically —
-`stage()`'s existing `shutil.copy2` already overwrites in place; `AuditLogger` (§6.2) now opens
-`audit.jsonl` in truncate mode at the start of each run, not append, so a new run's audit trail
-never mixes with a previous run's leftover records.
+of a random per-run temp path, so external tooling can construct the path itself from just the
+yaml's filename, without reading any output field. See §6.1 for exactly how `<base>` is resolved
+(cwd default, or the `--working-dir` CLI flag — see §6.4's correction: the originally-sketched
+`working_dir:` YAML field was **not built**, kept out of scope since there was no clear use case
+for it beyond the CLI flag, which already covers the real driving need). Re-running the same
+yaml overwrites the previous run's `working_dir` contents automatically — `stage()`'s existing
+`shutil.copy2` already overwrites in place; `AuditLogger` (§6.2) now opens `audit.jsonl` in
+truncate mode at the start of each run, not append, so a new run's audit trail never mixes with
+a previous run's leftover records.
 
 **`cleanup()` is removed entirely** — nothing in `working_dir` is ever deleted automatically now,
 success or failure (PRD §6.3.4). Safe because a re-run of the same yaml just overwrites its own
@@ -667,24 +674,8 @@ removes itself within a single run.
 **Rename-based commit, with per-file rollback on a later failure (PRD §6.3.3) — replaces the
 original "temp-path-then-Path.replace" description**:
 
-```python
-@dataclass(frozen=True)
-class CommitFailure:
-    """Raised via ActionExecutionError when one or more workbooks fail to commit.
-
-    Args:
-        failed_workbook: Logical name of the workbook whose commit raised.
-        rollback_results: Logical name -> whether that already-committed workbook's rollback
-            succeeded. Only includes workbooks committed *before* the failure in this run.
-        needs_human: Names of workbooks whose rollback itself failed — the one case the engine
-            can't self-heal. Empty in the common case.
-    """
-    failed_workbook: str
-    rollback_results: dict[str, bool]
-    needs_human: tuple[str, ...]
-```
-
-Per-workbook commit sequence (`ScratchManager._commit_one`):
+Per-workbook commit sequence (`ScratchManager.commit(name)`, called directly for one workbook
+or looped over by `commit_all()` for the whole batch):
 1. `shutil.copy2(scratch_path, tmp_path)` — prepare the new content off to the side first,
    *before touching `real_path` at all*. The only step that can fail for disk-space/permission
    reasons unrelated to `real_path` being locked; if it fails, `real_path` is completely
@@ -692,25 +683,30 @@ Per-workbook commit sequence (`ScratchManager._commit_one`):
 2. If `real_path` exists: `real_path.rename(bak_path)` — an instant, zero-copy move. This *is*
    "keeping the original" (PRD's phrasing) — it was already sitting there untouched pre-commit,
    so preserving it costs nothing extra.
-3. `tmp_path.rename(real_path)` — atomic; installs the new content.
+3. `tmp_path.rename(real_path)` — installs the new content.
 
-`commit_all()` attempts every staged workbook's commit in turn (no separate upfront precheck
-pass — simplest option discussed, PRD §6.3.3). If workbook *N* fails at step 1, 2, or 3 above,
-`commit_all()` rolls back every workbook that already completed step 3 in this run, in reverse
-order: `bak_path.rename(real_path)` (undoing step 3, restoring the original). **Records, per
-file, whether that rollback itself succeeded** — if it fails too, that workbook's name goes into
-`needs_human`, its `.bak` is deliberately *not* deleted (so the original content is still
-recoverable from disk, not just described in an error message), and the whole batch's outcome is
-raised as `ActionExecutionError(CommitFailure(...))`. On full success (every workbook committed),
-every `.bak` created during this run is deleted.
+`commit_all()` attempts every write-intent staged workbook's commit in turn (no separate
+upfront precheck pass — simplest option discussed, PRD §6.3.3). If workbook *N*'s `commit()`
+raises `OSError`, `commit_all()` rolls back every workbook that already committed successfully
+in this call, in reverse order, via `_rollback()`: `real_path.unlink(missing_ok=True)` then (if
+a `.bak` exists — a brand-new `create_if_missing` workbook that had no prior real file won't
+have one) `bak_path.rename(real_path)`. **Records, per file, whether that rollback itself
+succeeded** — if it fails too, that workbook's name is named explicitly (`MANUAL INTERVENTION
+NEEDED for: ...`) in the raised `ActionExecutionError`'s message, its `.bak` is deliberately
+*not* deleted (so the original content is still recoverable from disk, not just described in an
+error message). On full success (every workbook committed), every `.bak` created during the
+call is deleted.
+
+**Simplification found during implementation**: the originally-sketched `CommitFailure`
+dataclass (a structured payload attached to the raised error) wasn't built — `ErrorDetail`'s
+existing `message`/`technical_reason` fields already carry everything needed (which workbook
+failed, which others were rolled back, which need a human) as clear, human-readable text; adding
+a whole new public type for this would be extra surface for no real gain, given `ErrorDetail`'s
+`message` is already meant to be the actionable, plain-English summary (§6.8).
 
 **A partial-but-fully-rolled-back commit failure still makes `RunResult.status == "error"`**
 (PRD §6.3.3) — the run didn't fully complete what it promised, regardless of how cleanly the
 failure was contained.
-
-**Not yet built** — this entire section (working_dir relocation, read-only staging, rename-based
-commit/rollback) supersedes what's currently implemented (`tempfile.mkdtemp()`,
-copy-then-`Path.replace()`, `cleanup(keep_on_failure=...)`). Build order item 12 (below).
 
 ### 5.4 Validation — two tiers — **built**
 
@@ -774,7 +770,7 @@ into once `runner.py` exists to wire them together.
 The composition root, the audit trail, and the one public contract — grouped because together
 they're "the layer that actually executes a run and is safe for other code to depend on."
 
-### 6.1 Orchestration — **built, working_dir resolution not yet built (§5.3)**
+### 6.1 Orchestration — **built** (2026-08-21, working_dir resolution)
 
 ```python
 def run_workflow(
@@ -789,26 +785,28 @@ hit a line count — see AGENTS.md), wrapped in `try`/`finally` for the crash-sa
 1. `core.load(path, env_overrides)` → `Workflow`.
 2. Tier-1 validation (§5.4) → raises before anything is opened.
 3. Tier-2 validation (§5.4) → `ExecutionPlan`.
-4. **Resolve `working_dir` (PRD §6.3.4, not yet built — replaces `tempfile.mkdtemp()`)**:
-   `base = working_dir if working_dir is not None else (workflow's own top-level `working_dir:`
-   field, if set) else Path.cwd()`; `run_dir = base / "excel_runner_runs" / Path(path).stem`.
-   Precedence is `run_workflow`'s own `working_dir` param (fed by the CLI's `--working-dir`,
-   §6.4) > the YAML's own `working_dir:` field > cwd — same layering convention as
-   `env_overrides` over the file's own `env:` block (§2.2). `scratch =
-   ScratchManager(run_dir)`; `session_manager = SessionManager(workflow.workbooks, scratch)`.
-   **No separate upfront staging loop** — staging happens lazily, inside
-   `SessionManager.get_or_open`, the first time each workbook is actually referenced (now true
-   for read-only sessions too, §5.3's correction). The runner's only job here is to pass the
-   right `mode` (from `plan.modes[name]`) into each `get_or_open` call.
+4. **Resolve `working_dir` (PRD §6.3.4 — replaces `tempfile.mkdtemp()`)**:
+   `base = Path(working_dir) if working_dir is not None else Path.cwd()`; `run_dir = base /
+   "excel_runner_runs" / Path(path).stem`. `working_dir` is fed by the CLI's `--working-dir`
+   flag (§6.4) — **the originally-sketched `working_dir:` YAML field was not built**, kept out
+   of scope; no clear use case for it beyond the CLI flag actually showed up, so it wasn't
+   added speculatively. `scratch = ScratchManager(run_dir)`; `session_manager =
+   SessionManager(workflow.workbooks, scratch)`. **No separate upfront staging loop** —
+   staging happens lazily, inside `SessionManager.get_or_open`, the first time each workbook is
+   actually referenced (now true for read-only sessions too, §5.3's correction). The runner's
+   only job here is to pass the right `mode` (from `plan.modes[name]`) into each `get_or_open`
+   call.
 5. For each `Step` in order: if `if_expr` is set and evaluates false, record a `"skipped"`
-   `StepResult` and move on. Otherwise: `core.resolve_value(step.params, context)`, then
-   dispatch — every action except `copy` resolves its `workbook` field into one session and
-   calls `registry[step.action].fn(session=session, **remaining_kwargs)`; `copy` is dispatched
-   separately (`_dispatch_copy`), resolving *both* `source.workbook` and `target.workbook` into
-   two sessions, exactly the special-case wiring §4/§5.1 flagged as still owed. Every step gets
-   an audit record (§6.2) regardless of outcome and a `logger.info(...)` console record (§6.2's
-   logging addendum, not yet built) on start/completion, and — added after a failing
-   crash-safety test, not part of the original design — every step also gets a
+   `StepResult` and move on (logged at `INFO`, §6.2.1). Otherwise: `logger.info(...)` that the
+   step is starting, then dispatch — every action except `copy` resolves its `workbook` field
+   into one session and calls `registry[step.action].fn(session=session, **remaining_kwargs)`;
+   `copy` is dispatched separately (`_dispatch_copy`), resolving *both* `source.workbook` and
+   `target.workbook` into two sessions, exactly the special-case wiring §4/§5.1 flagged as
+   still owed. `_dispatch` itself logs the resolved params at `DEBUG` right after
+   `core.resolve_value` runs (§6.2.1) — not duplicated in the main loop, to avoid resolving the
+   same params twice per step just for a debug line. Every step gets an audit record (§6.2)
+   regardless of outcome, an `INFO`/`ERROR` console record on completion (§6.2.1), and — added
+   after a failing crash-safety test, not part of the original design — every step also gets a
    `session_manager.checkpoint()` call (§5.2), persisting whatever it just wrote to the scratch
    file before moving on.
 6. **An action returning `ActionResult(status="error")` does not stop the loop** — this was an
@@ -822,8 +820,8 @@ hit a line count — see AGENTS.md), wrapped in `try`/`finally` for the crash-sa
    mistake, not a normal "didn't work" outcome.
 7. If no step failed: `session_manager.commit_all()` (saves every staged session, then
    `scratch.commit_all()` moves each scratch file to its real path — see §5.3's rename-based
-   commit/rollback design, not yet built). **No `scratch.cleanup()` call anymore** (§5.3/§6.3.4
-   — nothing in `working_dir` is deleted automatically, success or failure).
+   commit/rollback design). **No `scratch.cleanup()` call anymore** (§5.3/§6.3.4 — nothing in
+   `working_dir` is deleted automatically, success or failure).
 8. `finally: session_manager.close_all()` — unconditionally, whether the loop finished, a step
    failed, or an exception propagated. `working_dir`'s contents (scratch copies + `audit.jsonl`)
    are simply left in place either way now — not conditionally cleaned up.
@@ -867,17 +865,21 @@ skipped step, and raw params are simpler and always available; a minor, delibera
 from the original "resolved parameters" phrasing. Not a `logging`-module handler — deliberately
 a separate, structured artifact (PRD §6.7 explains why).
 
-### 6.2.1 Console/application logging (PRD §6.7.1) — **not yet built**
+### 6.2.1 Console/application logging (PRD §6.7.1) — **built** (2026-08-21)
 
 A second, distinct output from the audit log above: real-time narration via stdlib `logging`,
-for a human (or the user's own workflow tool) watching a run as it happens. `runner.py`,
-`engine.py`, and `backends.py` each get a module-level `logger = logging.getLogger(__name__)`
-(no handler/formatter configuration in library code — standard Python practice, never hijack
-whatever logging setup the importing application already has). Per PRD §6.7.1:
-- `INFO`: every step/action's start and completion.
-- `DEBUG`: a bit more detail (resolved params, timing) — not exhaustive.
-- `WARNING`/`ERROR`: self-sufficient for a human reading just the console, not merely pointing
-  at the audit log.
+for a human (or the user's own workflow tool) watching a run as it happens. Only `runner.py`
+has a module-level `logger = logging.getLogger(__name__)` so far — `_dispatch`'s `DEBUG` line
+is the only per-step detail logged today (no handler/formatter configuration in library code —
+standard Python practice, never hijack whatever logging setup the importing application
+already has). Per PRD §6.7.1:
+- `INFO`: every step's start (`'Step "%s" (%s): starting'`), a skip
+  (`'Step "%s" (%s): skipped (if: was false)'`), or a non-error completion
+  (`'Step "%s" (%s): %s'`, the action's status).
+- `DEBUG`: resolved params, logged once in `_dispatch` right after `core.resolve_value` runs —
+  not duplicated in the main loop, to avoid resolving the same params twice per step.
+- `ERROR`: a failed step (`'Step "%s" (%s): failed — %s'`, the error's plain-English message) —
+  self-sufficient for a human reading just the console, not merely pointing at the audit log.
 
 The CLI (§6.4) is the only place that sets a severity threshold (`--logging-level`) — it does
 not attach handlers either; stream/format configuration is explicitly out of scope for
@@ -914,15 +916,15 @@ rewriting to support this.
 just `discover_actions` (§5.1) wired to the real `actions` module, not a second source of truth
 that could drift from it.
 
-### 6.4 CLI — `cli.py` — **built, `--working-dir`/`--logging-level` not yet added**
+### 6.4 CLI — `cli.py` — **built** (2026-08-21)
 
 ```python
 def main(argv: list[str] | None = None) -> int:
 ```
 
 Thin wrapper over `run_workflow()` — argument parsing and JSON result formatting only, no logic
-of its own (§1's correction). Existing args: `workflow` (positional path), `--env KEY=VALUE`
-(repeatable). **New, not yet built** (PRD §6.3.4/§6.7.1):
+of its own (§1's correction). Args: `workflow` (positional path), `--env KEY=VALUE`
+(repeatable), and (added 2026-08-21, PRD §6.3.4/§6.7.1):
 
 ```python
 parser.add_argument("--working-dir", default=None, help="Base directory for this run's "
@@ -931,8 +933,11 @@ parser.add_argument("--logging-level", help="DEBUG,INFO,WARNING,ERROR", default=
 ```
 
 `--working-dir`'s value is passed straight through as `run_workflow(..., working_dir=...)`
-(§6.1). `--logging-level` only calls `logging.getLogger(...).setLevel(...)` — no handler or
-formatter configuration (§6.2.1's decided scope boundary).
+(§6.1). `--logging-level` calls `logging.getLogger("excel_runner").setLevel(...)` before
+running the workflow — setting the level on the package's parent logger, not each module's own
+`__name__`-based logger, so it propagates down to every child logger (`excel_runner.runner`,
+etc.) that doesn't set its own explicit level. No handler or formatter configuration (§6.2.1's
+decided scope boundary).
 
 ## 7. Testing approach
 
@@ -1041,16 +1046,23 @@ time within it.
 11. **Deferred/flagged, per PRD**: `update_summary_table`'s real parameters, the `aggregate`
     discussion, `export_pdf`, the AI-authoring inspection actions (PRD §9: `list_sheets`,
     `describe_sheet`).
-12. **Crash/lock-safety hardening (PRD §6.2.3/§6.3.3/§6.3.4/§6.7.1)** — **not yet built**, design
-    decided in full (2026-08-21 session, this Specification.md update):
+12. **Crash/lock-safety hardening (PRD §6.2.3/§6.3.3/§6.3.4/§6.7.1)** — **done** (2026-08-21):
     - `working_dir` relocation (§5.3/§6.1): replaces `tempfile.mkdtemp()` with the fixed
       `<base>/excel_runner_runs/<yaml_stem>/` path; `AuditLogger` truncates instead of
       appending; `ScratchManager.cleanup()` removed entirely.
-    - Read-only sessions now staged too (§5.3's correction to §6.3's original wording).
+    - Read-only sessions now staged too (§5.3's correction to §6.3's original wording), via a
+      new `stage(..., writes: bool)` flag so `commit_all()` knows to skip them.
     - Rename-based commit with per-file rollback on a later workbook's commit failure (§5.3) —
-      the `.bak`/`.tmp` rename sequence, `CommitFailure`'s `needs_human` case.
+      the `.bak`/`.tmp` rename sequence; the originally-sketched `CommitFailure` dataclass
+      wasn't built (§5.3's note — `ErrorDetail`'s existing fields already carry it clearly).
     - Console/application logging via stdlib `logging` (§6.2.1) plus the CLI's
-      `--working-dir`/`--logging-level` flags (§6.4).
+      `--working-dir`/`--logging-level` flags (§6.4). The `working_dir:` YAML field sketched in
+      the PRD wasn't built — no clear use case beyond the CLI flag showed up.
+    - Every integration test that calls `run_workflow()` now passes `working_dir=str(tmp_path)`
+      explicitly — found necessary because the *default* (cwd) is the real repo directory
+      during a pytest run, which would otherwise litter the actual project with
+      `excel_runner_runs/` test artifacts on every test run. `.gitignore` also covers it as a
+      safety net for real, manual CLI usage inside the repo.
     - Pure logic + filesystem operations, no live Excel needed — fits before item 13/14 below,
       same "platform-independent work first" rationale as the rest of this build order.
 13. **Live-Excel hang safety + configurable timeouts (PRD §6.2.3/§6.2.4)** — **not yet built**,

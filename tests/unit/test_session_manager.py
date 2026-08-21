@@ -3,8 +3,9 @@
 Read/write mode is caller-specified here, not statically inferred — tier-2 validation
 (Spec sec 5.4, not built yet) will compute that later and hand it in; SessionManager itself
 doesn't guess. A session opened with mode="read_write" is treated as "this run will write to
-it" and gets staged through ScratchManager (PRD sec 6.3.1); mode="read_only" opens directly
-against the real path, no staging.
+it" and gets staged through ScratchManager (PRD sec 6.3.1); mode="read_only" is now staged too
+(PRD sec 6.2.3's correction — avoids holding a handle open on the real file), just never
+committed back since nothing about it ever changes.
 """
 
 from pathlib import Path
@@ -31,7 +32,7 @@ class TestGetOrOpen:
     def test_opens_an_existing_workbook_read_write_by_default(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
 
         session = manager.get_or_open("manip")
 
@@ -42,28 +43,31 @@ class TestGetOrOpen:
     def test_read_write_stages_through_scratch(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
 
         session = manager.get_or_open("manip", mode="read_write")
 
         assert session.scratch_path is not None
-        assert str(tmp_path / "scratch") in session.path
+        assert str(tmp_path / "working" / "scratch") in session.path
         assert session.path != str(real)
 
-    def test_read_only_does_not_stage(self, tmp_path: Path) -> None:
+    def test_read_only_stages_too_but_is_never_committed(self, tmp_path: Path) -> None:
+        """PRD sec 6.2.3's correction: read-only sessions are staged like read-write ones now
+        (avoids holding a handle open on the real file), just never committed back."""
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
 
         session = manager.get_or_open("manip", mode="read_only")
 
-        assert session.scratch_path is None
-        assert session.path == str(real)
+        assert session.scratch_path is not None
+        assert str(tmp_path / "working" / "scratch") in session.path
+        assert session.path != str(real)
 
     def test_second_call_for_the_same_name_returns_the_cached_session(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
 
         first = manager.get_or_open("manip")
         second = manager.get_or_open("manip")
@@ -71,14 +75,14 @@ class TestGetOrOpen:
         assert first is second
 
     def test_unknown_workbook_name_raises_a_clear_error(self, tmp_path: Path) -> None:
-        manager = SessionManager({}, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager({}, ScratchManager(tmp_path / "working"))
         with pytest.raises(ActionExecutionError) as exc_info:
             manager.get_or_open("nonexistent")
         assert "nonexistent" in exc_info.value.detail.message
 
     def test_missing_file_without_create_if_missing_raises_a_clear_error(self, tmp_path: Path) -> None:
         workbooks = {"manip": WorkbookRef(name="manip", file=str(tmp_path / "missing.xlsx"))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
         with pytest.raises(ActionExecutionError) as exc_info:
             manager.get_or_open("manip")
         assert "missing.xlsx" in exc_info.value.detail.message
@@ -119,7 +123,7 @@ class TestCapabilityBackendMismatch:
     def test_matching_capability_returns_the_session_normally(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
 
         session = manager.get_or_open("manip", capability="file")
 
@@ -130,7 +134,7 @@ class TestCapabilityBackendMismatch:
     ) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
 
         session = manager.get_or_open("manip")  # no capability given
 
@@ -142,7 +146,7 @@ class TestCapabilityBackendMismatch:
         yet (PRD sec 6.2.2)."""
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
 
         with pytest.raises(ActionExecutionError) as exc_info:
             manager.get_or_open("manip", capability="xlw")
@@ -153,7 +157,7 @@ class TestCapabilityBackendMismatch:
     def test_mismatched_capability_on_an_already_open_session_raises_clearly(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
         manager.get_or_open("manip", capability="file")  # opens it as file-backend first
 
         with pytest.raises(ActionExecutionError):
@@ -161,23 +165,25 @@ class TestCapabilityBackendMismatch:
 
 
 class TestCreateIfMissing:
-    def test_read_only_with_create_if_missing_creates_at_the_real_path(self, tmp_path: Path) -> None:
+    def test_read_only_with_create_if_missing_creates_at_the_scratch_path(self, tmp_path: Path) -> None:
         """Unusual combination (why read a workbook you just created blank?) but not
-        forbidden — must still work correctly rather than being an untested code path."""
+        forbidden — must still work correctly rather than being an untested code path.
+        Creates at the scratch path now, not the real path (PRD sec 6.2.3's correction —
+        read-only is staged too)."""
         real = tmp_path / "real" / "new.xlsx"
         workbooks = {"new": WorkbookRef(name="new", file=str(real), create_if_missing=True)}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
 
         session = manager.get_or_open("new", mode="read_only")
 
-        assert real.exists()
-        assert session.scratch_path is None
+        assert not real.exists()
+        assert session.scratch_path is not None
         assert session.handle.sheetnames
 
     def test_creates_a_blank_workbook_at_the_scratch_path(self, tmp_path: Path) -> None:
         real = tmp_path / "real" / "new.xlsx"
         workbooks = {"new": WorkbookRef(name="new", file=str(real), create_if_missing=True)}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
 
         session = manager.get_or_open("new")
 
@@ -193,7 +199,7 @@ class TestCreateIfMissing:
                 name="results", file=str(new_real), create_if_missing=True, template="historical"
             ),
         }
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
 
         session = manager.get_or_open("results")
 
@@ -208,14 +214,14 @@ class TestCloseAll:
             "a": WorkbookRef(name="a", file=str(real_a)),
             "b": WorkbookRef(name="b", file=str(real_b)),
         }
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
         manager.get_or_open("a")
         manager.get_or_open("b")
 
         manager.close_all()  # should not raise
 
     def test_close_all_with_no_sessions_opened_does_not_raise(self, tmp_path: Path) -> None:
-        manager = SessionManager({}, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager({}, ScratchManager(tmp_path / "working"))
         manager.close_all()
 
     def test_one_failing_close_does_not_prevent_others_from_closing(self, tmp_path: Path) -> None:
@@ -230,7 +236,7 @@ class TestCloseAll:
 
         real_b = _write_workbook(tmp_path / "real" / "b.xlsx")
         workbooks = {"b": WorkbookRef(name="b", file=str(real_b))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
         # "a" (which will fail to close) is inserted first, so iteration reaches it before "b" —
         # this is what actually proves close_all() doesn't stop after the first failure.
         manager._sessions["a"] = WorkbookSession(
@@ -263,7 +269,7 @@ class TestCheckpoint:
     def test_checkpoint_saves_a_dirty_staged_session_to_its_scratch_file(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
         session = manager.get_or_open("manip", mode="read_write")
         session.handle["Sheet"]["A1"] = "in progress"
         session.dirty = True
@@ -275,7 +281,7 @@ class TestCheckpoint:
     def test_checkpoint_does_not_touch_the_real_path(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
         session = manager.get_or_open("manip", mode="read_write")
         session.handle["Sheet"]["A1"] = "in progress"
         session.dirty = True
@@ -287,7 +293,7 @@ class TestCheckpoint:
     def test_checkpoint_clears_the_dirty_flag(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
         session = manager.get_or_open("manip", mode="read_write")
         session.dirty = True
 
@@ -298,7 +304,7 @@ class TestCheckpoint:
     def test_checkpoint_skips_a_non_dirty_session(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
         manager.get_or_open("manip", mode="read_write")
 
         manager.checkpoint()  # should not raise
@@ -306,7 +312,7 @@ class TestCheckpoint:
     def test_checkpoint_skips_read_only_sessions(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
         manager.get_or_open("manip", mode="read_only")
 
         manager.checkpoint()  # should not raise
@@ -316,7 +322,7 @@ class TestCommitAll:
     def test_saves_dirty_staged_sessions_and_commits_them_to_the_real_path(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
         session = manager.get_or_open("manip", mode="read_write")
         session.handle["Sheet"]["A1"] = "changed"
         session.dirty = True
@@ -329,7 +335,8 @@ class TestCommitAll:
     def test_read_only_sessions_are_not_touched_by_commit(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
-        manager = SessionManager(workbooks, ScratchManager(tmp_path / "scratch"))
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
         manager.get_or_open("manip", mode="read_only")
 
         manager.commit_all()  # should not raise, nothing to commit
+

@@ -1,5 +1,55 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-08-21h, Windows)
+**Status:** Build order item 12 (crash/lock-safety hardening) — **done**. Ready for item 13/14
+(needs a live Windows Excel instance) or item 10's remaining live-Excel actions.
+**Working on:** Built everything decided in the multi-session design thread, TDD throughout:
+- **`working_dir` relocation**: `ScratchManager(working_dir)` replaces `tempfile.mkdtemp()`;
+  fixed path `<base>/excel_runner_runs/<yaml_stem>/`, `<base>` = cwd or `--working-dir`.
+  `run_workflow()` gained a `working_dir` param. The `working_dir:` YAML field originally
+  sketched in the PRD wasn't built — no clear use case beyond the CLI flag ever showed up.
+- **Read-only staging**: `SessionManager._open_read_only` now calls `scratch.stage(...,
+  writes=False)`, same as read-write (`writes=True` default) — `ScratchManager.commit_all()`
+  skips any workbook staged with `writes=False`, since nothing about it ever changes.
+- **Rename-based commit + rollback**: `ScratchManager.commit()` prepares new content at a
+  `.tmp` sibling before touching `real_path` at all, renames the original aside to `.bak`
+  (zero-copy), then renames `.tmp` into place. `commit_all()` rolls back every
+  already-committed workbook (reverse order) on a later failure, recording per-file whether
+  rollback itself succeeded — a file whose rollback also fails is named explicitly in the
+  raised error as needing a human, with its `.bak` deliberately kept. The originally-sketched
+  `CommitFailure` dataclass wasn't built — `ErrorDetail`'s existing fields already carry
+  everything needed as clear text, no new public type needed.
+- **`cleanup()` removed entirely** — nothing in `working_dir` is ever auto-deleted now.
+  `AuditLogger` truncates `audit.jsonl` on open instead of appending, so a re-run against the
+  same fixed `working_dir` never mixes with a previous run's records.
+- **Console logging**: `runner.py` gained a module logger; `INFO` on every step's
+  start/skip/completion, `DEBUG` on resolved params (logged once in `_dispatch`, not
+  duplicated in the main loop), `ERROR` on a failed step. CLI gained `--working-dir` and
+  `--logging-level` flags — the latter only sets `logging.getLogger("excel_runner").setLevel(...)`,
+  no handler/formatter configuration at all (that's explicitly someone else's job, per the
+  user's own correction earlier this thread).
+- **Real bug found and fixed mid-build**: every integration test calling `run_workflow()`
+  without an explicit `working_dir=` was defaulting to cwd — which during a pytest run *is* the
+  actual repo directory, so running the test suite was littering the real project with
+  `excel_runner_runs/` test artifacts. Fixed by passing `working_dir=str(tmp_path)` explicitly
+  in every integration test; `.gitignore` also covers `/excel_runner_runs/` as a safety net for
+  real manual CLI usage inside the repo.
+- Confirmed (via a repo-wide check) no leftover internal-tool-name references reappeared in
+  Specification.md's new content this session — the earlier redaction pass already covered it.
+
+293 tests pass (was 285 at the start of this build). Full quality gate (pytest --cov,
+ruff, mypy --strict, pyright, vulture, radon) clean — 99% branch coverage, all new code fully
+covered. Specification.md build order item 12 marked done; §5.3/§6.1/§6.2.1/§6.4 status headers
+updated from "not yet built" to "built".
+
+**Next step:** Item 13 (live-Excel hang safety + configurable timeouts) and item 14
+(linked-workbook refresh) both need a live Windows Excel instance to build/verify for real —
+now available and confirmed. Alternatively, resume item 10's remaining live-Excel actions
+(`recalculate`, `run_macro`, `refresh_links`, `write_links`, `read_metadata`'s textbox
+sub-case) — `read_links`/`write_links` specifically are now unblocked (see the 2026-08-21g
+session note below) since a real Excel-generated fixture can finally be produced to test
+against.
+
 ## Last Session (2026-08-21g, Windows)
 **Status:** Ready to build — item 12 (crash/lock-safety hardening) unblocked; items 10/13/14
 now also unblocked (Windows + real Excel confirmed available)

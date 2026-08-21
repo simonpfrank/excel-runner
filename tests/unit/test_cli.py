@@ -5,6 +5,7 @@ result-formatting responsibility.
 """
 
 import json
+import logging
 from pathlib import Path
 from unittest.mock import patch
 
@@ -45,7 +46,7 @@ class TestMain:
         ) as mock_run:
             exit_code = main(["workflow.yaml"])
 
-        mock_run.assert_called_once_with("workflow.yaml", None)
+        mock_run.assert_called_once_with("workflow.yaml", None, working_dir=None)
         assert exit_code == 0
         printed = json.loads(capsys.readouterr().out)
         assert printed["status"] == "success"
@@ -64,7 +65,27 @@ class TestMain:
         ) as mock_run:
             main(["workflow.yaml", "--env", "a=1", "--env", "b=2"])
 
-        mock_run.assert_called_once_with("workflow.yaml", {"a": "1", "b": "2"})
+        mock_run.assert_called_once_with("workflow.yaml", {"a": "1", "b": "2"}, working_dir=None)
+
+    def test_working_dir_flag_is_passed_through(self) -> None:
+        with patch(
+            "excel_runner.cli.run_workflow", return_value=_success_result()
+        ) as mock_run:
+            main(["workflow.yaml", "--working-dir", "/some/base"])
+
+        mock_run.assert_called_once_with("workflow.yaml", None, working_dir="/some/base")
+
+    def test_logging_level_flag_sets_the_package_logger_level(self) -> None:
+        with patch("excel_runner.cli.run_workflow", return_value=_success_result()):
+            main(["workflow.yaml", "--logging-level", "DEBUG"])
+
+        assert logging.getLogger("excel_runner").level == logging.DEBUG
+
+    def test_logging_level_defaults_to_info(self) -> None:
+        with patch("excel_runner.cli.run_workflow", return_value=_success_result()):
+            main(["workflow.yaml"])
+
+        assert logging.getLogger("excel_runner").level == logging.INFO
 
     def test_validation_error_returns_one_and_prints_structured_error(
         self, capsys

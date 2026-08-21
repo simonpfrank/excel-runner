@@ -17,6 +17,14 @@ the action list below skips macros, recalculation, and a few other Excel-specifi
 
 ## Changelog
 
+- **2026-08-21**: Crash/lock-safety hardening. `working_dir` (`excel_runner_runs/<yaml_stem>/`,
+  under cwd by default or `--working-dir`) replaces the old random temp directory — a fixed,
+  predictable location external tooling can construct itself from just the yaml's filename.
+  Read-only sessions are now staged too (not opened directly against the real file), closing a
+  hang-related file-lock exposure. Committing a workbook back to its real path is now
+  rename-based with per-file rollback if a later workbook in the same run fails to commit.
+  Nothing in `working_dir` is deleted automatically anymore. Added console logging (stdlib
+  `logging`, `--logging-level` flag) alongside the existing structured audit log.
 - **2026-08-20**: Added `create_sheet`/`rename_sheet`/`delete_sheet` actions (no prior way to
   add/rename/remove a worksheet). Also fixed a real design gap found while adding them: whether
   an action needs its workbook opened read-write was tracked in a hardcoded list disconnected

@@ -6,7 +6,7 @@ surface (sec 6.3, build order item 8) isn't built yet.
 """
 
 import json
-import tempfile
+import logging
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -15,6 +15,8 @@ from typing import Any, Literal
 from excel_runner import actions as actions_module
 from excel_runner import core, engine
 from excel_runner.core import ActionResult, ErrorDetail, Step, WorkbookSession, Workflow
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -66,6 +68,9 @@ class AuditLogger:
     def __init__(self, path: Path) -> None:
         self._path = path
         self._path.parent.mkdir(parents=True, exist_ok=True)
+        # Truncate any previous run's leftover audit.jsonl at this same fixed working_dir path
+        # (PRD sec 6.3.4) — a new run's records must never mix with an old run's.
+        self._path.write_text("")
 
     def record_step(
         self, step: Step, result: StepResult, started_at: Any, ended_at: Any
@@ -134,6 +139,7 @@ def _dispatch(
     itself (Spec sec 4) — every other resolved param is passed through as a keyword argument.
     """
     resolved = core.resolve_value(step.params, context)
+    logger.debug('Step "%s" (%s): resolved params %r', step.id, step.action, resolved)
     if step.action == "copy":
         return _dispatch_copy(resolved, session_manager, plan)
     if step.action == "stop":
@@ -150,7 +156,7 @@ def _dispatch(
 
 
 def run_workflow(
-    path: str | Path, env_overrides: dict[str, Any] | None = None
+    path: str | Path, env_overrides: dict[str, Any] | None = None, working_dir: str | Path | None = None
 ) -> RunResult:
     """Load, validate, and execute a workflow YAML file end to end.
 
@@ -165,6 +171,9 @@ def run_workflow(
         path: Path to the workflow YAML file.
         env_overrides: Values merged over (and taking precedence over) the file's own `env:`
             block (PRD sec 6.6).
+        working_dir: Base directory this run's `working_dir` folder
+            (`excel_runner_runs/<yaml_stem>/`) is created under (PRD sec 6.3.4). Defaults to
+            the current working directory. Fed by the CLI's `--working-dir` flag (Spec sec 6.4).
 
     Returns:
         The RunResult, once every step has run (or been skipped) without raising.
@@ -180,11 +189,13 @@ def run_workflow(
     engine.validate_static(workflow, registry)
     plan = engine.plan(workflow, registry)
 
-    # audit.jsonl lives in the parent run dir, not inside scratch/ — scratch.cleanup() wipes
-    # the whole scratch dir on success (PRD sec 6.3.1), and the audit log must survive that
-    # (found via a failing test: a successful run was deleting its own audit trail).
-    run_dir = Path(tempfile.mkdtemp(prefix="excel_runner_"))
-    scratch = engine.ScratchManager(run_dir / "scratch")
+    # working_dir is a fixed, predictable path (not a random tempfile.mkdtemp() one) so
+    # external tooling can construct it itself from just the yaml's filename, without reading
+    # any output field (PRD sec 6.3.4). Nothing under it is ever auto-deleted — see
+    # ScratchManager.commit_all() and AuditLogger's truncate-on-open below.
+    base = Path(working_dir) if working_dir is not None else Path.cwd()
+    run_dir = base / "excel_runner_runs" / Path(path).stem
+    scratch = engine.ScratchManager(run_dir)
     session_manager = engine.SessionManager(workflow.workbooks, scratch)
     audit_log_path = run_dir / "audit.jsonl"
     audit = AuditLogger(audit_log_path)
@@ -203,7 +214,9 @@ def run_workflow(
                 step.if_expr, context
             ):
                 step_result = StepResult(step_id=step.id, status="skipped", output={})
+                logger.info('Step "%s" (%s): skipped (if: was false)', step.id, step.action)
             else:
+                logger.info('Step "%s" (%s): starting', step.id, step.action)
                 action_result = _dispatch(
                     step, context, registry, session_manager, plan
                 )
@@ -215,6 +228,10 @@ def run_workflow(
                 )
                 if action_result.status == "error":
                     any_failed = True
+                    error_message = action_result.error.message if action_result.error else ""
+                    logger.error('Step "%s" (%s): failed — %s', step.id, step.action, error_message)
+                else:
+                    logger.info('Step "%s" (%s): %s', step.id, step.action, action_result.status)
                 stop_triggered = step.action == "stop"
 
             audit.record_step(step, step_result, started_at, datetime.now())
@@ -247,7 +264,6 @@ def run_workflow(
 
         if not any_failed:
             session_manager.commit_all()
-            scratch.cleanup(keep_on_failure=False)
     finally:
         session_manager.close_all()
 
