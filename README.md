@@ -518,7 +518,6 @@ Flagged clearly rather than silently missing:
 - **`read_metadata` with `target: textboxes`** — same live-Excel limitation; raises a clear
   error if requested.
 - **`update_summary_table`** — not designed yet.
-- A CLI. `run_workflow()` is the only entry point today.
 
 ## Using it as a library
 
