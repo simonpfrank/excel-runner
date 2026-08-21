@@ -424,7 +424,7 @@ empirically, rather than assuming the docs/forum research above generalizes to t
 exact usage pattern. This is a testing activity to schedule once the xlwings/COM phase (item 9)
 is far enough along to soak-test against, not a blocker for finishing this design.
 
-### 6.3.3 Commit-time failure when the real file is locked by something else — **PROPOSED, pending decision (2026-08-21)**
+### 6.3.3 Commit-time failure when the real file is locked by something else — **DECIDED (2026-08-21)**
 
 **Problem, confirmed via code inspection, not hypothetical**: if a workbook's real file happens
 to be open elsewhere (a user has it open in Excel, another process has it locked) at the exact
@@ -438,25 +438,38 @@ produce. The one thing that accidentally already works: since the exception happ
 `scratch.cleanup(keep_on_failure=False)` runs, the scratch copies do survive — but nothing
 surfaces that fact today.
 
-**Also confirmed**: `RunResult` (`runner.py`) exposes only `status`, `step_results`, and
-`audit_log_path` — **not** the scratch directory path. So even when the scratch copies survive
-a failed commit, an external caller (e.g. a UiPath xaml step wrapping the CLI) has no
-programmatic way to find them today.
-
-**Decision needed**:
-1. Wrap the commit phase so a per-workbook commit failure becomes a structured error (which
-   workbook, its scratch path, the underlying `OSError`), not a raw traceback.
-2. Attempt every workbook's commit rather than stopping at the first failure, so a partial
-   commit failure reports the *complete* picture (which workbooks made it back, which didn't),
-   not just the first blocker.
-3. **Superseded by §6.3.4** — rather than exposing a random per-run temp path on `RunResult`
-   after the fact, `working_dir` is now a fixed, predictable path a xaml can construct itself
-   in advance from just the yaml's own filename.
-4. Open question for spec phase: does a partial commit failure (2 of 3 workbooks committed,
-   1 blocked) count as the run's overall `status`? Leaning towards still `"error"` — the run
-   didn't fully complete what it promised — but this needs to be explicit, not implied.
+**Decided mechanism — rename-based commit and rollback, no upfront precheck pass, simplest
+option discussed that still gets the important property:**
+- **Commit stays rename-based, not copy-based**: for each workbook, rename `real_path` →
+  `real_path.bak` (an instant, zero-copy move — this *is* "keeping the original," since it's
+  already sitting there untouched right up until commit, per §6.3.1), then rename the finished
+  `tmp_path` → `real_path`.
+- **Attempt each workbook's commit directly** — no separate "check everything before touching
+  anything" pass. If a later workbook in the same run fails to commit, **roll back every
+  workbook that already committed successfully in this run** by renaming its `.bak` back over
+  `real_path`.
+- **Record, per file, whether that rollback itself succeeded.** Any file where rollback also
+  fails is flagged explicitly, by name, with its real path and `.bak`/scratch locations, as
+  needing a human — the one case the engine genuinely can't self-heal, and the design says so
+  loudly rather than pretending otherwise ("there is only so much we can do before we raise our
+  hand and ask for help").
+- **`.bak` files are transient**: deleted once every workbook in the run has committed
+  successfully; kept (never deleted) if a human-intervention case occurs, so the original
+  content is recoverable from disk, not just described in an error message.
+- A run with only one workbook has nothing to roll back if that single commit fails — this
+  question only applies once 2+ workbooks commit in the same run.
+- Wrap the whole commit phase so any failure becomes a structured error (which workbook, its
+  scratch path, the underlying `OSError`, and the rollback outcome per file) — never a raw
+  traceback, matching every other error surface (§6.8).
+- **A partial commit failure (even one that fully rolls back) still makes the run's overall
+  `status` `"error"`** — the run didn't fully complete what it promised, regardless of how
+  cleanly the failure was contained.
+- §6.3.3 point 3 (exposing a commit-failure path on `RunResult`) is **superseded by §6.3.4** —
+  `working_dir` is now a fixed, predictable path a xaml can construct itself from just the
+  yaml's filename, not something that needs surfacing after the fact.
 
 ### 6.3.4 Working directory location and structure — **DECIDED (2026-08-21)**
+
 
 Supersedes §6.3.3's "expose the scratch directory path on `RunResult`" idea — a **fixed,
 predictable path a xaml can construct itself from just the yaml file's own path**, without
@@ -541,6 +554,42 @@ human-readable console/log output. Plain `logging` module output is not a substi
 record needs to be machine-queryable (e.g. by an agent diagnosing why a run failed) as well as
 human-readable, and the two have different jobs. Also the natural home for surfacing what
 happened during a failed run, alongside the scratch copies from §6.3.1.
+
+### 6.7.1 Console/application logging (stdlib `logging`) — **DECIDED (2026-08-21)**
+
+Distinct purpose from §6.7's audit log: the audit log is evidence/diagnosis, queried after the
+fact; console logging is a **real-time narration for a human (or a tool) watching the run as it
+happens** — the driving case being the user's own log-viewing tool ("Unify") that picks up
+console output and displays it.
+
+**Handler/stream configuration is explicitly out of scope here — someone else's job.** Both the
+library (`runner.py`, `engine.py`, etc.) and the CLI (`cli.py`) only ever emit records via
+`logging.getLogger(...)` — neither attaches handlers, sets a formatter, or routes between
+stdout/stderr itself. That's entirely the responsibility of whatever wraps this (Unify, or any
+other caller) — standard Python library practice (never hijack the importing application's own
+logging setup), now extended to the CLI too, not just the library.
+
+**The one thing the CLI does own**: a standard `--logging-level` argument (matching the user's
+existing convention for this across other tools):
+
+```python
+parser.add_argument(
+    "--logging-level", help="DEBUG,INFO,WARNING,ERROR", default="INFO"
+)
+```
+
+This sets the severity threshold passed to `getLogger(...).setLevel(...)` — nothing more.
+
+**Content per level** (still decided, independent of the handler-configuration question above):
+- `INFO`: every step/action's start and completion — enough that a human watching the console
+  can follow the run in real time without needing the audit log at all for the normal case.
+- `DEBUG`: a bit more detail (e.g. resolved parameters, timing) — deliberately not exhaustive;
+  "a little bit more detailed but not crazy," not a firehose.
+- `WARNING`/`ERROR`: a human needs to know **what happened and what went wrong** without first
+  having to go digging through the audit log — the console output has to stand on its own for
+  this, not just point at the audit log as the real source of truth. Exact conditions that
+  warrant `WARNING` vs. `INFO` (e.g. a normal search-miss like `find_row` finding nothing) is an
+  open detail for Specification.md, not decided here.
 
 ### 6.8 Error handling philosophy
 

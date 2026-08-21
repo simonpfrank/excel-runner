@@ -1,5 +1,34 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-08-21e, Windows)
+**Status:** Design phase complete for this thread — ready to write Specification.md sections
+**Working on:** Finalized §6.3.3 (commit-time file-lock handling) with the user, converging on
+a simpler mechanism than first proposed: no separate upfront precheck pass, just attempt each
+workbook's commit directly (rename `real_path`→`.bak` then `tmp_path`→`real_path` — the `.bak`
+rename is free, since the original was already sitting there untouched pre-commit). If a later
+workbook fails, roll back every already-committed workbook in the run by renaming its `.bak`
+back, recording per-file whether that rollback itself succeeded. Any file where rollback also
+fails is flagged by name as needing a human — the one case the engine can't self-heal, stated
+plainly rather than hidden. `.bak` files are transient (deleted on full success, kept on a
+human-intervention case). A partial-but-fully-rolled-back commit failure still makes the run's
+overall status `"error"`.
+
+Also added **§6.7.1** (new): console/application logging via stdlib `logging`, distinct from
+the audit log (real-time human narration vs. after-the-fact evidence). **Corrected after user
+feedback**: handler/stream configuration (stdout vs. stderr, formatting) is explicitly out of
+scope for excel_runner entirely — both the library and the CLI only ever call `getLogger(...)`,
+never attach handlers themselves; that's the responsibility of whatever wraps this (the user's
+"Unify" tool), not something to design here. The only thing the CLI owns is a standard
+`--logging-level` argument (`DEBUG`/`INFO`/`WARNING`/`ERROR`, default `INFO`), matching the
+user's existing convention across other tools. Content-per-level guidance stands: `INFO` covers
+every step/action start+completion; `DEBUG` is a bit more detail, not a firehose;
+`WARNING`/`ERROR` must be self-sufficient for a human, not just point at the audit log.
+
+**Next step:** Every item opened in this multi-session design thread (§6.2.3, §6.2.4, §6.3.2,
+§6.3.3, §6.3.4, §6.7.1) is now decided. Write the corresponding Specification.md sections next,
+then build with TDD, per the project's PRD→Spec→build workflow. Still nothing has been built
+yet — this entire thread has been design-only, as the user explicitly requested throughout.
+
 ## Last Session (2026-08-21d, Windows)
 **Status:** Blocked — awaiting user approval on §6.3.3 (commit-failure structuring) only;
 everything else in this design thread is now decided
