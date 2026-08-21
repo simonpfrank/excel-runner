@@ -1,5 +1,34 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-08-21c, Windows)
+**Status:** Blocked — awaiting user approval on remaining PRD design decisions (§6.2.4 timeout
+design, §6.3.3 commit-failure structuring) before Specification.md work
+**Working on:** Settled the working-directory location design (§6.3.4, DECIDED) via a few
+rounds of clarifying questions with the user. Supersedes §6.3.3's "expose scratch dir on
+RunResult" idea entirely — a fixed, predictable path is more useful than a random path surfaced
+after the fact, since a xaml can construct it itself in advance from just the yaml's filename,
+with no need to read any CLI output field.
+
+**Decided**: renamed "scratch dir" → **`working_dir`** throughout (it now holds the audit log
+too, not just workbook copies). Location: `<base>/excel_runner_runs/<yaml_stem>/` — `<base>` is
+cwd by default, overridable via `--working-dir` CLI flag or a new top-level `working_dir:` YAML
+field (CLI > YAML > cwd default). `excel_runner_runs` (not the first-considered
+`excel_runner`) was chosen specifically because `excel_runner` collides with this repo's own
+package folder name when working inside the repo itself. Inside `working_dir`: `audit.jsonl` at
+the root, workbook scratch copies in a `scratch/` subfolder (same internal shape as before,
+just relocated) — kept together so the user's stated recovery workflow ("zip this one folder
+and hand it to whoever's investigating") has everything in one place. Re-running the same yaml
+overwrites the previous run's leftovers automatically, no confirmation. **Cleanup policy
+changed**: nothing is ever auto-deleted now, success or failure (previously: scratch/ deleted
+on success) — safe since re-running the same yaml just overwrites its own fixed folder rather
+than accumulating.
+
+**Next step:** §6.2.4 (configurable/unbounded timeouts for `recalculate`/`run_macro`) and
+§6.3.3's remaining commit-failure-structuring points (points 1/2/4 — point 3 is now superseded
+by §6.3.4) are still open for approval. Once everything in §6.2.3/6.2.4/6.3.2/6.3.3/6.3.4 is
+signed off, write the corresponding Specification.md sections, then build with TDD. Do not
+start building any of this yet.
+
 ## Last Session (2026-08-21b, Windows)
 **Status:** Blocked — awaiting user approval on remaining PRD design decisions before
 Specification.md work

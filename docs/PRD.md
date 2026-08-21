@@ -422,13 +422,57 @@ programmatic way to find them today.
 2. Attempt every workbook's commit rather than stopping at the first failure, so a partial
    commit failure reports the *complete* picture (which workbooks made it back, which didn't),
    not just the first blocker.
-3. Expose the run's scratch directory path on `RunResult` (and therefore in the CLI's JSON
-   output) unconditionally — not only when something fails — so external tooling can always
-   locate it if it needs to, per the user's stated intent to build recovery logic around it
-   from a UiPath xaml.
+3. **Superseded by §6.3.4** — rather than exposing a random per-run temp path on `RunResult`
+   after the fact, `working_dir` is now a fixed, predictable path a xaml can construct itself
+   in advance from just the yaml's own filename.
 4. Open question for spec phase: does a partial commit failure (2 of 3 workbooks committed,
    1 blocked) count as the run's overall `status`? Leaning towards still `"error"` — the run
    didn't fully complete what it promised — but this needs to be explicit, not implied.
+
+### 6.3.4 Working directory location and structure — **DECIDED (2026-08-21)**
+
+Supersedes §6.3.3's "expose the scratch directory path on `RunResult`" idea — a **fixed,
+predictable path a xaml can construct itself from just the yaml file's own path**, without
+needing to read any CLI output field at all, is more useful than a random per-run temp path
+surfaced after the fact. Renamed throughout from "scratch dir" to **`working_dir`** — it now
+holds the audit log too, not only workbook scratch copies (see below), so "scratch" undersells
+what it is.
+
+**Location**: `<base>/excel_runner_runs/<yaml_stem>/`
+- `<yaml_stem>` = the workflow YAML's own filename without extension (e.g.
+  `demos/00_generate_demo_workbooks.yaml` → `excel_runner_runs/00_generate_demo_workbooks/`).
+  One execution = one Python process = one yaml (no multi-yaml-per-run concept exists), so this
+  is unambiguous.
+- `<base>` = the current working directory by default; overridable via a `--working-dir` CLI
+  flag or a new top-level `working_dir:` YAML field (precedence: CLI flag > YAML field > cwd
+  default — same layering convention as `env_overrides` over the file's own `env:` block,
+  §6.6). Not clear yet when the YAML-level override would actually be used in practice, but the
+  seam is being kept for completeness rather than closed off.
+- Fixed subfolder name **`excel_runner_runs`** (not e.g. `excel_runner` — collides with this
+  very project's own package folder name when working inside the repo itself, found while
+  choosing it) keeps every run's folder out of the way of a project's real files, and gives job
+  policies (e.g. XAML activities' working-directory pruning) one single, recognizable path to
+  target.
+
+**Structure inside `working_dir`**: `audit.jsonl` at the root, workbook scratch copies in a
+`scratch/` subfolder — matches §6.3.1/§6.7's existing internal shape almost exactly, just
+relocated from a random OS temp path to this fixed one. Keeping both together in one folder
+(not audit.jsonl elsewhere) is deliberate: the user's stated recovery workflow is "zip this one
+folder and hand it to whoever's investigating a failed run" — everything needed has to be in
+one place.
+
+**Re-run behavior**: since the path is now fixed (not freshly randomized per run), a second run
+against the same yaml will find a previous run's leftovers already there. **Decision: overwrite
+automatically, no confirmation, no refuse-if-not-empty check.** In a xaml context the same
+working_dir is never revisited concurrently anyway; for desktop/interactive use, requiring the
+folder to be manually cleared first would just be friction with no real safety benefit.
+
+**Cleanup policy — changed from §6.3.1's original "delete scratch/ on success" behavior**:
+**nothing is ever deleted automatically now, success or failure.** Disk usage stays bounded
+regardless (each subsequent run of the *same* yaml just overwrites its own fixed folder, per
+the re-run behavior above — it doesn't accumulate across runs), so there's no ongoing cost to
+keeping everything. This simplifies `ScratchManager.cleanup()`'s role considerably — it may no
+longer need a `keep_on_failure` distinction at all once this lands in Specification.md.
 
 ### 6.4 No per-action "step reference" field
 
