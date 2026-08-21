@@ -376,6 +376,9 @@ Three things that apply to every row below, not repeated per-row:
 | `write_table` | file | workbook, sheet, source (step ref(s)), headers (list), filter: {column, equals} (optional) | Takes one or more prior steps' same-shaped tabular output, optionally filters rows, writes headers + surviving rows to a target sheet. |
 | `insert_range` | file | workbook, sheet, at (e.g. `"C:C"` or `"C5:C10"`), direction: rows\|columns (see rule), header: {row, text} (optional) | **Direction rule**: for a whole column/row (`"C:C"`, `"5:5"`), `direction` is unambiguous from the syntax and optional. For a true partial range (`"C5:C10"`), `direction` is **required** — never inferred, since guessing risks silently doing the wrong thing. Whole-row/column is native to openpyxl and cheap; partial-range insert-with-shift needs hand-rolled cell-shifting logic. |
 | `set_column_width` | file | workbook, sheet, columns, width: number\|"autofit" | |
+| `create_sheet` | file | workbook, name, index (optional) | Adds a new, empty worksheet. Returns a structured error (not a crash) if `name` already exists — **added post-v1 catalog, not in the original list**; found missing while building demo workflows: no action could add/rename/remove a worksheet at all. |
+| `rename_sheet` | file | workbook, sheet, new_name | **Added post-v1 catalog**, same gap as `create_sheet`. |
+| `delete_sheet` | file | workbook, sheet | Returns a structured error if `sheet` is the workbook's only remaining sheet (can't have zero sheets). **Added post-v1 catalog**, same gap as `create_sheet`. |
 | `find_headers_row` | file | workbook, sheet, search_range, patterns (list) | Returns the row number and which pattern matched which column — see §10.4. |
 | `find_row` | file | workbook, sheet, column, search_value, header_row (optional) | |
 | `find_column` | file | workbook, sheet, header_row, pattern | Single pattern → single column. |
@@ -396,8 +399,8 @@ Updated against actual build progress (Specification.md §8/§4 track this in de
 - **v1, built**: open, save, close, copy, read_range (single-range mode; multi-sheet mode still
   TBD, see §7), read_metadata (properties/cells sub-cases), write_cell, write_range, write_row
   (base column-mapping + positional modes), insert_range (whole-row/whole-column only —
-  partial-range returns a structured error, not built), set_column_width, find_headers_row,
-  find_row, find_column, find_columns.
+  partial-range returns a structured error, not built), set_column_width, create_sheet,
+  rename_sheet, delete_sheet, find_headers_row, find_row, find_column, find_columns.
 - **v1, but needs a live Excel session rather than file-backend**: read_metadata (textbox-control
   sub-case only — openpyxl can't see live control state). Not built yet — live-Excel phase
   (Specification.md §8 build order item 10).

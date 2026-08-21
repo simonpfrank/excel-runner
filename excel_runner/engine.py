@@ -17,6 +17,7 @@ from typing import Any, Literal
 from excel_runner import backends
 from excel_runner.core import (
     ACTION_CAPABILITIES,
+    ACTION_WRITES,
     ActionExecutionError,
     ActionResult,
     ErrorDetail,
@@ -43,6 +44,10 @@ class ActionSpec:
             `list_actions()` was being built and needed it.
         param_schema: `{"properties": {name: {"type": ...}}, "required": [...]}`, derived from
             `fn`'s signature (excluding `session`).
+        writes: Whether this action mutates the workbook it's given — declared via
+            `writes=True` on the same `@file_action`/`@xlw_action`/`@com_action` decorator
+            that registers `capability` (Spec sec 5.4), not a separate hardcoded list. Used by
+            `plan()` below to infer read_only vs. read_write per workbook.
     """
 
     name: str
@@ -50,6 +55,7 @@ class ActionSpec:
     capability: Literal["file", "xlw", "com", "depends_on_param", "none"]
     description: str
     param_schema: dict[str, Any]
+    writes: bool = False
 
 
 def _generate_param_schema(fn: Callable[..., ActionResult]) -> dict[str, Any]:
@@ -86,6 +92,7 @@ def discover_actions(module: ModuleType) -> dict[str, ActionSpec]:
             capability=capability,
             description=_first_line(inspect.getdoc(fn) or ""),
             param_schema=_generate_param_schema(fn),
+            writes=ACTION_WRITES.get(name, False),
         )
     return registry
 
@@ -396,6 +403,11 @@ def _matches_type(value: Any, expected: Any) -> bool:
         return any(_matches_type(value, arg) for arg in typing.get_args(expected))
     if origin is not None:
         return isinstance(value, origin)
+    if expected is float:
+        # PEP 484's numeric tower: an int is valid anywhere a float is expected (e.g.
+        # `set_column_width`'s `width: 20` in YAML, which parses as int, not `20.0`) — bool is
+        # technically an int subclass too, but not a sane width/etc. value, so excluded.
+        return isinstance(value, float) or (isinstance(value, int) and not isinstance(value, bool))
     if isinstance(expected, type):
         return isinstance(value, expected)
     # No current action's signature has an annotation shape that reaches here (every real one
@@ -582,8 +594,6 @@ def validate_static(workflow: Workflow, registry: dict[str, ActionSpec]) -> None
 
 # --- Validation, tier 2: dry-run / step-graph (Spec sec 5.4) --------------------------------
 
-_WRITE_ACTIONS = {"write_cell", "write_range", "write_row", "insert_range", "set_column_width", "save"}
-
 
 @dataclass(frozen=True)
 class ExecutionPlan:
@@ -631,11 +641,12 @@ def _check_workbooks_declared(workflow: Workflow) -> ValidationError | None:
     return None
 
 
-def plan(workflow: Workflow) -> ExecutionPlan:
+def plan(workflow: Workflow, registry: dict[str, ActionSpec]) -> ExecutionPlan:
     """Tier-2 validation: reasons over the whole step list together, still no workbook access.
 
     Args:
         workflow: The parsed workflow to plan.
+        registry: The action registry (Spec sec 5.1) — consulted for each step's `writes` flag.
 
     Returns:
         An `ExecutionPlan` with an inferred read/write mode per declared workbook.
@@ -655,7 +666,7 @@ def plan(workflow: Workflow) -> ExecutionPlan:
             # for every workbook it touches, rather than silently under-provisioning one.
             for name in names:
                 modes[name] = "read_write"
-        elif step.action in _WRITE_ACTIONS:
+        elif step.action in registry and registry[step.action].writes:
             for name in names:
                 modes[name] = "read_write"
     return ExecutionPlan(modes=modes)

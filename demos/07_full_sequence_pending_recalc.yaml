@@ -1,0 +1,53 @@
+env:
+  output_folder: "./demos/output"
+
+workbooks:
+  source:
+    file: "./demos/sample.xlsx"
+  working_copy:
+    file: "{{ env.output_folder }}/07_working_copy.xlsx"
+    create_if_missing: true
+    template: source
+
+steps:
+  # --- first batch of writes ---
+  - id: write_batch_one_a
+    action: write_cell
+    workbook: working_copy
+    sheet: "Data"
+    cell: "D2"
+    value: 10
+
+  - id: write_batch_one_b
+    action: write_row
+    workbook: working_copy
+    sheet: "Data"
+    row: 5
+    values:
+      A: "Hotel"
+      B: "East"
+      C: 800
+
+  # TODO (post item 9 — xlwings/COM phase): a `recalculate` step belongs here, so formulas
+  # written above (and any already in the workbook) are recalculated by a live Excel process
+  # before the second batch of writes reads/depends on them. Not added yet — `recalculate`
+  # doesn't exist as an action until the xlwings backend is built (PRD sec 8, Spec sec 5.2).
+  # Once it exists, this workflow's `working_copy:` workbook entry will also need `visible: true`
+  # (or whatever the eventual config surface is called) to demonstrate a visible Excel window,
+  # per the same not-yet-built work.
+
+  # --- second batch of writes, depending on the (eventually recalculated) formula above ---
+  - id: write_batch_two_a
+    action: write_cell
+    workbook: working_copy
+    sheet: "Summary"
+    cell: "B3"
+    value: "=Data!D2*2"
+
+  - id: write_batch_two_b
+    action: write_row
+    workbook: working_copy
+    sheet: "Data"
+    row: 6
+    values: ["India", "West", 900]
+    start_column: "A"

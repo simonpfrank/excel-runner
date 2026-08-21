@@ -1,5 +1,39 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-08-20d, Windows)
+**Status:** Ready for Next Phase
+**Working on:** Added a `demos/` folder — 7 runnable YAML workflows exercising every existing
+action's syntax, for regression testing, plus a `demos/generate_workbooks.py` script that
+builds the sample fixture workbooks they read from. Ran all 7 by hand; found and fixed a real
+bug (`set_column_width`'s `width` field is typed `float`, but plain YAML ints like `width: 20`
+were being rejected — `_matches_type()` in `engine.py` now accepts `int` anywhere `float` is
+expected, per PEP 484's numeric tower; `bool` explicitly excluded since it's technically an
+`int` subclass but not a sane width). Then, prompted by the demos needing sheet
+creation/rename to build believable fixtures, found and fixed a real architectural
+inconsistency: whether an action needs its workbook opened read-write was tracked in a
+hardcoded `_WRITE_ACTIONS` set in `engine.py`, completely disconnected from the action's own
+`@file_action`/`@xlw_action`/`@com_action` registration decorator — a second place to remember
+to update by hand whenever a new write action was added. Fixed: the same decorator now takes
+`writes=True` (e.g. `@file_action(writes=True)`), stored on `ActionSpec.writes`; `plan()` now
+takes the registry and reads `registry[step.action].writes` instead of the hardcoded set.
+Added the previously-missing `create_sheet`/`rename_sheet`/`delete_sheet` actions (TDD,
+`backends.py` + `actions.py` + unit tests), the actual motivating gap: no action could
+add/rename/remove a worksheet at all. Docs (PRD §7/§8, Specification §5.4, README) updated to
+match. All 285 tests pass (was 271).
+**Next step:** Build a `00_generate_demo_workbooks.yaml` using the new sheet actions (the
+originally-requested "yaml-only" fixture generator — was blocked until `create_sheet` existed).
+Then resume `_switch_backend` (PRD §6.2.2, Spec §5.2).
+
+**Backlog (not started, explicitly deferred, discussed this session):**
+- **Actions-folder-per-file structure**: `discover_actions()` currently scans one module
+  (`actions.py`, 365 lines pre-this-session's additions, still under the project's 500-line
+  cap). User wants one-file-per-action (`actions/create_sheet.py`, etc.) supported *before the
+  repo is "finished"* — `discover_actions()` would need to scan a package's submodules, not
+  just one module. Deliberately not done opportunistically this session; do it as its own
+  scoped change.
+- **Revisit the `__init__.py` approach** — flagged alongside the above, not detailed yet;
+  needs its own discussion before changing anything.
+
 ## Last Session (2026-08-20c, Windows)
 **Status:** Ready for Next Phase
 **Working on:** Fixed two CLI usability issues (`cli.py` had no direct-run guard, and `--env`'s

@@ -1,0 +1,64 @@
+env:
+  demos_folder: "./demos"
+
+workbooks:
+  sample:
+    file: "{{ env.demos_folder }}/sample.xlsx"
+    create_if_missing: true
+  historical:
+    file: "{{ env.demos_folder }}/historical.xlsx"
+    create_if_missing: true
+
+steps:
+  # --- sample.xlsx: rename the default sheet, add a second, populate both ---
+  # create_sheet/rename_sheet/delete_sheet: the sheet-management actions this workflow exists
+  # to demonstrate. A blank create_if_missing workbook only ever gets openpyxl's default
+  # "Sheet" — there was previously no action to rename or add to it at all.
+  - id: rename_default_sheet
+    action: rename_sheet
+    workbook: sample
+    sheet: "Sheet"
+    new_name: "Data"
+
+  - id: add_summary_sheet
+    action: create_sheet
+    workbook: sample
+    name: "Summary"
+
+  - id: write_headers
+    action: write_row
+    workbook: sample
+    sheet: "Data"
+    row: 1
+    values:
+      A: "Name"
+      B: "Region"
+      C: "Amount"
+
+  - id: write_data_rows
+    action: write_range
+    workbook: sample
+    sheet: "Data"
+    range: "A2"
+    values:
+      - ["Alpha", "North", 100]
+      - ["Bravo", "South", 200]
+      - ["Charlie", "North", 300]
+
+  - id: write_summary_labels
+    action: write_row
+    workbook: sample
+    sheet: "Summary"
+    row: 1
+    values:
+      A: "Total"
+      B: 0
+
+  # --- historical.xlsx: single sheet, deliberately left named "Sheet" (matches every demo
+  # that copies it as a template, e.g. demos/05_copy_across_workbooks.yaml) ---
+  - id: write_historical_value
+    action: write_cell
+    workbook: historical
+    sheet: "Sheet"
+    cell: "A1"
+    value: "archived-value"

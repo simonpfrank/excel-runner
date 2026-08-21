@@ -247,7 +247,7 @@ class TestDryRunWorkbooksDeclared:
             workbooks={"manip": WorkbookRef(name="manip", file="manip.xlsx")},
         )
         with pytest.raises(ValidationError) as exc_info:
-            validation.plan(workflow)
+            validation.plan(workflow, _REGISTRY)
         assert "nope" in exc_info.value.detail.message
 
     def test_all_declared_workbooks_passes(self) -> None:
@@ -255,7 +255,7 @@ class TestDryRunWorkbooksDeclared:
             [Step(id="s1", action="read_range", params={"workbook": "manip", "sheet": "S", "range": "A1"})],
             workbooks={"manip": WorkbookRef(name="manip", file="manip.xlsx")},
         )
-        validation.plan(workflow)  # should not raise
+        validation.plan(workflow, _REGISTRY)  # should not raise
 
 
 class TestExecutionPlanModeInference:
@@ -264,7 +264,7 @@ class TestExecutionPlanModeInference:
             [Step(id="s1", action="read_range", params={"workbook": "manip", "sheet": "S", "range": "A1"})],
             workbooks={"manip": WorkbookRef(name="manip", file="manip.xlsx")},
         )
-        plan = validation.plan(workflow)
+        plan = validation.plan(workflow, _REGISTRY)
         assert plan.modes["manip"] == "read_only"
 
     def test_workbook_written_to_is_read_write(self) -> None:
@@ -272,7 +272,7 @@ class TestExecutionPlanModeInference:
             [Step(id="s1", action="write_cell", params={"workbook": "manip", "sheet": "S", "cell": "A1", "value": 1})],
             workbooks={"manip": WorkbookRef(name="manip", file="manip.xlsx")},
         )
-        plan = validation.plan(workflow)
+        plan = validation.plan(workflow, _REGISTRY)
         assert plan.modes["manip"] == "read_write"
 
     def test_a_workbook_only_referenced_by_a_read_action_in_some_steps_and_write_in_others_is_read_write(
@@ -289,7 +289,7 @@ class TestExecutionPlanModeInference:
             ],
             workbooks={"manip": WorkbookRef(name="manip", file="manip.xlsx")},
         )
-        plan = validation.plan(workflow)
+        plan = validation.plan(workflow, _REGISTRY)
         assert plan.modes["manip"] == "read_write"
 
     def test_copy_marks_every_workbook_it_touches_as_read_write(self) -> None:
@@ -312,7 +312,7 @@ class TestExecutionPlanModeInference:
                 "manip": WorkbookRef(name="manip", file="manip.xlsx"),
             },
         )
-        plan = validation.plan(workflow)
+        plan = validation.plan(workflow, _REGISTRY)
         assert plan.modes["historical"] == "read_write"
         assert plan.modes["manip"] == "read_write"
 
@@ -340,7 +340,7 @@ class TestExecutionPlanModeInference:
                 "results": WorkbookRef(name="results", file="results.xlsx"),
             },
         )
-        plan = validation.plan(workflow)
+        plan = validation.plan(workflow, _REGISTRY)
         assert "historical" in plan.modes
         assert "results" in plan.modes
 
@@ -349,5 +349,5 @@ class TestExecutionPlanModeInference:
             [],
             workbooks={"unused": WorkbookRef(name="unused", file="unused.xlsx")},
         )
-        plan = validation.plan(workflow)
+        plan = validation.plan(workflow, _REGISTRY)
         assert plan.modes["unused"] == "read_only"

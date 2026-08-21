@@ -554,16 +554,21 @@ individually testable, and assuming every earlier one in the list already passed
 schema to check it against yet; that's the runner's translation-layer job (build order item 7),
 not validation's, until that layer exists.
 
-**Tier 2 (dry-run / step-graph), via `plan(workflow) -> ExecutionPlan`** — still no workbook
-access, reasons over the whole step list together:
+**Tier 2 (dry-run / step-graph), via `plan(workflow, registry) -> ExecutionPlan`** — still no
+workbook access, reasons over the whole step list together:
 - Checks every workbook name referenced anywhere in any step's params (a generic recursive
   walk for any key literally named `workbook`, handling both a flat field and `copy`'s nested
   dicts with the same code) actually appears in `workbooks:`.
-- Infers each workbook's mode: `read_write` iff some step's action is in a small static
-  `_WRITE_ACTIONS` table (`write_cell`, `write_range`, `write_row`, `insert_range`,
-  `set_column_width`, `save`), else `read_only`. This is a simple lookup table, not deep
-  analysis — deliberately, to avoid overengineering an inference that's already
-  capability-correct for every action built so far. `copy` is a documented exception: since its
+- Infers each workbook's mode: `read_write` iff some step's action has `writes=True` in the
+  registry (looked up as `registry[step.action].writes`), else `read_only`. **Correction**:
+  originally a hardcoded `_WRITE_ACTIONS` set living here in `engine.py`, disconnected from
+  each action's own definition — a second place to remember to update whenever a new write
+  action was added, and easy to forget (found while adding `create_sheet`/`rename_sheet`/
+  `delete_sheet`). Now `writes` is declared on the *same* `@file_action`/`@xlw_action`/
+  `@com_action` decorator that registers the action's capability
+  (`@file_action(writes=True)`), so `ActionSpec.writes` is derived straight from the registry
+  — one source of truth, right next to the function, not a list to keep in sync by hand.
+  `copy` is a documented exception: since its
   source vs. target can't be told apart statically yet (same reason as above), *every* workbook
   it references gets marked `read_write` — the safe over-provisioning PRD §6.3 itself prescribes
   ("if a target reference can't be resolved statically, default to read-write") rather than

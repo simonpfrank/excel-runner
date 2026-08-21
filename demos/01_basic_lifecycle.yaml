@@ -1,0 +1,30 @@
+env:
+  output_folder: "./demos/output"
+
+workbooks:
+  source:
+    file: "./demos/sample.xlsx"
+  working_copy:
+    file: "{{ env.output_folder }}/01_working_copy.xlsx"
+    create_if_missing: true
+    template: source
+
+steps:
+  - id: open_it
+    action: open
+    workbook: working_copy
+
+  - id: write_marker
+    action: write_cell
+    workbook: working_copy
+    sheet: "Summary"
+    cell: "A2"
+    value: "written by 01_basic_lifecycle"
+
+  - id: save_it
+    action: save
+    workbook: working_copy
+
+  - id: close_it
+    action: close
+    workbook: working_copy

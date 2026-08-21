@@ -24,6 +24,7 @@ from excel_runner.core import (
     evaluate_condition,
     xlw_action,
 )
+from openpyxl.worksheet.worksheet import Worksheet
 
 WorkbookRef.name
 WorkbookRef.file
@@ -81,3 +82,10 @@ backends.OwnedInstanceRegistry.close_owned
 backends.xlw_open_workbook
 backends.xlw_close_workbook
 backends.xlw_save_workbook
+
+# `backends.rename_sheet` assigns `worksheet.title = new_name` — openpyxl's own writable
+# property on its Worksheet class, not something we own, but vulture can't tell that and flags
+# the assignment as an "unused attribute" since nothing in our own code ever *reads* `.title`
+# back. Referencing it here marks it used.
+Worksheet.title
+

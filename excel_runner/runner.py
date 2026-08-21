@@ -166,7 +166,7 @@ def run_workflow(path: str | Path, env_overrides: dict[str, Any] | None = None) 
     workflow: Workflow = core.load(path, env_overrides)
     registry = engine.discover_actions(actions_module)
     engine.validate_static(workflow, registry)
-    plan = engine.plan(workflow)
+    plan = engine.plan(workflow, registry)
 
     # audit.jsonl lives in the parent run dir, not inside scratch/ — scratch.cleanup() wipes
     # the whole scratch dir on success (PRD sec 6.3.1), and the audit log must survive that

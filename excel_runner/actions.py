@@ -48,7 +48,7 @@ def open(session: WorkbookSession) -> ActionResult:
     return ActionResult(status="success", output={})
 
 
-@file_action
+@file_action(writes=True)
 def save(session: WorkbookSession) -> ActionResult:
     """Save the workbook to its current session path.
 
@@ -96,7 +96,7 @@ def stop(reason: str | None = None) -> ActionResult:
 # --- data ----------------------------------------------------------------------------------
 
 
-@file_action
+@file_action(writes=True)
 def copy(
     session: WorkbookSession,
     target: WorkbookSession,
@@ -200,7 +200,7 @@ def read_metadata(
     return ActionResult(status="success", output=backends.read_cells(session.handle, sheet, cells))
 
 
-@file_action
+@file_action(writes=True)
 def write_cell(session: WorkbookSession, sheet: str, cell: str, value: Any) -> ActionResult:
     """Write a value to a single cell.
 
@@ -218,7 +218,7 @@ def write_cell(session: WorkbookSession, sheet: str, cell: str, value: Any) -> A
     return ActionResult(status="success", output={})
 
 
-@file_action
+@file_action(writes=True)
 def write_range(session: WorkbookSession, sheet: str, range: str, values: list[list[Any]]) -> ActionResult:
     """Write a 2D block of values, anchored at the top-left cell of `range`.
 
@@ -236,7 +236,7 @@ def write_range(session: WorkbookSession, sheet: str, range: str, values: list[l
     return ActionResult(status="success", output={})
 
 
-@file_action
+@file_action(writes=True)
 def write_row(
     session: WorkbookSession,
     sheet: str,
@@ -286,7 +286,7 @@ def write_row(
 # --- structure -----------------------------------------------------------------------------
 
 
-@file_action
+@file_action(writes=True)
 def insert_range(
     session: WorkbookSession,
     sheet: str,
@@ -322,7 +322,7 @@ def insert_range(
     return ActionResult(status="success", output={})
 
 
-@file_action
+@file_action(writes=True)
 def set_column_width(
     session: WorkbookSession, sheet: str, columns: str, width: float | Literal["autofit"]
 ) -> ActionResult:
@@ -338,6 +338,74 @@ def set_column_width(
         A success result with no meaningful output.
     """
     backends.set_column_width(session.handle, sheet, columns, width)
+    session.dirty = True
+    return ActionResult(status="success", output={})
+
+
+@file_action(writes=True)
+def create_sheet(session: WorkbookSession, name: str, index: int | None = None) -> ActionResult:
+    """Add a new, empty worksheet to the workbook.
+
+    Args:
+        session: The workbook session to modify.
+        name: Name for the new sheet.
+        index: Position to insert at (0-based). Appended at the end if omitted.
+
+    Returns:
+        A success result, or a structured error if a sheet named `name` already exists —
+        a normal "didn't work" outcome (a workflow author picked a name already in use), not
+        an unexpected failure, consistent with the find_*/insert_range error pattern above.
+    """
+    try:
+        backends.create_sheet(session.handle, name, index)
+    except ValueError as exc:
+        return ActionResult(
+            status="error",
+            output={},
+            error=ErrorDetail(message=str(exc), technical_reason=f"{type(exc).__name__}: {exc}"),
+        )
+    session.dirty = True
+    return ActionResult(status="success", output={})
+
+
+@file_action(writes=True)
+def rename_sheet(session: WorkbookSession, sheet: str, new_name: str) -> ActionResult:
+    """Rename an existing worksheet.
+
+    Args:
+        session: The workbook session to modify.
+        sheet: Current worksheet name.
+        new_name: New name for the worksheet.
+
+    Returns:
+        A success result with no meaningful output.
+    """
+    backends.rename_sheet(session.handle, sheet, new_name)
+    session.dirty = True
+    return ActionResult(status="success", output={})
+
+
+@file_action(writes=True)
+def delete_sheet(session: WorkbookSession, sheet: str) -> ActionResult:
+    """Remove a worksheet from the workbook.
+
+    Args:
+        session: The workbook session to modify.
+        sheet: Name of the worksheet to remove.
+
+    Returns:
+        A success result, or a structured error if `sheet` is the workbook's only remaining
+        sheet — a workbook can't have zero sheets, and this is a normal, avoidable outcome for
+        a workflow author to react to, not an unexpected failure.
+    """
+    try:
+        backends.delete_sheet(session.handle, sheet)
+    except ValueError as exc:
+        return ActionResult(
+            status="error",
+            output={},
+            error=ErrorDetail(message=str(exc), technical_reason=f"{type(exc).__name__}: {exc}"),
+        )
     session.dirty = True
     return ActionResult(status="success", output={})
 

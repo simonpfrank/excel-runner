@@ -8,7 +8,7 @@ Design notes live in [`docs/PRD.md`](docs/PRD.md) and [`docs/Specification.md`](
 ## Status
 
 v1 file-backend engine is built and tested: loading, templating, validation, session/scratch
-management, 16 actions, and the orchestration loop (`run_workflow`). A CLI entrypoint is also
+management, 19 actions, and the orchestration loop (`run_workflow`). A CLI entrypoint is also
 available (`python -m excel_runner`, the `excel-runner` console script, or running
 `excel_runner/cli.py` directly) for triggering a run from outside Python. Every action so far
 runs against files directly via openpyxl — no live Excel process involved, which is also why
@@ -17,6 +17,13 @@ the action list below skips macros, recalculation, and a few other Excel-specifi
 
 ## Changelog
 
+- **2026-08-20**: Added `create_sheet`/`rename_sheet`/`delete_sheet` actions (no prior way to
+  add/rename/remove a worksheet). Also fixed a real design gap found while adding them: whether
+  an action needs its workbook opened read-write was tracked in a hardcoded list disconnected
+  from the action's own registration — now declared directly on the action via
+  `@file_action(writes=True)`, so a new write action can't silently be left off it. Added a
+  `demos/` folder: 7+ runnable YAML workflows exercising every action's syntax, for regression
+  testing.
 - **2026-08-20**: Fixed a real, intermittent (~50% of runs) hang in
   `OwnedInstanceRegistry.close_owned()` on Windows (`spawn()` now uses `add_book=True` so
   spawned instances register in `xw.apps`). Added a CLI entrypoint (`excel_runner/cli.py`,
@@ -381,6 +388,56 @@ structured error, not a crash.
   sheet: "Summary"
   columns: "A:C"
   width: autofit
+```
+
+#### `create_sheet`
+
+Adds a new, empty worksheet.
+
+| Field | Required | Notes |
+|---|---|---|
+| `name` | yes | name for the new sheet |
+| `index` | no | 0-based position; appended at the end if omitted |
+
+Returns a structured error (not a crash) if a sheet named `name` already exists.
+
+```yaml
+- id: add_data_sheet
+  action: create_sheet
+  workbook: manip
+  name: "Data"
+```
+
+#### `rename_sheet`
+
+Renames an existing worksheet.
+
+| Field | Required |
+|---|---|
+| `sheet`, `new_name` | yes |
+
+```yaml
+- id: rename_it
+  action: rename_sheet
+  workbook: manip
+  sheet: "Sheet"
+  new_name: "Data"
+```
+
+#### `delete_sheet`
+
+Removes a worksheet. Returns a structured error if `sheet` is the workbook's only remaining
+sheet — a workbook can't have zero sheets.
+
+| Field | Required |
+|---|---|
+| `sheet` | yes |
+
+```yaml
+- id: remove_scratch_sheet
+  action: delete_sheet
+  workbook: manip
+  sheet: "Scratch"
 ```
 
 ### Lookup

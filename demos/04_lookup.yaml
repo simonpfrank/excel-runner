@@ -1,0 +1,75 @@
+env:
+  output_folder: "./demos/output"
+
+workbooks:
+  source:
+    file: "./demos/sample.xlsx"
+  working_copy:
+    file: "{{ env.output_folder }}/04_working_copy.xlsx"
+    create_if_missing: true
+    template: source
+
+steps:
+  # find_headers_row: locate the header row by matching every pattern against some cell in it
+  - id: find_headers
+    action: find_headers_row
+    workbook: working_copy
+    sheet: "Data"
+    search_range: "A1:C1"
+    patterns: ["Name", "Region", "Amount"]
+
+  # find_row: locate a row by an exact-match column value
+  - id: find_bravo
+    action: find_row
+    workbook: working_copy
+    sheet: "Data"
+    column: "A"
+    search_value: "Bravo"
+    header_row: 1
+
+  # find_row: a search that legitimately finds nothing — status "error" is a normal
+  # outcome here, not a crash (see the `if:` step below reacting to it)
+  - id: find_missing
+    action: find_row
+    workbook: working_copy
+    sheet: "Data"
+    column: "A"
+    search_value: "does-not-exist"
+    header_row: 1
+
+  # find_column: locate a single column by header pattern
+  - id: find_amount_column
+    action: find_column
+    workbook: working_copy
+    sheet: "Data"
+    header_row: 1
+    pattern: "Amount"
+
+  # find_columns: locate several named columns in one call
+  - id: find_several_columns
+    action: find_columns
+    workbook: working_copy
+    sheet: "Data"
+    header_row: 1
+    patterns:
+      name_col: "Name"
+      region_col: "Region"
+      amount_col: "Amount"
+
+  # if:, reacting to a previous step's status — only runs because find_bravo succeeded
+  - id: write_found_marker
+    action: write_cell
+    workbook: working_copy
+    sheet: "Summary"
+    cell: "A4"
+    value: "found bravo at row {{ steps.find_bravo.output.row }}"
+    if: "{{ steps.find_bravo.status == 'success' }}"
+
+  # if:, the false branch — find_missing failed, so this step is skipped, not an error
+  - id: write_missing_marker
+    action: write_cell
+    workbook: working_copy
+    sheet: "Summary"
+    cell: "A5"
+    value: "should never appear"
+    if: "{{ steps.find_missing.status == 'success' }}"

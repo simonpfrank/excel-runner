@@ -1,0 +1,79 @@
+env:
+  output_folder: "./demos/output"
+
+workbooks:
+  source:
+    file: "./demos/sample.xlsx"
+  working_copy:
+    file: "{{ env.output_folder }}/02_working_copy.xlsx"
+    create_if_missing: true
+    template: source
+
+steps:
+  # read_range: single cell
+  - id: read_one_cell
+    action: read_range
+    workbook: working_copy
+    sheet: "Data"
+    range: "A1"
+
+  # read_range: a block
+  - id: read_block
+    action: read_range
+    workbook: working_copy
+    sheet: "Data"
+    range: "A1:C4"
+
+  # write_cell: plain value
+  - id: write_one_cell
+    action: write_cell
+    workbook: working_copy
+    sheet: "Summary"
+    cell: "B1"
+    value: 999
+
+  # write_cell: a formula (string starting with "=")
+  - id: write_formula
+    action: write_cell
+    workbook: working_copy
+    sheet: "Summary"
+    cell: "B2"
+    value: "=SUM(Data!C2:C4)"
+
+  # write_cell: value templated from an earlier step's output
+  - id: write_from_step_output
+    action: write_cell
+    workbook: working_copy
+    sheet: "Summary"
+    cell: "A3"
+    value: "{{ steps.read_one_cell.output.values }}"
+
+  # write_range: a 2D block anchored at the top-left cell
+  - id: write_block
+    action: write_range
+    workbook: working_copy
+    sheet: "Data"
+    range: "A6"
+    values:
+      - ["Delta", "East", 400]
+      - ["Echo", "West", 500]
+
+  # write_row: explicit column -> value mapping
+  - id: write_row_by_column
+    action: write_row
+    workbook: working_copy
+    sheet: "Data"
+    row: 8
+    values:
+      A: "Foxtrot"
+      B: "North"
+      C: 600
+
+  # write_row: positional list, starting at a given column
+  - id: write_row_positional
+    action: write_row
+    workbook: working_copy
+    sheet: "Data"
+    row: 9
+    values: ["Golf", "South", 700]
+    start_column: "A"

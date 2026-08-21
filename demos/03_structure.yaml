@@ -1,0 +1,52 @@
+env:
+  output_folder: "./demos/output"
+
+workbooks:
+  source:
+    file: "./demos/sample.xlsx"
+  working_copy:
+    file: "{{ env.output_folder }}/03_working_copy.xlsx"
+    create_if_missing: true
+    template: source
+
+steps:
+  # insert_range: whole row insert, with a header written into the new row
+  - id: insert_a_row
+    action: insert_range
+    workbook: working_copy
+    sheet: "Data"
+    at: "2:2"
+    header:
+      row: 2
+      text: "inserted-row"
+
+  # insert_range: whole column insert
+  - id: insert_a_column
+    action: insert_range
+    workbook: working_copy
+    sheet: "Data"
+    at: "B:B"
+
+  # set_column_width: explicit width
+  - id: widen_column
+    action: set_column_width
+    workbook: working_copy
+    sheet: "Data"
+    columns: "A"
+    width: 20
+
+  # set_column_width: a range of columns
+  - id: widen_columns
+    action: set_column_width
+    workbook: working_copy
+    sheet: "Data"
+    columns: "C:E"
+    width: 15
+
+  # set_column_width: autofit
+  - id: autofit_column
+    action: set_column_width
+    workbook: working_copy
+    sheet: "Data"
+    columns: "A"
+    width: "autofit"

@@ -12,7 +12,7 @@ import re
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
-from typing import Any, Literal, ParamSpec
+from typing import Any, Literal, ParamSpec, overload
 
 import jinja2
 import yaml
@@ -350,42 +350,111 @@ class WorkbookSession:
 
 ACTION_CAPABILITIES: dict[str, Literal["file", "xlw", "com", "depends_on_param", "none"]] = {}
 
+# Whether an action mutates the workbook it's given — used by engine.py's tier-2 validation
+# (Spec sec 5.4) to infer read_only vs. read_write per workbook. Declared by the *same*
+# decorator that registers the action's capability, not a separate hardcoded list elsewhere
+# (that used to be `engine.py`'s own `_WRITE_ACTIONS` set — a second, disconnected place to
+# remember to update whenever a new write action was added, and easy to forget since nothing
+# tied it to the action's own definition). Defaults to False; only actions that opt in via
+# `writes=True` need it.
+ACTION_WRITES: dict[str, bool] = {}
+
 _P = ParamSpec("_P")
 
 
-def file_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]:
+@overload
+def file_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]: ...
+@overload
+def file_action(
+    *, writes: bool = False
+) -> Callable[[Callable[_P, ActionResult]], Callable[_P, ActionResult]]: ...
+
+
+def file_action(
+    fn: Callable[_P, ActionResult] | None = None, *, writes: bool = False
+) -> Callable[_P, ActionResult] | Callable[[Callable[_P, ActionResult]], Callable[_P, ActionResult]]:
     """Register a function as a file-backend (openpyxl) action for discovery (Spec sec 5.1).
+
+    Usable bare (`@file_action`, the common case — a read-only action) or called with
+    `writes=True` (`@file_action(writes=True)`) for an action that mutates the workbook.
 
     Typed with ParamSpec, not `Callable[..., ActionResult]`, so the decorated function keeps
     its real parameter signature for mypy — found the hard way: an untyped `...` erased every
     action's params to "accepts anything", silently defeating static type checking at every
     call site, not just inside the action itself.
     """
-    ACTION_CAPABILITIES[fn.__name__] = "file"
-    return fn
+
+    def register(f: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]:
+        ACTION_CAPABILITIES[f.__name__] = "file"
+        ACTION_WRITES[f.__name__] = writes
+        return f
+
+    if fn is not None:
+        return register(fn)
+    return register
 
 
-def xlw_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]:
+@overload
+def xlw_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]: ...
+@overload
+def xlw_action(
+    *, writes: bool = False
+) -> Callable[[Callable[_P, ActionResult]], Callable[_P, ActionResult]]: ...
+
+
+def xlw_action(
+    fn: Callable[_P, ActionResult] | None = None, *, writes: bool = False
+) -> Callable[_P, ActionResult] | Callable[[Callable[_P, ActionResult]], Callable[_P, ActionResult]]:
     """Register a function as using xlwings' portable, cross-platform API for discovery (Spec
     sec 5.1) — the normal live-Excel case. See `com_action` for the raw-COM-only exception.
+
+    Usable bare or called with `writes=True`, same convention as `file_action`.
     """
-    ACTION_CAPABILITIES[fn.__name__] = "xlw"
-    return fn
+
+    def register(f: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]:
+        ACTION_CAPABILITIES[f.__name__] = "xlw"
+        ACTION_WRITES[f.__name__] = writes
+        return f
+
+    if fn is not None:
+        return register(fn)
+    return register
 
 
-def com_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]:
+@overload
+def com_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]: ...
+@overload
+def com_action(
+    *, writes: bool = False
+) -> Callable[[Callable[_P, ActionResult]], Callable[_P, ActionResult]]: ...
+
+
+def com_action(
+    fn: Callable[_P, ActionResult] | None = None, *, writes: bool = False
+) -> Callable[_P, ActionResult] | Callable[[Callable[_P, ActionResult]], Callable[_P, ActionResult]]:
     """Register a function as needing the raw, Windows-only COM object via xlwings' `.api`
     escape hatch for discovery (Spec sec 5.1) — the genuine exception, not the default
     live-Excel case (see `xlw_action`).
+
+    Usable bare or called with `writes=True`, same convention as `file_action`.
     """
-    ACTION_CAPABILITIES[fn.__name__] = "com"
-    return fn
+
+    def register(f: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]:
+        ACTION_CAPABILITIES[f.__name__] = "com"
+        ACTION_WRITES[f.__name__] = writes
+        return f
+
+    if fn is not None:
+        return register(fn)
+    return register
 
 
 def control_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]:
     """Register a function as a control-flow action for discovery — no backend, no `session`
     (PRD sec 6.9's `stop`). Distinct from `file_action`/`xlw_action`/`com_action` since
     capability "none" means the runner never resolves a workbook session before calling it.
+    Never writes to a workbook directly, so there's no `writes` option here.
     """
     ACTION_CAPABILITIES[fn.__name__] = "none"
     return fn
+

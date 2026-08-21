@@ -1,0 +1,34 @@
+env:
+  output_folder: "./demos/output"
+
+workbooks:
+  source:
+    file: "./demos/sample.xlsx"
+  working_copy:
+    file: "{{ env.output_folder }}/06_working_copy.xlsx"
+    create_if_missing: true
+    template: source
+
+steps:
+  - id: find_bravo
+    action: find_row
+    workbook: working_copy
+    sheet: "Data"
+    column: "A"
+    search_value: "Bravo"
+    header_row: 1
+
+  # stop: halts the run — no later step executes, and every later step is marked "stopped"
+  # rather than "skipped" (skipped is for a false `if:`, stopped is for reaching this action)
+  - id: halt_here
+    action: stop
+    reason: "demo: stopping deliberately once find_bravo has run"
+    if: "{{ steps.find_bravo.status == 'success' }}"
+
+  # never reached when halt_here's `if:` is true
+  - id: never_runs
+    action: write_cell
+    workbook: working_copy
+    sheet: "Summary"
+    cell: "A6"
+    value: "should never appear"

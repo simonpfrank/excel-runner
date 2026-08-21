@@ -167,6 +167,50 @@ def set_column_width(
             worksheet.column_dimensions[letter].width = width
 
 
+def create_sheet(workbook: Workbook, name: str, index: int | None = None) -> None:
+    """Add a new, empty worksheet to the workbook.
+
+    Args:
+        workbook: The workbook to modify.
+        name: Name for the new sheet.
+        index: Position to insert at (0-based). Appended at the end if omitted.
+
+    Raises:
+        ValueError: If a sheet named `name` already exists.
+    """
+    if name in workbook.sheetnames:
+        raise ValueError(f'A sheet named "{name}" already exists.')
+    workbook.create_sheet(name, index)
+
+
+def rename_sheet(workbook: Workbook, sheet: str, new_name: str) -> None:
+    """Rename an existing worksheet.
+
+    Args:
+        workbook: The workbook to modify.
+        sheet: Current worksheet name.
+        new_name: New name for the worksheet.
+    """
+    workbook[sheet].title = new_name
+
+
+def delete_sheet(workbook: Workbook, sheet: str) -> None:
+    """Remove a worksheet from the workbook.
+
+    Args:
+        workbook: The workbook to modify.
+        sheet: Name of the worksheet to remove.
+
+    Raises:
+        ValueError: If `sheet` is the workbook's only remaining sheet — a workbook can't have
+            zero sheets, and openpyxl itself would leave the file in a broken state rather
+            than raise, so this is checked explicitly here.
+    """
+    if len(workbook.sheetnames) == 1:
+        raise ValueError(f'Cannot delete "{sheet}" — it is the only sheet left in the workbook.')
+    del workbook[sheet]
+
+
 def insert_range(
     workbook: Workbook,
     sheet: str,
