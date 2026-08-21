@@ -1,5 +1,39 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-08-21f, Windows)
+**Status:** Design complete, spec written — ready to build once reviewed
+**Working on:** Wrote Specification.md sections for the entire crash/lock-safety design thread
+from this multi-session discussion (PRD §6.2.3/6.2.4/6.3.2/6.3.3/6.3.4/6.7.1, all decided).
+Concrete additions:
+- **§1**: fixed a stale claim ("no cli.py in v1") — `cli.py`/`__main__.py` added to the layout,
+  noted as built for a real reason (UiPath xaml driving need), not the originally-deferred
+  scope.
+- **§3.2/§3.3** (new): `run_with_timeout`'s process-isolation mechanism for live-Excel hang
+  safety; `recalculate`/`run_macro`'s `timeout` param + `CalculationWaitSummary` audit
+  summarization (`state_counts`/`last_state`/`poll_count`/`elapsed_seconds`/`outcome`).
+- **§3.4** (new): `redirect_external_links`/`restore_external_links` for the linked-consumer-
+  workbook scenario (Option 2, decided) — depends on `write_links` existing first.
+- **§5.3** (rewritten): `working_dir` replaces `tempfile.mkdtemp()` entirely (fixed
+  `excel_runner_runs/<yaml_stem>/` path); read-only sessions now staged too; rename-based
+  commit with per-file rollback (`CommitFailure`, `needs_human`); `cleanup()` removed —
+  nothing in `working_dir` is ever auto-deleted now.
+- **§6.1**: `run_workflow` gains a `working_dir` param; working_dir resolution precedence
+  (param > YAML field > cwd); no more `scratch.cleanup()` call.
+- **§6.2.1** (new): console/application logging via stdlib `logging` — library code never
+  attaches handlers, only the CLI sets a severity threshold.
+- **§6.4** (new): `cli.py`'s `--working-dir`/`--logging-level` flags.
+- **§8**: build order items 12 (crash/lock-safety hardening — platform-independent, no live
+  Excel needed), 13 (hang safety + timeouts — needs Windows Excel), 14 (linked-workbook
+  refresh — needs item 10's `write_links` first).
+
+No source code touched this session — Specification.md only. Full test suite reconfirmed green
+(285 passed) as a sanity check, unaffected since only docs changed.
+
+**Next step:** Get the user's sign-off on this Specification.md pass, then start building item
+12 first (platform-independent, TDD-buildable now, no Windows-Excel dependency) — working_dir
+relocation, read-only staging, rename-based commit/rollback, console logging, CLI flags. Items
+13/14 wait for a live Excel instance to build/verify against.
+
 ## Last Session (2026-08-21e, Windows)
 **Status:** Design phase complete for this thread — ready to write Specification.md sections
 **Working on:** Finalized §6.3.3 (commit-time file-lock handling) with the user, converging on

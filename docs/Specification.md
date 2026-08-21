@@ -38,9 +38,11 @@ excel_runner/
   __init__.py       # re-exports the public surface from runner.py — see §6.3
   core.py            # data model, errors, loading & templating — the pure-logic layer (§2)
   backends.py         # openpyxl + xlwings primitives, owned-instance tracking (§3)
-  actions.py           # all 24 action functions (§4)
+  actions.py           # all action functions (§4)
   engine.py             # registry, session, scratch-copy, both validation tiers (§5)
   runner.py              # orchestration loop, audit logging, public API (§6)
+  cli.py                  # thin argument-parsing/JSON-formatting wrapper over runner.py (§6.4)
+  __main__.py              # `python -m excel_runner` entry point, delegates to cli.py
 
 tests/
   unit/            # test files stay granular even though source doesn't — see §7
@@ -48,8 +50,10 @@ tests/
   data/              # fixture workbooks
 ```
 
-No `cli.py` in v1 — the CLI/agent wrapper is explicitly deferred (PRD §3/§5); `runner.py`'s
-public surface (§6.3) is built so that layer is thin whenever it's added.
+**Correction**: `cli.py` was originally deferred out of v1 ("no CLI/agent wrapper" — PRD §3/§5),
+but was built once a real, concrete driving need showed up (invoking a workflow from a UiPath
+xaml as an external process) — see §6.4. It stays thin by design, exactly as this section
+originally anticipated: argument parsing and JSON result formatting only, no logic of its own.
 
 ## 2. Core layer — `core.py`
 
@@ -226,6 +230,132 @@ machine. Doesn't block v1 (PRD §4 already treats Windows as the real target and
 `recalculate`/`run_macro`/`refresh_links`/`write_links` — not yet individually checked) needs its
 tests gated behind Windows access, per this section's skip-don't-mock convention, not written off
 as broken.
+
+### 3.2 Live-Excel hang safety — process isolation (PRD §6.2.3) — **not yet built**
+
+Every live-Excel call (`spawn`, `xlw_open_workbook`, `xlw_save_workbook`, and every not-yet-built
+one — `recalculate`, `run_macro`, `refresh_links`, `write_links`) is a potential hang point, not
+just the already-fixed `close_owned()` case (§3.1's note). A Python thread can't forcibly
+interrupt a blocked COM call cleanly; a process boundary can.
+
+```python
+# backends.py — new
+@dataclass(frozen=True)
+class TimeoutResult:
+    """Outcome of a timeout-guarded live-Excel call.
+
+    Args:
+        completed: True if the call returned within the timeout (or no timeout was given).
+        value: The call's return value, if completed.
+        killed_pid: The Excel PID that was force-killed, if the call timed out.
+    """
+    completed: bool
+    value: Any = None
+    killed_pid: int | None = None
+
+
+def run_with_timeout(
+    fn: Callable[[], Any], timeout: float | None, owned_pid_file: Path
+) -> TimeoutResult:
+    """Run `fn` in an isolated worker process, enforcing `timeout` if given.
+
+    Args:
+        fn: The blocking live-Excel call to run (e.g. a closure wrapping `spawn()` then
+            `app.calculate()`).
+        timeout: Seconds to wait, or None to wait indefinitely (PRD §6.2.4's decision — no
+            default timeout is ever imposed).
+        owned_pid_file: Path the worker writes its spawned Excel PID to immediately after
+            spawning — written *before* the risky blocking call, so the parent can still find
+            and kill the right (and only the right) Excel process even if the worker itself
+            becomes unresponsive.
+
+    Returns:
+        A `TimeoutResult`. `completed=False` means the worker (and its owned Excel PID, read
+        back from `owned_pid_file`) were force-killed after `timeout` elapsed.
+    """
+```
+
+Uses `multiprocessing.Process` (a genuine OS process, not a thread) for the worker; the parent
+calls `process.join(timeout)` and, if the process is still alive afterward, reads
+`owned_pid_file` to find the Excel PID to kill (via `OwnedInstanceRegistry`-style lookup, §3.1),
+terminates the Excel process, then terminates the worker process itself. A timed-out call always
+surfaces as `ActionExecutionError` (never a recoverable `ActionResult(status="error")`) —
+workbook state after a forced kill can't be trusted (PRD §6.2.3/§6.8).
+
+**Not yet built** — needs a live Excel instance on Windows to develop and verify the
+kill-sequencing for real, not just reasoned about. Build order item 12 (below).
+
+### 3.3 Configurable timeouts + signal summarization for `recalculate`/`run_macro` (PRD §6.2.4) — **not yet built**
+
+```python
+# backends.py — new, once recalculate/run_macro land
+@dataclass(frozen=True)
+class CalculationWaitSummary:
+    """Compact audit-log-ready summary of a recalculate/run_macro wait (PRD §6.2.4).
+
+    Args:
+        state_counts: Histogram of every distinct signal value observed (e.g.
+            {"xlPending": 3, "xlCalculating": 118, "xlDone": 1}) — empty if no signal exists
+            at all (the `run_macro` case).
+        last_state: The final observed value, or None if no signal was available.
+        poll_count: Total number of liveness polls taken.
+        elapsed_seconds: Total wall-clock time waited.
+        outcome: "completed" | "timed_out" | "no_signal_available".
+    """
+    state_counts: dict[str, int]
+    last_state: str | None
+    poll_count: int
+    elapsed_seconds: float
+    outcome: Literal["completed", "timed_out", "no_signal_available"]
+```
+
+`recalculate(timeout: float | None = None)` and `run_macro(timeout: float | None = None)` both
+gain an optional `timeout` param, defaulting to unbounded (PRD §6.2.4 — never a short default,
+since legitimate real-world calculations against plugin-formula workbooks can take hours). Built
+on top of §3.2's `run_with_timeout` for the actual hang-safety/kill mechanism; a **separate**
+watchdog connection (not the same blocked call) is what would poll `Application.CalculationState`/
+`Application.Ready` for `recalculate` specifically, producing the `CalculationWaitSummary` above
+— per PRD §6.2.4's research finding, polling from the *same* call that triggered the calculation
+is unreliable (can stay `xlPending` indefinitely). `run_macro` has no equivalent signal at all;
+its summary is always `state_counts={}`, `last_state=None`,
+`outcome="no_signal_available"` on completion, or `"timed_out"` if `timeout` elapsed.
+
+The poll-interval/signal-capture logic must live in one small, isolated function (not scattered
+across `recalculate`/`run_macro`'s own bodies) — expected to be tuned as real behavior is
+observed via soak testing (PRD §6.2.4), not treated as a one-time design to leave alone.
+**Not yet built** — needs empirical verification against real Excel first (build order item 12).
+
+### 3.4 Refreshing a linked consumer workbook against a not-yet-committed source (PRD §6.3.2) — **not yet built, Option 2 decided**
+
+Scenario (PRD §6.3.2): workbook A is modified via file-backend actions this run (scratch-only,
+real file untouched per §5.3); a separate workbook B has external references to A — classic
+cell-reference links, and/or a data connection/Power Query, and/or simply needs recalculating —
+and must reflect A's *new* values before B is itself used. **Decided: redirect-then-restore**
+(not an early checkpoint-commit of A) — preserves the "real files untouched until final
+success" invariant (§5.3) exactly.
+
+```python
+# backends.py — new, needs write_links (com-tier, .api's ChangeLink/LinkSources) built first
+def redirect_external_links(workbook: Any, old_target: str, new_target: str) -> None: ...
+def restore_external_links(workbook: Any, redirected: dict[str, str]) -> None: ...
+```
+
+Sequence for a step that refreshes B against A: (1) `redirect_external_links(B, A.real_path,
+A.scratch_path)` — rewrite B's references to point at A's scratch copy; (2) refresh B normally
+(classic links via `refresh_links`, connections via Excel's own query refresh, or plain
+`recalculate`); (3) `restore_external_links(B, ...)` — rewrite back to `A.real_path` *before* B
+itself is committed, so B's real file never ends up pointing at a scratch path.
+
+**Scope, per PRD §6.3.2**: classic cell-reference links are real, buildable work (xlwings' `.api`
+`ChangeLink`/`LinkSources`). **Power Query/data-connection redirection is a narrower, harder
+case** — a query's source lives in its M-code/connection string, not a simple external-link
+table; v1 scope is likely limited to connections whose source is a plain file-path parameter,
+with anything more complex documented as a named limitation, not silently attempted. Plain
+`recalculate` needs no redirection at all — it's a separate, ordered operation from refreshing
+links/connections (PRD §6.3.2's third bullet).
+
+**Not yet built** — depends on `write_links`/`refresh_links` (build order item 10) existing
+first; the redirect/restore wrapper is build order item 13 (below).
 
 ## 4. Actions layer — `actions.py`
 
@@ -492,34 +622,96 @@ swallowed. This is a deliberate exception to "avoid defensive fallback layers" (
 distinction is inventing fallback *behavior* for bad input (the anti-pattern) vs. guaranteeing
 cleanup still runs and still reports what went wrong (the actual requirement).
 
-### 5.3 Scratch-copy execution model — **built**
+### 5.3 Scratch-copy execution model — **built, superseded by working_dir redesign below (not yet built)**
 
-Implements PRD §6.3.1:
+Implements PRD §6.3.1, revised by §6.3.3/§6.3.4's decisions:
 
 ```python
 class ScratchManager:
+    def __init__(self, working_dir: Path) -> None: ...
+       # working_dir: <base>/excel_runner_runs/<yaml_stem>/ — see §6.1's note on where <base>
+       # comes from. scratch/ workbook copies live at working_dir/scratch/.
     def stage(self, name: str, real_path: Path) -> Path: ...
-       # copies real_path into the scratch dir if it exists; if not (create_if_missing case),
-       # just reserves the scratch path for the caller to create the workbook at directly
-    def commit(self, name: str) -> None: ...
-       # temp-path-then-Path.replace, atomic
-    def commit_all(self) -> None: ...     # marks the run fully committed, for cleanup()
-    def cleanup(self, keep_on_failure: bool = True) -> None: ...
-       # keep_on_failure=True (default): only deletes the scratch dir if commit_all()
-       # succeeded. False forces deletion regardless — the explicit choice on the success path.
+       # copies real_path into working_dir/scratch/ if it exists; if not (create_if_missing
+       # case), just reserves the scratch path for the caller to create the workbook at
+       # directly. Called for BOTH read-write AND read-only sessions now — see correction below.
+    def commit_all(self) -> None: ...
+       # raises ActionExecutionError on any workbook's commit failure — see rollback design below
 ```
 
-`SessionManager.commit_all()` saves every *staged* session's in-memory state to its scratch
-path first, then delegates to `ScratchManager.commit_all()` to move each scratch file back to
-its real path — read-only sessions (never staged) aren't touched by either step.
-`ScratchManager` has no knowledge of openpyxl/xlwings — it operates on plain file paths, so
-both backends will stage/commit through the same code path once xlwings-backed sessions exist
-(PRD §6.3.1's "xlwings-backed steps operate on the scratch copy too").
+**Correction (PRD §6.2.3): read-only sessions are now staged too, not opened directly against
+the real path.** Originally "open read-only in place… faster, safer" (§6.3's original wording) —
+revised after research confirmed openpyxl's `read_only=True` keeps a genuine OS file handle open
+until `.close()`/process exit, and while a genuine crash self-heals (OS releases handles on
+process teardown), a *hang* does not — the file stays locked for as long as the hang persists.
+Staging read-only opens too doesn't prevent the hang, but changes its blast radius from "a
+shared/production file is locked, someone has to notice and intervene" to "an orphaned copy in
+our own working_dir, harmless." `SessionManager._open_read_only` now calls `scratch.stage()`
+exactly like `_open_read_write` does; the only difference is it never gets committed back.
 
-Which workbooks *get* staged is decided by `SessionManager` (staged iff opened
-`mode="read_write"`, per §5.2's note above), not by `ScratchManager` reading an `ExecutionPlan`
-from validation — that handoff is still §5.4's to build, `ScratchManager` itself doesn't know
-or care where the staging decision came from.
+**Correction (PRD §6.3.4): `working_dir` replaces the old `tempfile.mkdtemp()`-based scratch
+dir entirely** — a fixed, predictable location (`<base>/excel_runner_runs/<yaml_stem>/`) instead
+of a random per-run temp path, so external tooling (a UiPath xaml) can construct the path itself
+from just the yaml's filename, without reading any output field. See §6.1 for exactly how
+`<base>` is resolved (cwd default, `--working-dir` CLI flag, or `working_dir:` YAML field).
+Re-running the same yaml overwrites the previous run's `working_dir` contents automatically —
+`stage()`'s existing `shutil.copy2` already overwrites in place; `AuditLogger` (§6.2) now opens
+`audit.jsonl` in truncate mode at the start of each run, not append, so a new run's audit trail
+never mixes with a previous run's leftover records.
+
+**`cleanup()` is removed entirely** — nothing in `working_dir` is ever deleted automatically now,
+success or failure (PRD §6.3.4). Safe because a re-run of the same yaml just overwrites its own
+fixed folder rather than accumulating; there is no unbounded growth to guard against. The only
+things ever deleted are the transient `.bak`/`.tmp` files the commit mechanism below creates and
+removes itself within a single run.
+
+**Rename-based commit, with per-file rollback on a later failure (PRD §6.3.3) — replaces the
+original "temp-path-then-Path.replace" description**:
+
+```python
+@dataclass(frozen=True)
+class CommitFailure:
+    """Raised via ActionExecutionError when one or more workbooks fail to commit.
+
+    Args:
+        failed_workbook: Logical name of the workbook whose commit raised.
+        rollback_results: Logical name -> whether that already-committed workbook's rollback
+            succeeded. Only includes workbooks committed *before* the failure in this run.
+        needs_human: Names of workbooks whose rollback itself failed — the one case the engine
+            can't self-heal. Empty in the common case.
+    """
+    failed_workbook: str
+    rollback_results: dict[str, bool]
+    needs_human: tuple[str, ...]
+```
+
+Per-workbook commit sequence (`ScratchManager._commit_one`):
+1. `shutil.copy2(scratch_path, tmp_path)` — prepare the new content off to the side first,
+   *before touching `real_path` at all*. The only step that can fail for disk-space/permission
+   reasons unrelated to `real_path` being locked; if it fails, `real_path` is completely
+   untouched, no rollback needed.
+2. If `real_path` exists: `real_path.rename(bak_path)` — an instant, zero-copy move. This *is*
+   "keeping the original" (PRD's phrasing) — it was already sitting there untouched pre-commit,
+   so preserving it costs nothing extra.
+3. `tmp_path.rename(real_path)` — atomic; installs the new content.
+
+`commit_all()` attempts every staged workbook's commit in turn (no separate upfront precheck
+pass — simplest option discussed, PRD §6.3.3). If workbook *N* fails at step 1, 2, or 3 above,
+`commit_all()` rolls back every workbook that already completed step 3 in this run, in reverse
+order: `bak_path.rename(real_path)` (undoing step 3, restoring the original). **Records, per
+file, whether that rollback itself succeeded** — if it fails too, that workbook's name goes into
+`needs_human`, its `.bak` is deliberately *not* deleted (so the original content is still
+recoverable from disk, not just described in an error message), and the whole batch's outcome is
+raised as `ActionExecutionError(CommitFailure(...))`. On full success (every workbook committed),
+every `.bak` created during this run is deleted.
+
+**A partial-but-fully-rolled-back commit failure still makes `RunResult.status == "error"`**
+(PRD §6.3.3) — the run didn't fully complete what it promised, regardless of how cleanly the
+failure was contained.
+
+**Not yet built** — this entire section (working_dir relocation, read-only staging, rename-based
+commit/rollback) supersedes what's currently implemented (`tempfile.mkdtemp()`,
+copy-then-`Path.replace()`, `cleanup(keep_on_failure=...)`). Build order item 12 (below).
 
 ### 5.4 Validation — two tiers — **built**
 
@@ -583,10 +775,12 @@ into once `runner.py` exists to wire them together.
 The composition root, the audit trail, and the one public contract — grouped because together
 they're "the layer that actually executes a run and is safe for other code to depend on."
 
-### 6.1 Orchestration — **built**
+### 6.1 Orchestration — **built, working_dir resolution not yet built (§5.3)**
 
 ```python
-def run_workflow(path: str | Path, env_overrides: dict | None = None) -> RunResult:
+def run_workflow(
+    path: str | Path, env_overrides: dict | None = None, working_dir: str | Path | None = None,
+) -> RunResult:
 ```
 
 One linear sequence (per project convention: a composition root doesn't need splitting just to
@@ -596,21 +790,28 @@ hit a line count — see AGENTS.md), wrapped in `try`/`finally` for the crash-sa
 1. `core.load(path, env_overrides)` → `Workflow`.
 2. Tier-1 validation (§5.4) → raises before anything is opened.
 3. Tier-2 validation (§5.4) → `ExecutionPlan`.
-4. Create a run directory (`tempfile.mkdtemp()`); `scratch = ScratchManager(run_dir/"scratch")`;
-   `session_manager = SessionManager(workflow.workbooks, scratch)`. **No separate upfront
-   staging loop** — the original sketch's "stage every read-write workbook" step doesn't exist
-   as its own thing; staging happens lazily, inside `SessionManager.get_or_open`, the first
-   time each workbook is actually referenced. The runner's only job here is to pass the right
-   `mode` (from `plan.modes[name]`) into each `get_or_open` call.
+4. **Resolve `working_dir` (PRD §6.3.4, not yet built — replaces `tempfile.mkdtemp()`)**:
+   `base = working_dir if working_dir is not None else (workflow's own top-level `working_dir:`
+   field, if set) else Path.cwd()`; `run_dir = base / "excel_runner_runs" / Path(path).stem`.
+   Precedence is `run_workflow`'s own `working_dir` param (fed by the CLI's `--working-dir`,
+   §6.4) > the YAML's own `working_dir:` field > cwd — same layering convention as
+   `env_overrides` over the file's own `env:` block (§2.2). `scratch =
+   ScratchManager(run_dir)`; `session_manager = SessionManager(workflow.workbooks, scratch)`.
+   **No separate upfront staging loop** — staging happens lazily, inside
+   `SessionManager.get_or_open`, the first time each workbook is actually referenced (now true
+   for read-only sessions too, §5.3's correction). The runner's only job here is to pass the
+   right `mode` (from `plan.modes[name]`) into each `get_or_open` call.
 5. For each `Step` in order: if `if_expr` is set and evaluates false, record a `"skipped"`
    `StepResult` and move on. Otherwise: `core.resolve_value(step.params, context)`, then
    dispatch — every action except `copy` resolves its `workbook` field into one session and
    calls `registry[step.action].fn(session=session, **remaining_kwargs)`; `copy` is dispatched
    separately (`_dispatch_copy`), resolving *both* `source.workbook` and `target.workbook` into
    two sessions, exactly the special-case wiring §4/§5.1 flagged as still owed. Every step gets
-   an audit record (§6.2) regardless of outcome, and — added after a failing crash-safety test,
-   not part of the original design — every step also gets a `session_manager.checkpoint()` call
-   (§5.2), persisting whatever it just wrote to the scratch file before moving on.
+   an audit record (§6.2) regardless of outcome and a `logger.info(...)` console record (§6.2's
+   logging addendum, not yet built) on start/completion, and — added after a failing
+   crash-safety test, not part of the original design — every step also gets a
+   `session_manager.checkpoint()` call (§5.2), persisting whatever it just wrote to the scratch
+   file before moving on.
 6. **An action returning `ActionResult(status="error")` does not stop the loop** — this was an
    open design question, resolved by what `if:` conditions are actually for: PRD's own
    `if: "{{ steps.refresh.status == 'success' }}"` example only makes sense if a failed step
@@ -621,12 +822,13 @@ hit a line count — see AGENTS.md), wrapped in `try`/`finally` for the crash-sa
    consistent with the error-handling policy from §4: a raised exception means a genuine
    mistake, not a normal "didn't work" outcome.
 7. If no step failed: `session_manager.commit_all()` (saves every staged session, then
-   `scratch.commit_all()` moves each scratch file to its real path atomically), then
-   `scratch.cleanup(keep_on_failure=False)`.
+   `scratch.commit_all()` moves each scratch file to its real path — see §5.3's rename-based
+   commit/rollback design, not yet built). **No `scratch.cleanup()` call anymore** (§5.3/§6.3.4
+   — nothing in `working_dir` is deleted automatically, success or failure).
 8. `finally: session_manager.close_all()` — unconditionally, whether the loop finished, a step
-   failed, or an exception propagated. On failure (of either kind), `scratch.cleanup()` is
-   simply never called — the scratch copies are left in place as the recovery artifact
-   (PRD §6.3.1), exactly as designed.
+   failed, or an exception propagated. `working_dir`'s contents (scratch copies + `audit.jsonl`)
+   are simply left in place either way now — not conditionally cleaned up.
+
 
 **`stop` — built (PRD §6.9)**: a step whose `action` is `stop` and whose `if:` is true (or
 absent) ends the loop immediately after being recorded — the one *action* that does stop the
@@ -657,12 +859,30 @@ class AuditLogger:
 
 Takes a `StepResult`, not an `ActionResult` as first sketched — `StepResult` is the superset
 that also covers `"skipped"`, which never produces an `ActionResult` at all (the action never
-runs). One JSON object per line (JSONL), written to `run_dir/audit.jsonl` (see §6.1's bug fix
-above for why not inside the scratch dir). Logs the step's *raw* params, not resolved ones —
-resolved values aren't available uniformly for a skipped step, and raw params are simpler and
-always available; a minor, deliberate deviation from the original "resolved parameters"
-phrasing. Not a `logging`-module handler — deliberately a separate, structured artifact
-(PRD §6.7 explains why).
+runs). One JSON object per line (JSONL), written to `working_dir/audit.jsonl` (§6.1's bug fix
+above for why not inside `scratch/`; `working_dir` itself per §5.3/§6.3.4's redesign). Opened in
+truncate mode at the start of each run, not append — a re-run against the same `working_dir`
+must never mix a new run's records with a previous run's leftovers (§5.3's correction). Logs the
+step's *raw* params, not resolved ones — resolved values aren't available uniformly for a
+skipped step, and raw params are simpler and always available; a minor, deliberate deviation
+from the original "resolved parameters" phrasing. Not a `logging`-module handler — deliberately
+a separate, structured artifact (PRD §6.7 explains why).
+
+### 6.2.1 Console/application logging (PRD §6.7.1) — **not yet built**
+
+A second, distinct output from the audit log above: real-time narration via stdlib `logging`,
+for a human (or the user's own "Unify" tool) watching a run as it happens. `runner.py`,
+`engine.py`, and `backends.py` each get a module-level `logger = logging.getLogger(__name__)`
+(no handler/formatter configuration in library code — standard Python practice, never hijack
+whatever logging setup the importing application already has). Per PRD §6.7.1:
+- `INFO`: every step/action's start and completion.
+- `DEBUG`: a bit more detail (resolved params, timing) — not exhaustive.
+- `WARNING`/`ERROR`: self-sufficient for a human reading just the console, not merely pointing
+  at the audit log.
+
+The CLI (§6.4) is the only place that sets a severity threshold (`--logging-level`) — it does
+not attach handlers either; stream/format configuration is explicitly out of scope for
+excel_runner entirely (PRD §6.7.1's correction after initial over-design).
 
 ### 6.3 Public API surface — **built**
 
@@ -694,6 +914,26 @@ rewriting to support this.
 `list_actions()` itself is `tuple(discover_actions(actions_module).values())` — deliberately
 just `discover_actions` (§5.1) wired to the real `actions` module, not a second source of truth
 that could drift from it.
+
+### 6.4 CLI — `cli.py` — **built, `--working-dir`/`--logging-level` not yet added**
+
+```python
+def main(argv: list[str] | None = None) -> int:
+```
+
+Thin wrapper over `run_workflow()` — argument parsing and JSON result formatting only, no logic
+of its own (§1's correction). Existing args: `workflow` (positional path), `--env KEY=VALUE`
+(repeatable). **New, not yet built** (PRD §6.3.4/§6.7.1):
+
+```python
+parser.add_argument("--working-dir", default=None, help="Base directory for this run's "
+    "working_dir (excel_runner_runs/<yaml_stem>/ is always appended). Defaults to cwd.")
+parser.add_argument("--logging-level", help="DEBUG,INFO,WARNING,ERROR", default="INFO")
+```
+
+`--working-dir`'s value is passed straight through as `run_workflow(..., working_dir=...)`
+(§6.1). `--logging-level` only calls `logging.getLogger(...).setLevel(...)` — no handler or
+formatter configuration (§6.2.1's decided scope boundary).
 
 ## 7. Testing approach
 
@@ -802,6 +1042,29 @@ time within it.
 11. **Deferred/flagged, per PRD**: `update_summary_table`'s real parameters, the `aggregate`
     discussion, `export_pdf`, the AI-authoring inspection actions (PRD §9: `list_sheets`,
     `describe_sheet`).
+12. **Crash/lock-safety hardening (PRD §6.2.3/§6.3.3/§6.3.4/§6.7.1)** — **not yet built**, design
+    decided in full (2026-08-21 session, this Specification.md update):
+    - `working_dir` relocation (§5.3/§6.1): replaces `tempfile.mkdtemp()` with the fixed
+      `<base>/excel_runner_runs/<yaml_stem>/` path; `AuditLogger` truncates instead of
+      appending; `ScratchManager.cleanup()` removed entirely.
+    - Read-only sessions now staged too (§5.3's correction to §6.3's original wording).
+    - Rename-based commit with per-file rollback on a later workbook's commit failure (§5.3) —
+      the `.bak`/`.tmp` rename sequence, `CommitFailure`'s `needs_human` case.
+    - Console/application logging via stdlib `logging` (§6.2.1) plus the CLI's
+      `--working-dir`/`--logging-level` flags (§6.4).
+    - Pure logic + filesystem operations, no live Excel needed — fits before item 13/14 below,
+      same "platform-independent work first" rationale as the rest of this build order.
+13. **Live-Excel hang safety + configurable timeouts (PRD §6.2.3/§6.2.4)** — **not yet built**,
+    needs a live Windows Excel instance to develop and verify for real (§3.2/§3.3):
+    `run_with_timeout`'s process-isolation mechanism, then `recalculate`/`run_macro`'s
+    `timeout` param and `CalculationWaitSummary` audit-log summarization built on top of it.
+    Soak-testing real client workbooks (desktop + xaml) to establish empirical reliability is a
+    validation activity for this item, not a separate build step.
+14. **Linked-consumer-workbook refresh (PRD §6.3.2)** — **not yet built**, depends on item 10's
+    `write_links`/`refresh_links` existing first (§3.4): `redirect_external_links`/
+    `restore_external_links` for classic cell-reference links; Power Query/data-connection
+    support scoped narrowly (plain file-path-parameter sources only) or documented as a named
+    limitation.
 
 `docs/Progress_Tracker.md` tracks each item above against the project's standard Component /
 Unit Tests / Code / Integration Tests / Results columns, at function/class granularity — not
