@@ -419,7 +419,7 @@ change as real behavior is observed, and that has to stay cheap to adjust, not a
 refactor each time.
 
 **Validation plan, not yet started**: soak-test real client workbooks with these plugin
-formulas — both on local desktops and inside actual xamls — to establish real-world reliability
+formulas — both on local desktops and inside automation flows — to establish real-world reliability
 empirically, rather than assuming the docs/forum research above generalizes to this codebase's
 exact usage pattern. This is a testing activity to schedule once the xlwings/COM phase (item 9)
 is far enough along to soak-test against, not a blocker for finishing this design.
@@ -465,14 +465,14 @@ option discussed that still gets the important property:**
   `status` `"error"`** — the run didn't fully complete what it promised, regardless of how
   cleanly the failure was contained.
 - §6.3.3 point 3 (exposing a commit-failure path on `RunResult`) is **superseded by §6.3.4** —
-  `working_dir` is now a fixed, predictable path a xaml can construct itself from just the
+  `working_dir` is now a fixed, predictable path a 3rd party workflow tool or agent can construct itself from just the
   yaml's filename, not something that needs surfacing after the fact.
 
 ### 6.3.4 Working directory location and structure — **DECIDED (2026-08-21)**
 
 
 Supersedes §6.3.3's "expose the scratch directory path on `RunResult`" idea — a **fixed,
-predictable path a xaml can construct itself from just the yaml file's own path**, without
+predictable path a 3rd aprty workflow or agent can construct itself from just the yaml file's own path**, without
 needing to read any CLI output field at all, is more useful than a random per-run temp path
 surfaced after the fact. Renamed throughout from "scratch dir" to **`working_dir`** — it now
 holds the audit log too, not only workbook scratch copies (see below), so "scratch" undersells
@@ -490,8 +490,7 @@ what it is.
   seam is being kept for completeness rather than closed off.
 - Fixed subfolder name **`excel_runner_runs`** (not e.g. `excel_runner` — collides with this
   very project's own package folder name when working inside the repo itself, found while
-  choosing it) keeps every run's folder out of the way of a project's real files, and gives job
-  policies (e.g. XAML activities' working-directory pruning) one single, recognizable path to
+  choosing it) keeps every run's folder out of the way of a project's real files, and gives external orchestration one single, recognizable path to
   target.
 
 **Structure inside `working_dir`**: `audit.jsonl` at the root, workbook scratch copies in a
@@ -503,7 +502,7 @@ one place.
 
 **Re-run behavior**: since the path is now fixed (not freshly randomized per run), a second run
 against the same yaml will find a previous run's leftovers already there. **Decision: overwrite
-automatically, no confirmation, no refuse-if-not-empty check.** In a xaml context the same
+automatically, no confirmation, no refuse-if-not-empty check.** In many automation contexts context the same
 working_dir is never revisited concurrently anyway; for desktop/interactive use, requiring the
 folder to be manually cleared first would just be friction with no real safety benefit.
 
@@ -559,13 +558,13 @@ happened during a failed run, alongside the scratch copies from §6.3.1.
 
 Distinct purpose from §6.7's audit log: the audit log is evidence/diagnosis, queried after the
 fact; console logging is a **real-time narration for a human (or a tool) watching the run as it
-happens** — the driving case being the user's own log-viewing tool ("Unify") that picks up
+happens** — the driving case being the user's own log-viewing tool that picks up
 console output and displays it.
 
 **Handler/stream configuration is explicitly out of scope here — someone else's job.** Both the
 library (`runner.py`, `engine.py`, etc.) and the CLI (`cli.py`) only ever emit records via
 `logging.getLogger(...)` — neither attaches handlers, sets a formatter, or routes between
-stdout/stderr itself. That's entirely the responsibility of whatever wraps this (Unify, or any
+stdout/stderr itself. That's entirely the responsibility of whatever wraps this (3rd party workflow tools agent etc., or any
 other caller) — standard Python library practice (never hijack the importing application's own
 logging setup), now extended to the CLI too, not just the library.
 
