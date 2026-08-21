@@ -207,7 +207,9 @@ def delete_sheet(workbook: Workbook, sheet: str) -> None:
             than raise, so this is checked explicitly here.
     """
     if len(workbook.sheetnames) == 1:
-        raise ValueError(f'Cannot delete "{sheet}" — it is the only sheet left in the workbook.')
+        raise ValueError(
+            f'Cannot delete "{sheet}" — it is the only sheet left in the workbook.'
+        )
     del workbook[sheet]
 
 

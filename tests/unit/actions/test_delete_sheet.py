@@ -16,7 +16,9 @@ class TestDeleteSheetAction:
         assert "Data" not in file_session.handle.sheetnames
         assert file_session.dirty is True
 
-    def test_deleting_the_only_sheet_returns_a_structured_error(self, file_session: WorkbookSession) -> None:
+    def test_deleting_the_only_sheet_returns_a_structured_error(
+        self, file_session: WorkbookSession
+    ) -> None:
         result = delete_sheet_action(session=file_session, sheet="Summary")
         assert result.status == "error"
         assert result.error is not None

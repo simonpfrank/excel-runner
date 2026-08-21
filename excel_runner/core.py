@@ -107,6 +107,7 @@ class ActionExecutionError(ExcelRunnerError):
 
 # --- Templating -------------------------------------------------------------------------
 
+
 class _DictItemFirstEnvironment(jinja2.Environment):
     """A dict field named "values"/"keys"/"items"/etc. would otherwise be shadowed by the real
     dict method of the same name — Jinja2's default `getattr` tries attribute access before
@@ -147,14 +148,21 @@ def _wrap_template_error(original_text: str, exc: Exception) -> ValidationError:
         message = f'"{stripped}" references something that does not exist: {exc}'
     else:
         message = f'"{stripped}" is not a valid template expression: {exc}'
-    return ValidationError(ErrorDetail(message=message, technical_reason=f"{type(exc).__name__}: {exc}"))
+    return ValidationError(
+        ErrorDetail(message=message, technical_reason=f"{type(exc).__name__}: {exc}")
+    )
 
 
-def _evaluate_expression(expr_text: str, context: dict[str, Any], original_text: str) -> Any:
+def _evaluate_expression(
+    expr_text: str, context: dict[str, Any], original_text: str
+) -> Any:
     try:
         expression = _ENV.compile_expression(expr_text, undefined_to_none=False)
         return expression(**context)
-    except (jinja2.exceptions.UndefinedError, jinja2.exceptions.TemplateSyntaxError) as exc:
+    except (
+        jinja2.exceptions.UndefinedError,
+        jinja2.exceptions.TemplateSyntaxError,
+    ) as exc:
         raise _wrap_template_error(original_text, exc) from exc
 
 
@@ -166,7 +174,10 @@ def _resolve_string(text: str, context: dict[str, Any]) -> Any:
         return _evaluate_expression(inner, context, text)
     try:
         return _ENV.from_string(text).render(**context)
-    except (jinja2.exceptions.UndefinedError, jinja2.exceptions.TemplateSyntaxError) as exc:
+    except (
+        jinja2.exceptions.UndefinedError,
+        jinja2.exceptions.TemplateSyntaxError,
+    ) as exc:
         raise _wrap_template_error(text, exc) from exc
 
 
@@ -192,7 +203,10 @@ def resolve_value(value: Any, context: dict[str, Any]) -> Any:
     if isinstance(value, str):
         return _resolve_string(value, context)
     if isinstance(value, dict):
-        return {resolve_value(k, context): resolve_value(v, context) for k, v in value.items()}
+        return {
+            resolve_value(k, context): resolve_value(v, context)
+            for k, v in value.items()
+        }
     if isinstance(value, list):
         return [resolve_value(item, context) for item in value]
     return value
@@ -228,7 +242,9 @@ class _Yaml12BoolLoader(yaml.SafeLoader):
 
 
 _Yaml12BoolLoader.yaml_implicit_resolvers = {
-    first_char: [(tag, regexp) for tag, regexp in resolvers if tag != "tag:yaml.org,2002:bool"]
+    first_char: [
+        (tag, regexp) for tag, regexp in resolvers if tag != "tag:yaml.org,2002:bool"
+    ]
     for first_char, resolvers in yaml.SafeLoader.yaml_implicit_resolvers.items()
 }
 _Yaml12BoolLoader.add_implicit_resolver(
@@ -240,7 +256,12 @@ _Yaml12BoolLoader.add_implicit_resolver(
 
 def _build_step(raw_step: dict[str, Any]) -> Step:
     params = {k: v for k, v in raw_step.items() if k not in {"id", "action", "if"}}
-    return Step(id=raw_step["id"], action=raw_step["action"], params=params, if_expr=raw_step.get("if"))
+    return Step(
+        id=raw_step["id"],
+        action=raw_step["action"],
+        params=params,
+        if_expr=raw_step.get("if"),
+    )
 
 
 def load(path: str | Path, env_overrides: dict[str, Any] | None = None) -> Workflow:
@@ -348,7 +369,9 @@ class WorkbookSession:
 # directly (PRD sec 7's `recalculate` full/full_rebuild modes are the known example) — not
 # added speculatively, just the capability plumbing for when the first one is actually built.
 
-ACTION_CAPABILITIES: dict[str, Literal["file", "xlw", "com", "depends_on_param", "none"]] = {}
+ACTION_CAPABILITIES: dict[
+    str, Literal["file", "xlw", "com", "depends_on_param", "none"]
+] = {}
 
 # Whether an action mutates the workbook it's given — used by engine.py's tier-2 validation
 # (Spec sec 5.4) to infer read_only vs. read_write per workbook. Declared by the *same*
@@ -372,7 +395,10 @@ def file_action(
 
 def file_action(
     fn: Callable[_P, ActionResult] | None = None, *, writes: bool = False
-) -> Callable[_P, ActionResult] | Callable[[Callable[_P, ActionResult]], Callable[_P, ActionResult]]:
+) -> (
+    Callable[_P, ActionResult]
+    | Callable[[Callable[_P, ActionResult]], Callable[_P, ActionResult]]
+):
     """Register a function as a file-backend (openpyxl) action for discovery (Spec sec 5.1).
 
     Usable bare (`@file_action`, the common case — a read-only action) or called with
@@ -404,7 +430,10 @@ def xlw_action(
 
 def xlw_action(
     fn: Callable[_P, ActionResult] | None = None, *, writes: bool = False
-) -> Callable[_P, ActionResult] | Callable[[Callable[_P, ActionResult]], Callable[_P, ActionResult]]:
+) -> (
+    Callable[_P, ActionResult]
+    | Callable[[Callable[_P, ActionResult]], Callable[_P, ActionResult]]
+):
     """Register a function as using xlwings' portable, cross-platform API for discovery (Spec
     sec 5.1) — the normal live-Excel case. See `com_action` for the raw-COM-only exception.
 
@@ -431,7 +460,10 @@ def com_action(
 
 def com_action(
     fn: Callable[_P, ActionResult] | None = None, *, writes: bool = False
-) -> Callable[_P, ActionResult] | Callable[[Callable[_P, ActionResult]], Callable[_P, ActionResult]]:
+) -> (
+    Callable[_P, ActionResult]
+    | Callable[[Callable[_P, ActionResult]], Callable[_P, ActionResult]]
+):
     """Register a function as needing the raw, Windows-only COM object via xlwings' `.api`
     escape hatch for discovery (Spec sec 5.1) — the genuine exception, not the default
     live-Excel case (see `xlw_action`).
@@ -457,4 +489,3 @@ def control_action(fn: Callable[_P, ActionResult]) -> Callable[_P, ActionResult]
     """
     ACTION_CAPABILITIES[fn.__name__] = "none"
     return fn
-

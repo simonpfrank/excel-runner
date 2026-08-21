@@ -97,7 +97,11 @@ class TestParamSchema:
         ) -> ActionResult:
             return ActionResult(status="success", output={})
 
-        module = types.SimpleNamespace(**{"_example_action_with_optional_param": _example_action_with_optional_param})
+        module = types.SimpleNamespace(
+            **{
+                "_example_action_with_optional_param": _example_action_with_optional_param
+            }
+        )
         registry = discover_actions(module)  # type: ignore[arg-type]
         schema = registry["_example_action_with_optional_param"].param_schema
         assert schema["required"] == ["sheet"]

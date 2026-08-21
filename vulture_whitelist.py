@@ -88,4 +88,3 @@ backends.xlw_save_workbook
 # the assignment as an "unused attribute" since nothing in our own code ever *reads* `.title`
 # back. Referencing it here marks it used.
 Worksheet.title
-

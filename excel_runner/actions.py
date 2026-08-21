@@ -90,7 +90,9 @@ def stop(reason: str | None = None) -> ActionResult:
     Returns:
         A success result; `reason` is echoed into `output` when given, for the audit log.
     """
-    return ActionResult(status="success", output={"reason": reason} if reason is not None else {})
+    return ActionResult(
+        status="success", output={"reason": reason} if reason is not None else {}
+    )
 
 
 # --- data ----------------------------------------------------------------------------------
@@ -123,7 +125,14 @@ def copy(
     Returns:
         A success result with no meaningful output.
     """
-    backends.copy_range(session.handle, source_sheet, source_range, target.handle, target_sheet, target_range)
+    backends.copy_range(
+        session.handle,
+        source_sheet,
+        source_range,
+        target.handle,
+        target_sheet,
+        target_range,
+    )
     target.dirty = True
     return ActionResult(status="success", output={})
 
@@ -177,7 +186,9 @@ def read_metadata(
         ActionExecutionError: If target is "cells" but `sheet`/`cells` weren't given.
     """
     if target == "properties":
-        return ActionResult(status="success", output=backends.read_properties(session.handle))
+        return ActionResult(
+            status="success", output=backends.read_properties(session.handle)
+        )
     if target != "cells":
         # Python doesn't enforce type hints at runtime, and this function is directly
         # importable/callable on its own (PRD sec 3/sec 9's library goal) — so an unsupported
@@ -197,11 +208,15 @@ def read_metadata(
                 technical_reason="read_metadata called with target=cells but sheet or cells was None",
             )
         )
-    return ActionResult(status="success", output=backends.read_cells(session.handle, sheet, cells))
+    return ActionResult(
+        status="success", output=backends.read_cells(session.handle, sheet, cells)
+    )
 
 
 @file_action(writes=True)
-def write_cell(session: WorkbookSession, sheet: str, cell: str, value: Any) -> ActionResult:
+def write_cell(
+    session: WorkbookSession, sheet: str, cell: str, value: Any
+) -> ActionResult:
     """Write a value to a single cell.
 
     Args:
@@ -219,7 +234,9 @@ def write_cell(session: WorkbookSession, sheet: str, cell: str, value: Any) -> A
 
 
 @file_action(writes=True)
-def write_range(session: WorkbookSession, sheet: str, range: str, values: list[list[Any]]) -> ActionResult:
+def write_range(
+    session: WorkbookSession, sheet: str, range: str, values: list[list[Any]]
+) -> ActionResult:
     """Write a 2D block of values, anchored at the top-left cell of `range`.
 
     Args:
@@ -316,7 +333,9 @@ def insert_range(
         return ActionResult(
             status="error",
             output={},
-            error=ErrorDetail(message=str(exc), technical_reason=f"{type(exc).__name__}: {exc}"),
+            error=ErrorDetail(
+                message=str(exc), technical_reason=f"{type(exc).__name__}: {exc}"
+            ),
         )
     session.dirty = True
     return ActionResult(status="success", output={})
@@ -324,7 +343,10 @@ def insert_range(
 
 @file_action(writes=True)
 def set_column_width(
-    session: WorkbookSession, sheet: str, columns: str, width: float | Literal["autofit"]
+    session: WorkbookSession,
+    sheet: str,
+    columns: str,
+    width: float | Literal["autofit"],
 ) -> ActionResult:
     """Set the width of a column or range of columns.
 
@@ -343,7 +365,9 @@ def set_column_width(
 
 
 @file_action(writes=True)
-def create_sheet(session: WorkbookSession, name: str, index: int | None = None) -> ActionResult:
+def create_sheet(
+    session: WorkbookSession, name: str, index: int | None = None
+) -> ActionResult:
     """Add a new, empty worksheet to the workbook.
 
     Args:
@@ -362,7 +386,9 @@ def create_sheet(session: WorkbookSession, name: str, index: int | None = None) 
         return ActionResult(
             status="error",
             output={},
-            error=ErrorDetail(message=str(exc), technical_reason=f"{type(exc).__name__}: {exc}"),
+            error=ErrorDetail(
+                message=str(exc), technical_reason=f"{type(exc).__name__}: {exc}"
+            ),
         )
     session.dirty = True
     return ActionResult(status="success", output={})
@@ -404,7 +430,9 @@ def delete_sheet(session: WorkbookSession, sheet: str) -> ActionResult:
         return ActionResult(
             status="error",
             output={},
-            error=ErrorDetail(message=str(exc), technical_reason=f"{type(exc).__name__}: {exc}"),
+            error=ErrorDetail(
+                message=str(exc), technical_reason=f"{type(exc).__name__}: {exc}"
+            ),
         )
     session.dirty = True
     return ActionResult(status="success", output={})
@@ -445,7 +473,11 @@ def find_headers_row(
 
 @file_action
 def find_row(
-    session: WorkbookSession, sheet: str, column: str, search_value: Any, header_row: int | None = None
+    session: WorkbookSession,
+    sheet: str,
+    column: str,
+    search_value: Any,
+    header_row: int | None = None,
 ) -> ActionResult:
     """Find the row number where `column` equals `search_value`.
 
@@ -473,7 +505,9 @@ def find_row(
 
 
 @file_action
-def find_column(session: WorkbookSession, sheet: str, header_row: int, pattern: str) -> ActionResult:
+def find_column(
+    session: WorkbookSession, sheet: str, header_row: int, pattern: str
+) -> ActionResult:
     """Find the column letter whose header (in `header_row`) matches `pattern`.
 
     Args:

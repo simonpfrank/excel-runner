@@ -20,3 +20,5 @@ htmlcov/
 docs/research/
 /data/
 tests/data/agent_completion_check_real/counter.txt
+demos/output/
+

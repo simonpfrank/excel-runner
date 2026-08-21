@@ -15,7 +15,9 @@ class TestCreateSheetAction:
         assert "Data" in file_session.handle.sheetnames
         assert file_session.dirty is True
 
-    def test_duplicate_name_returns_a_structured_error(self, file_session: WorkbookSession) -> None:
+    def test_duplicate_name_returns_a_structured_error(
+        self, file_session: WorkbookSession
+    ) -> None:
         result = create_sheet_action(session=file_session, name="Summary")
         assert result.status == "error"
         assert result.error is not None

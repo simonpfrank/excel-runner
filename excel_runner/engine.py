@@ -117,7 +117,9 @@ class ScratchManager:
 
     def __init__(self, scratch_dir: Path) -> None:
         self._scratch_dir = scratch_dir
-        self._staged: dict[str, tuple[Path, Path]] = {}  # name -> (real_path, scratch_path)
+        self._staged: dict[str, tuple[Path, Path]] = (
+            {}
+        )  # name -> (real_path, scratch_path)
         self._all_committed = False
 
     def stage(self, name: str, real_path: Path) -> Path:
@@ -220,7 +222,9 @@ class SessionManager:
         scratch: Where read-write sessions get staged (PRD sec 6.3.1).
     """
 
-    def __init__(self, workbooks: dict[str, WorkbookRef], scratch: ScratchManager) -> None:
+    def __init__(
+        self, workbooks: dict[str, WorkbookRef], scratch: ScratchManager
+    ) -> None:
         self._workbooks = workbooks
         self._scratch = scratch
         self._sessions: dict[str, WorkbookSession] = {}
@@ -266,7 +270,9 @@ class SessionManager:
                 )
             ref = self._workbooks[name]
             session = (
-                self._open_read_write(name, ref) if mode == "read_write" else self._open_read_only(name, ref)
+                self._open_read_write(name, ref)
+                if mode == "read_write"
+                else self._open_read_only(name, ref)
             )
             self._sessions[name] = session
 
@@ -294,7 +300,11 @@ class SessionManager:
             self._create(ref, scratch_path)
         handle = backends.open_workbook(str(scratch_path), mode="read_write")
         return WorkbookSession(
-            name=name, backend="file", handle=handle, path=str(scratch_path), mode="read_write",
+            name=name,
+            backend="file",
+            handle=handle,
+            path=str(scratch_path),
+            mode="read_write",
             scratch_path=scratch_path,
         )
 
@@ -303,7 +313,13 @@ class SessionManager:
         if not real_path.exists():
             self._create(ref, real_path)
         handle = backends.open_workbook(str(real_path), mode="read_only")
-        return WorkbookSession(name=name, backend="file", handle=handle, path=str(real_path), mode="read_only")
+        return WorkbookSession(
+            name=name,
+            backend="file",
+            handle=handle,
+            path=str(real_path),
+            mode="read_only",
+        )
 
     def _create(self, ref: WorkbookRef, at_path: Path) -> None:
         if not ref.create_if_missing:
@@ -362,7 +378,9 @@ class SessionManager:
             except Exception as exc:  # noqa: BLE001 - intentional, see docstring
                 errors.append(exc)
         if errors:
-            raise ExceptionGroup("failed to close one or more workbook sessions", errors)
+            raise ExceptionGroup(
+                "failed to close one or more workbook sessions", errors
+            )
 
 
 # --- Validation, tier 1: static schema (Spec sec 5.4) --------------------------------------
@@ -373,13 +391,18 @@ class SessionManager:
 # docs/Specification.md sec 5.4 for the correction. What's implemented below only needs the
 # parsed Workflow structure and the action registry, nothing else.
 
-_IMPLICIT_FIELDS = {"workbook"}  # consumed by the (not yet built) runner before dispatch, not
-                                  # part of any action's own param_schema — see Spec sec 4.
-_SCHEMA_EXEMPT_ACTIONS = {"copy", "stop"}  # copy's raw YAML shape (source/target dicts) doesn't
-                                     # match its Python signature yet — needs the runner's
-                                     # translation layer (Spec sec 4/8 item 7). stop has no
-                                     # workbook: field at all (PRD sec 6.9), so it's exempt from
-                                     # the implicit workbook requirement every other action gets.
+_IMPLICIT_FIELDS = {
+    "workbook"
+}  # consumed by the (not yet built) runner before dispatch, not
+# part of any action's own param_schema — see Spec sec 4.
+_SCHEMA_EXEMPT_ACTIONS = {
+    "copy",
+    "stop",
+}  # copy's raw YAML shape (source/target dicts) doesn't
+# match its Python signature yet — needs the runner's
+# translation layer (Spec sec 4/8 item 7). stop has no
+# workbook: field at all (PRD sec 6.9), so it's exempt from
+# the implicit workbook requirement every other action gets.
 _STEP_REF_RE = re.compile(r"steps\.([A-Za-z_][A-Za-z0-9_]*)")
 
 
@@ -407,7 +430,9 @@ def _matches_type(value: Any, expected: Any) -> bool:
         # PEP 484's numeric tower: an int is valid anywhere a float is expected (e.g.
         # `set_column_width`'s `width: 20` in YAML, which parses as int, not `20.0`) — bool is
         # technically an int subclass too, but not a sane width/etc. value, so excluded.
-        return isinstance(value, float) or (isinstance(value, int) and not isinstance(value, bool))
+        return isinstance(value, float) or (
+            isinstance(value, int) and not isinstance(value, bool)
+        )
     if isinstance(expected, type):
         return isinstance(value, expected)
     # No current action's signature has an annotation shape that reaches here (every real one
@@ -420,7 +445,11 @@ def _matches_type(value: Any, expected: Any) -> bool:
 def _type_name(expected: Any) -> str:
     origin = typing.get_origin(expected)
     if origin is pytypes.UnionType or origin is typing.Union:
-        return " or ".join(_type_name(arg) for arg in typing.get_args(expected) if arg is not type(None))
+        return " or ".join(
+            _type_name(arg)
+            for arg in typing.get_args(expected)
+            if arg is not type(None)
+        )
     if origin is typing.Literal:
         return " or ".join(repr(arg) for arg in typing.get_args(expected))
     if origin is not None:
@@ -435,8 +464,14 @@ def _expects_list(expected: Any) -> bool:
     return origin is list or expected is list
 
 
-def _type_mismatch_detail(step: Step, field: str, value: Any, expected: Any) -> ErrorDetail:
-    suggestion = f"Wrap it in [ ], e.g. [{value}]." if _expects_list(expected) and isinstance(value, str) else None
+def _type_mismatch_detail(
+    step: Step, field: str, value: Any, expected: Any
+) -> ErrorDetail:
+    suggestion = (
+        f"Wrap it in [ ], e.g. [{value}]."
+        if _expects_list(expected) and isinstance(value, str)
+        else None
+    )
     return ErrorDetail(
         message=(
             f'{_step_label(step)}: field "{field}" must be a {_type_name(expected)}, '
@@ -466,10 +501,14 @@ def _find_step_refs(value: Any) -> set[str]:
     return set()
 
 
-def _check_action_exists(workflow: Workflow, registry: dict[str, ActionSpec]) -> ValidationError | None:
+def _check_action_exists(
+    workflow: Workflow, registry: dict[str, ActionSpec]
+) -> ValidationError | None:
     for step in workflow.steps:
         if step.action not in registry:
-            suggestion = difflib.get_close_matches(step.action, registry.keys(), n=1, cutoff=0.5)
+            suggestion = difflib.get_close_matches(
+                step.action, registry.keys(), n=1, cutoff=0.5
+            )
             message = f'Step "{step.id}": unknown action "{step.action}".'
             if suggestion:
                 message += f' Did you mean "{suggestion[0]}"?'
@@ -483,11 +522,15 @@ def _check_action_exists(workflow: Workflow, registry: dict[str, ActionSpec]) ->
     return None
 
 
-def _check_unknown_params(workflow: Workflow, registry: dict[str, ActionSpec]) -> ValidationError | None:
+def _check_unknown_params(
+    workflow: Workflow, registry: dict[str, ActionSpec]
+) -> ValidationError | None:
     for step in workflow.steps:
         if step.action in _SCHEMA_EXEMPT_ACTIONS:
             continue
-        allowed = set(registry[step.action].param_schema["properties"]) | _IMPLICIT_FIELDS
+        allowed = (
+            set(registry[step.action].param_schema["properties"]) | _IMPLICIT_FIELDS
+        )
         extra = sorted(set(step.params) - allowed)
         if extra:
             return ValidationError(
@@ -500,11 +543,15 @@ def _check_unknown_params(workflow: Workflow, registry: dict[str, ActionSpec]) -
     return None
 
 
-def _check_required_params(workflow: Workflow, registry: dict[str, ActionSpec]) -> ValidationError | None:
+def _check_required_params(
+    workflow: Workflow, registry: dict[str, ActionSpec]
+) -> ValidationError | None:
     for step in workflow.steps:
         if step.action in _SCHEMA_EXEMPT_ACTIONS:
             continue
-        required = set(registry[step.action].param_schema["required"]) | _IMPLICIT_FIELDS
+        required = (
+            set(registry[step.action].param_schema["required"]) | _IMPLICIT_FIELDS
+        )
         missing = sorted(required - set(step.params))
         if missing:
             return ValidationError(
@@ -518,7 +565,9 @@ def _check_required_params(workflow: Workflow, registry: dict[str, ActionSpec]) 
     return None
 
 
-def _check_param_types(workflow: Workflow, registry: dict[str, ActionSpec]) -> ValidationError | None:
+def _check_param_types(
+    workflow: Workflow, registry: dict[str, ActionSpec]
+) -> ValidationError | None:
     for step in workflow.steps:
         if step.action in _SCHEMA_EXEMPT_ACTIONS:
             continue
@@ -535,22 +584,33 @@ def _check_param_types(workflow: Workflow, registry: dict[str, ActionSpec]) -> V
                 # individually testable" intent.
                 continue  # pragma: no cover
             if not _matches_type(value, expected):
-                return ValidationError(_type_mismatch_detail(step, name, value, expected))
+                return ValidationError(
+                    _type_mismatch_detail(step, name, value, expected)
+                )
     return None
 
 
-def _check_step_references(workflow: Workflow, registry: dict[str, ActionSpec]) -> ValidationError | None:
+def _check_step_references(
+    workflow: Workflow, registry: dict[str, ActionSpec]
+) -> ValidationError | None:
     step_index = {step.id: i for i, step in enumerate(workflow.steps)}
     for i, step in enumerate(workflow.steps):
-        refs = _find_step_refs(step.params) | (_find_step_refs(step.if_expr) if step.if_expr else set())
+        refs = _find_step_refs(step.params) | (
+            _find_step_refs(step.if_expr) if step.if_expr else set()
+        )
         for ref in sorted(refs):
             if ref not in step_index:
-                suggestion = difflib.get_close_matches(ref, list(step_index), n=1, cutoff=0.5)
+                suggestion = difflib.get_close_matches(
+                    ref, list(step_index), n=1, cutoff=0.5
+                )
                 message = f'{_step_label(step)}: references step id "{ref}", which does not exist.'
                 if suggestion:
                     message += f' Did you mean "{suggestion[0]}" (defined at step {step_index[suggestion[0]] + 1})?'
                 return ValidationError(
-                    ErrorDetail(message=message, technical_reason=f"unknown step reference {ref!r}")
+                    ErrorDetail(
+                        message=message,
+                        technical_reason=f"unknown step reference {ref!r}",
+                    )
                 )
             if step_index[ref] >= i:
                 return ValidationError(
@@ -565,7 +625,9 @@ def _check_step_references(workflow: Workflow, registry: dict[str, ActionSpec]) 
     return None
 
 
-_STATIC_CHECKS: list[Callable[[Workflow, dict[str, ActionSpec]], ValidationError | None]] = [
+_STATIC_CHECKS: list[
+    Callable[[Workflow, dict[str, ActionSpec]], ValidationError | None]
+] = [
     _check_action_exists,
     _check_unknown_params,
     _check_required_params,
@@ -657,7 +719,9 @@ def plan(workflow: Workflow, registry: dict[str, ActionSpec]) -> ExecutionPlan:
     error = _check_workbooks_declared(workflow)
     if error is not None:
         raise error
-    modes: dict[str, Literal["read_only", "read_write"]] = dict.fromkeys(workflow.workbooks, "read_only")
+    modes: dict[str, Literal["read_only", "read_write"]] = dict.fromkeys(
+        workflow.workbooks, "read_only"
+    )
     for step in workflow.steps:
         names = _find_workbook_names(step.params)
         if step.action == "copy":

@@ -10,7 +10,9 @@ class TestRenameSheetAction:
         assert ACTION_WRITES["rename_sheet"] is True
 
     def test_renames_the_sheet(self, file_session: WorkbookSession) -> None:
-        result = rename_sheet_action(session=file_session, sheet="Summary", new_name="Overview")
+        result = rename_sheet_action(
+            session=file_session, sheet="Summary", new_name="Overview"
+        )
         assert result.status == "success"
         assert "Overview" in file_session.handle.sheetnames
         assert file_session.dirty is True

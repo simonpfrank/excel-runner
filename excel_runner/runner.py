@@ -67,7 +67,9 @@ class AuditLogger:
         self._path = path
         self._path.parent.mkdir(parents=True, exist_ok=True)
 
-    def record_step(self, step: Step, result: StepResult, started_at: Any, ended_at: Any) -> None:
+    def record_step(
+        self, step: Step, result: StepResult, started_at: Any, ended_at: Any
+    ) -> None:
         """Append one step's outcome to the audit log.
 
         Args:
@@ -91,7 +93,9 @@ class AuditLogger:
 
 
 def _dispatch_copy(
-    resolved_params: dict[str, Any], session_manager: engine.SessionManager, plan: engine.ExecutionPlan
+    resolved_params: dict[str, Any],
+    session_manager: engine.SessionManager,
+    plan: engine.ExecutionPlan,
 ) -> ActionResult:
     """Resolve copy's two nested workbook refs into two sessions and call the action.
 
@@ -101,8 +105,12 @@ def _dispatch_copy(
     """
     source = resolved_params["source"]
     target = resolved_params["target"]
-    source_session = session_manager.get_or_open(source["workbook"], mode=plan.modes[source["workbook"]])
-    target_session = session_manager.get_or_open(target["workbook"], mode=plan.modes[target["workbook"]])
+    source_session = session_manager.get_or_open(
+        source["workbook"], mode=plan.modes[source["workbook"]]
+    )
+    target_session = session_manager.get_or_open(
+        target["workbook"], mode=plan.modes[target["workbook"]]
+    )
     return actions_module.copy(
         session=source_session,
         target=target_session,
@@ -133,13 +141,17 @@ def _dispatch(
         return registry[step.action].fn(**resolved)
     workbook_name = resolved["workbook"]
     session: WorkbookSession = session_manager.get_or_open(
-        workbook_name, mode=plan.modes[workbook_name], capability=registry[step.action].capability
+        workbook_name,
+        mode=plan.modes[workbook_name],
+        capability=registry[step.action].capability,
     )
     kwargs = {key: value for key, value in resolved.items() if key != "workbook"}
     return registry[step.action].fn(session=session, **kwargs)
 
 
-def run_workflow(path: str | Path, env_overrides: dict[str, Any] | None = None) -> RunResult:
+def run_workflow(
+    path: str | Path, env_overrides: dict[str, Any] | None = None
+) -> RunResult:
     """Load, validate, and execute a workflow YAML file end to end.
 
     A step's action returning `ActionResult(status="error")` is a normal, anticipated outcome
@@ -187,10 +199,14 @@ def run_workflow(path: str | Path, env_overrides: dict[str, Any] | None = None) 
             started_at = datetime.now()
             stop_triggered = False
 
-            if step.if_expr is not None and not core.evaluate_condition(step.if_expr, context):
+            if step.if_expr is not None and not core.evaluate_condition(
+                step.if_expr, context
+            ):
                 step_result = StepResult(step_id=step.id, status="skipped", output={})
             else:
-                action_result = _dispatch(step, context, registry, session_manager, plan)
+                action_result = _dispatch(
+                    step, context, registry, session_manager, plan
+                )
                 step_result = StepResult(
                     step_id=step.id,
                     status=action_result.status,
@@ -203,7 +219,10 @@ def run_workflow(path: str | Path, env_overrides: dict[str, Any] | None = None) 
 
             audit.record_step(step, step_result, started_at, datetime.now())
             step_results.append(step_result)
-            step_outputs[step.id] = {"status": step_result.status, "output": step_result.output}
+            step_outputs[step.id] = {
+                "status": step_result.status,
+                "output": step_result.output,
+            }
             # Persist this step's writes to the scratch file now, not just at the end — so a
             # later step crashing still leaves everything that succeeded so far visible in the
             # recovery artifact (PRD sec 6.3.1). Found necessary via a failing crash-safety
@@ -218,7 +237,9 @@ def run_workflow(path: str | Path, env_overrides: dict[str, Any] | None = None) 
                 # entry per workflow step.
                 for later_step in workflow.steps[i + 1 :]:
                     later_now = datetime.now()
-                    later_result = StepResult(step_id=later_step.id, status="stopped", output={})
+                    later_result = StepResult(
+                        step_id=later_step.id, status="stopped", output={}
+                    )
                     audit.record_step(later_step, later_result, later_now, later_now)
                     step_results.append(later_result)
                     step_outputs[later_step.id] = {"status": "stopped", "output": {}}
