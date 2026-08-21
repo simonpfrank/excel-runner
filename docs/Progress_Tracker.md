@@ -1,5 +1,36 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-08-21, Windows)
+**Status:** Blocked — awaiting user approval on PRD design decisions before Specification.md work
+**Working on:** User raised a real crash-safety concern: no matter how careful the scratch-copy
+model is, an unplanned crash could still leave a file locked. Researched (not assumed) whether
+openpyxl's `read_only` mode is part of that risk — confirmed via openpyxl's own docs plus a
+known reported issue: `read_only=True` keeps a genuine OS file handle open until `.close()` or
+process exit. But also confirmed a genuine crash is self-healing (the OS releases handles/locks
+on process teardown) — the real risk is a **hang**, not a crash, since a stuck-but-alive process
+keeps the lock indefinitely until a human kills it. Same bug class as the already-fixed
+`OwnedInstanceRegistry.close_owned()` hang.
+
+Separately, user needs robust handling for a real scenario: modify workbook A (file-backend,
+scratch-only, not yet committed), then need a *different*, unmodified workbook B — which links
+to A via classic cell-reference links, a data connection/Power Query, and/or needs
+recalculation — to reflect A's new values before B is itself used. Drafted two proposed PRD
+sections for review (not yet approved, not yet built):
+- **§6.2.3** (new): live-Excel hang safety — proposes running Excel-interacting work in an
+  isolated OS process with an enforced timeout, force-killing on hang, since a Python thread
+  can't cleanly interrupt a blocked COM call the way a process boundary can.
+- **§6.3.2** (new): refreshing a linked consumer workbook against a not-yet-committed source —
+  two candidate mechanisms drafted (checkpoint-commit+rollback vs. redirect-links-then-restore),
+  with a recommendation towards the latter (preserves §6.3.1's existing "real files untouched
+  until final success" invariant) but explicitly **not decided** — needs the user's sign-off,
+  especially on Power Query's v1 scope, before Specification.md work starts.
+- Also flagged: §6.3's existing "open read-only in place… faster, safer" bullet needs revisiting
+  once the hang-safety decision above is made.
+
+**Next step:** Get user approval/decision on §6.2.3 and §6.3.2's proposed directions. Then write
+the corresponding Specification.md sections (per the project's PRD→Spec→build workflow), then
+build with TDD. Do not start building any of this yet — explicitly design-first per user request.
+
 ## Last Session (2026-08-20d, Windows)
 **Status:** Ready for Next Phase
 **Working on:** Added a `demos/` folder — 7 runnable YAML workflows exercising every existing

@@ -200,6 +200,50 @@ Scope notes:
   design is needed — it's a stricter version of what `checkpoint()` already does after every
   step, just also triggered mid-step, at the exact moment a switch is about to happen.
 
+### 6.2.3 Live-Excel hang safety — **PROPOSED, pending decision (2026-08-21)**
+
+Prompted by a real, already-demonstrated bug class in this project (the `OwnedInstanceRegistry.
+close_owned()` hang fixed 2026-08-20b) plus targeted research into a related question: does
+openpyxl's `read_only` mode leave the real file locked?
+
+**Research findings** (not guesses — cited):
+- openpyxl's own docs confirm `read_only=True` uses lazy loading and *"must be explicitly
+  closed with the `close()` method"* — it keeps a genuine OS file handle open on the real path
+  until `.close()` runs or the process exits. A known, reported openpyxl issue (not just a
+  theoretical reading of the docs) confirms this in practice.
+- However: a **genuine crash is self-healing**. When a process dies — crash, `taskkill`, an
+  unhandled exception, even a forceful kill — the OS releases every handle/lock it held as
+  part of tearing the process down. Confirmed via general Windows process/handle-lifecycle
+  behavior, not specific to openpyxl.
+- **The real risk is a hang, not a crash.** If the process gets stuck (not killed) while
+  holding a `read_only` handle open on the real file, the file stays locked for exactly as long
+  as the hang lasts — and clearing a hang requires a human to notice and kill the process,
+  which *is* the "someone has to go fix that" scenario this project is trying to design away.
+  This isn't hypothetical: it's the same class of bug as the already-fixed xlwings
+  `close_owned()` hang.
+
+**Correction to §6.3's read-only bullet**: "open read-only in place… faster, safer" is not
+fully safe against this — it should be revisited once the decision below is made (likely:
+stage read-only opens too, same as read-write, just without a commit-back step needed).
+
+**Decision needed**: every live-Excel (xlwings/COM) call — `spawn`, `open`, `save`, `quit`,
+`recalculate`, `refresh_links`, `run_macro`, etc. — is a potential hang point, not just
+`close_owned()`. Proposed mechanism, not yet built:
+- Run the actual Excel-interacting work in an **isolated OS process**, not just a thread — a
+  Python thread can't forcibly interrupt a blocked COM call cleanly, but a process boundary can
+  always be killed outright regardless of what it's stuck doing.
+- The parent process enforces a timeout per call and, if exceeded, force-kills the worker
+  process *and* the Excel process(es) it owns, then reports the step as a **hard failure**
+  (`ActionExecutionError`, not a recoverable `ActionResult(status="error")`) — workbook state
+  after a forced kill can't be trusted, matching §6.8's raised-exception policy.
+- Consequence for `OwnedInstanceRegistry` (§6.2.1): a spawned Excel process's PID must be
+  recorded somewhere the *parent* can see it (e.g. a small lock file written immediately after
+  spawn) — not only held in the potentially-killed worker's own memory — so cleanup after a
+  forced kill can still find and close the right, and only the right, Excel process.
+- **Open for spec phase**: exact timeout value(s) — different operations (`open` vs. `save` vs.
+  `recalculate: full_rebuild` on a huge workbook) plausibly need different timeouts; whether
+  it's configurable per-workflow or fixed.
+
 ### 6.3 Implicit workbook lifecycle
 
 - Workbooks are **lazily opened** on first reference by any step — no mandatory `open` step.
@@ -263,6 +307,56 @@ Cost to be honest about: extra I/O for the copy-out/commit-back, and scratch-dir
 management (naming, collision-avoidance if two runs target the same workbook concurrently —
 open question, not addressed yet). Likely negligible next to Excel/xlwings overhead itself, but
 worth flagging if a very large workbook makes the copy step itself slow.
+
+### 6.3.2 Refreshing a linked "consumer" workbook against a not-yet-committed source — **PROPOSED, pending decision (2026-08-21)**
+
+**Scenario (confirmed with user, not hypothetical)**: a workflow modifies workbook A via
+file-backend actions — A's *scratch* copy has the new values, but A's real file is untouched
+until the run's final commit (§6.3.1). A separate, unmodified consumer workbook B references A
+via one or more of: classic external cell-reference links (`='[A.xlsx]Sheet1'!A1`), a data
+connection/Power Query query sourced from A, or simply needs recalculating once A's data is
+available. The workflow needs B to reflect A's *new* values before B is itself read/saved — but
+opening B and refreshing normally would pull A's *old* values, since A's real file hasn't
+changed yet.
+
+Two genuinely different mechanisms were considered:
+
+- **Option 1 — checkpoint-commit + rollback**: commit A's scratch copy to its real path early
+  (mid-run), refresh B normally (Excel resolves A's real, now-current path itself — no custom
+  link/connection handling needed for any of the three refresh types, since Excel does its own
+  resolution), and if the run fails later, restore A's real file from a snapshot taken just
+  before that early commit.
+  - Pro: works uniformly for classic links, Power Query, and recalculation, with no bespoke
+    per-mechanism code.
+  - Con: **directly contradicts §6.3.1's currently-decided invariant** — "the real file is only
+    touched once, at the very end… only if the whole run succeeded" / "on any failure, the real
+    files are never touched at all." This option requires weakening that into "committed, then
+    rolled back on a later failure" for any workbook used as an early-commit target — a bigger
+    architectural change than it first looks, not a minor addition.
+- **Option 2 — redirect-then-restore**: before refreshing B, rewrite B's *external references*
+  to point at A's scratch copy instead of A's real path; refresh; rewrite them back to A's real
+  path before B itself is committed. Preserves §6.3.1's invariant exactly — real files still
+  aren't touched until final success — but the mechanics differ sharply per refresh type:
+  - **Classic cell-reference links**: buildable via xlwings' `.api` escape hatch
+    (`ChangeLink`/`LinkSources`) — this is exactly what §7's `write_links` action and §11 item
+    18's "move-rewrite-refresh-restore" scenario already anticipate. Real, scoped work, not
+    speculative.
+  - **Data connections/Power Query**: genuinely harder — a query's source path lives in its
+    M-code/connection string, not a simple external-link table, and rewriting arbitrary M code
+    reliably is a much bigger surface. Recommend scoping v1 support narrowly (e.g. only
+    connections whose source is a plain file-path parameter) and documenting the rest as an
+    explicit, named limitation rather than silently attempting something unreliable.
+  - **Plain recalculation (F9)**: not a link problem at all — recalculating B's own formulas
+    needs no path rewriting, but a formula reading through a not-yet-refreshed link will just
+    recalculate off stale cached values. Confirms `recalculate` and `refresh_links`/query-refresh
+    are separate, ordered operations (already reflected in §7's separate action entries), not
+    one combined step.
+
+**Leaning towards Option 2** for the classic-links case specifically — it preserves the
+already-decided crash-safety invariant and reuses a mechanism the catalog already anticipated —
+with Option 1 only as a fallback if Option 2's per-mechanism complexity turns out impractical
+for Power Query. **Not decided yet**: this needs sign-off before Specification.md work starts,
+along with the exact v1 scope of Power Query support.
 
 ### 6.4 No per-action "step reference" field
 
