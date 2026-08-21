@@ -51,8 +51,7 @@ tests/
 ```
 
 **Correction**: `cli.py` was originally deferred out of v1 ("no CLI/agent wrapper" — PRD §3/§5),
-but was built once a real, concrete driving need showed up (invoking a workflow from a UiPath
-xaml as an external process) — see §6.4. It stays thin by design, exactly as this section
+but was built once a real, concrete driving need showed up (invoking a workflow from a 3rd party workflow system as an external process) — see §6.4. It stays thin by design, exactly as this section
 originally anticipated: argument parsing and JSON result formatting only, no logic of its own.
 
 ## 2. Core layer — `core.py`
@@ -651,7 +650,7 @@ exactly like `_open_read_write` does; the only difference is it never gets commi
 
 **Correction (PRD §6.3.4): `working_dir` replaces the old `tempfile.mkdtemp()`-based scratch
 dir entirely** — a fixed, predictable location (`<base>/excel_runner_runs/<yaml_stem>/`) instead
-of a random per-run temp path, so external tooling (a UiPath xaml) can construct the path itself
+of a random per-run temp path, so external tooling (e.g. a 3rd patry workflow system) can construct the path itself
 from just the yaml's filename, without reading any output field. See §6.1 for exactly how
 `<base>` is resolved (cwd default, `--working-dir` CLI flag, or `working_dir:` YAML field).
 Re-running the same yaml overwrites the previous run's `working_dir` contents automatically —
@@ -871,7 +870,7 @@ a separate, structured artifact (PRD §6.7 explains why).
 ### 6.2.1 Console/application logging (PRD §6.7.1) — **not yet built**
 
 A second, distinct output from the audit log above: real-time narration via stdlib `logging`,
-for a human (or the user's own "Unify" tool) watching a run as it happens. `runner.py`,
+for a human (or the user's own workflow tool) watching a run as it happens. `runner.py`,
 `engine.py`, and `backends.py` each get a module-level `logger = logging.getLogger(__name__)`
 (no handler/formatter configuration in library code — standard Python practice, never hijack
 whatever logging setup the importing application already has). Per PRD §6.7.1:
@@ -1058,7 +1057,7 @@ time within it.
     needs a live Windows Excel instance to develop and verify for real (§3.2/§3.3):
     `run_with_timeout`'s process-isolation mechanism, then `recalculate`/`run_macro`'s
     `timeout` param and `CalculationWaitSummary` audit-log summarization built on top of it.
-    Soak-testing real client workbooks (desktop + xaml) to establish empirical reliability is a
+    Soak-testing real client workbooks (desktop + 3rd party workflow system) to establish empirical reliability is a
     validation activity for this item, not a separate build step.
 14. **Linked-consumer-workbook refresh (PRD §6.3.2)** — **not yet built**, depends on item 10's
     `write_links`/`refresh_links` existing first (§3.4): `redirect_external_links`/
