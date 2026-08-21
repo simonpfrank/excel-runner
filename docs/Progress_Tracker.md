@@ -1,5 +1,41 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-08-21b, Windows)
+**Status:** Blocked — awaiting user approval on remaining PRD design decisions before
+Specification.md work
+**Working on:** Continued the crash/lock-safety design discussion. User confirmed **Option 2**
+for §6.3.2 (redirect-then-restore for linked-workbook refresh) — marked DECIDED; Power Query's
+exact v1 scope is still open. Two new proposed PRD sections added, neither built yet:
+- **§6.2.4**: `recalculate`/`run_macro` need an optional `timeout` param that **defaults to
+  waiting indefinitely, not a short default** — some client workbooks' plugin formulas linking
+  to large datafiles can legitimately take hours. Researched whether `Application.
+  CalculationState`/`Ready` can distinguish "still working" from "hung": both are real COM
+  properties, but independently-reported forum evidence shows polling from the same
+  thread/procedure that triggered calculation is unreliable (stays `xlPending` indefinitely) —
+  a real liveness check would need a separate watchdog process, dovetailing with §6.2.3's
+  process-isolation design. `run_macro` has no equivalent progress signal at all. Flagged as
+  needing empirical testing against real Excel before finalizing, not just docs/forum research.
+- **§6.3.3**: confirmed via direct code inspection (not assumed) that a commit-time failure —
+  the real file open elsewhere when a successful run tries to copy scratch content back — is
+  **completely unhandled today**: `ScratchManager.commit_all()` has no exception handling,
+  `run_workflow()` doesn't catch around it, and the CLI only catches `ExcelRunnerError`, so a
+  real `PermissionError` would surface as an unhandled traceback, not clean JSON. Also confirmed
+  `RunResult` doesn't expose the scratch directory path at all — even though scratch copies
+  survive a failed commit, external tooling (the user's planned UiPath xaml recovery logic) has
+  no way to find them today. Proposed: catch and structure commit failures per-workbook, attempt
+  every workbook's commit rather than stopping at the first failure, and expose the scratch dir
+  path on `RunResult` unconditionally.
+- Also answered (no code change, informational): openpyxl's read-only handle-open behavior has
+  the same likelihood regardless of directory, but staging read-only opens into our own scratch
+  dir (§6.2.3's earlier finding) changes the *impact* from "shared-file incident" to "harmless
+  orphaned temp file" — this is why it's worth doing, not because it prevents the hang itself.
+  Confirmed exactly where the scratch dir is created today: `tempfile.mkdtemp(prefix=
+  "excel_runner_")` under the OS temp dir, not currently configurable.
+
+**Next step:** Still awaiting explicit approval on §6.2.4/§6.3.3's proposed directions (and
+Power Query's v1 scope for §6.3.2) before writing Specification.md sections. Do not start
+building any of this yet.
+
 ## Last Session (2026-08-21, Windows)
 **Status:** Blocked — awaiting user approval on PRD design decisions before Specification.md work
 **Working on:** User raised a real crash-safety concern: no matter how careful the scratch-copy

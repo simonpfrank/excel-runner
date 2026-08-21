@@ -308,7 +308,7 @@ management (naming, collision-avoidance if two runs target the same workbook con
 open question, not addressed yet). Likely negligible next to Excel/xlwings overhead itself, but
 worth flagging if a very large workbook makes the copy step itself slow.
 
-### 6.3.2 Refreshing a linked "consumer" workbook against a not-yet-committed source — **PROPOSED, pending decision (2026-08-21)**
+### 6.3.2 Refreshing a linked "consumer" workbook against a not-yet-committed source — **DECIDED (2026-08-21): Option 2**
 
 **Scenario (confirmed with user, not hypothetical)**: a workflow modifies workbook A via
 file-backend actions — A's *scratch* copy has the new values, but A's real file is untouched
@@ -355,8 +355,80 @@ Two genuinely different mechanisms were considered:
 **Leaning towards Option 2** for the classic-links case specifically — it preserves the
 already-decided crash-safety invariant and reuses a mechanism the catalog already anticipated —
 with Option 1 only as a fallback if Option 2's per-mechanism complexity turns out impractical
-for Power Query. **Not decided yet**: this needs sign-off before Specification.md work starts,
-along with the exact v1 scope of Power Query support.
+for Power Query. **Decided: Option 2** (user confirmed 2026-08-21). Power Query's exact v1
+support scope (likely: only connections whose source is a plain file-path parameter, documented
+as a named limitation otherwise) is still open — to be settled in Specification.md.
+
+### 6.2.4 Configurable, per-action timeouts for long-running Excel operations — **PROPOSED, pending decision (2026-08-21)**
+
+**Problem, confirmed with user, not hypothetical**: some client workbooks have plugin/add-in
+formulas linking to large external datafiles, and a `recalculate` or `run_macro` against them
+can legitimately take hours. "Should be eradicated, but the client won't do it" — so the engine
+must tolerate genuinely long-running operations, not assume every long wait is a hang. A fixed,
+short default timeout would be actively wrong here: it would kill correct, still-working
+calculations, not just hangs.
+
+**Decision**: `recalculate` and `run_macro` (the two action types capable of running
+arbitrarily long) each take an optional `timeout` parameter (seconds). **If omitted, wait
+indefinitely — no default timeout is imposed.** This is a deliberate reversal of the usual
+"always have a safety timeout" instinct, because a short default would be a bug here, not a
+safety net.
+
+**Research findings on detecting "still working" vs. "actually stuck"** (§6.2.3's hang-safety
+mechanism still applies underneath — this section is about what, if anything, can distinguish
+legitimate long-running work from a real hang while the timeout, if any, hasn't elapsed yet):
+- `Application.CalculationState` (`xlDone`/`xlCalculating`/`xlPending`) and `Application.Ready`
+  are real, documented COM properties (Microsoft Learn) that could in principle signal
+  calculation progress.
+- **However, a real, recurring, independently-reported gotcha**: polling `CalculationState`
+  from the *same* procedure/thread that triggered the calculation is unreliable — multiple
+  independent forum reports (MrExcel, Spiceworks) describe it staying `xlPending` indefinitely,
+  because Excel's calculation runs on a background thread that the polling loop itself can
+  starve of the chance to update. A liveness check, if built, must come from a genuinely
+  separate watchdog thread/process with its own COM connection — not a poll loop inside the
+  same call that triggered the work. This dovetails with §6.2.3's process-isolation design:
+  the worker process makes the blocking `Calculate()`/macro call; a separate parent/watchdog
+  process is what could attempt a liveness probe, if one is built at all.
+- `run_macro` has **no equivalent progress signal** — an arbitrary VBA macro is opaque to us.
+  The only realistic signal is coarse: whether Excel still responds to any lightweight COM call
+  at all, not "is this specific macro nearly done." Not overstating what's detectable here.
+- **Not yet empirically verified** — docs and forum reports are a starting point, not proof for
+  *this* codebase's exact usage pattern. Needs hands-on testing against a real Excel instance
+  once the xlwings/COM phase (item 9) starts, before committing to a specific liveness-check
+  design in Specification.md.
+
+### 6.3.3 Commit-time failure when the real file is locked by something else — **PROPOSED, pending decision (2026-08-21)**
+
+**Problem, confirmed via code inspection, not hypothetical**: if a workbook's real file happens
+to be open elsewhere (a user has it open in Excel, another process has it locked) at the exact
+moment a successful run tries to commit its scratch copy back, today this is **completely
+unhandled** — `ScratchManager.commit()`/`commit_all()` (Specification.md §5.3) call
+`shutil.copy2()`/`Path.replace()` with no exception handling of their own, `run_workflow()`
+doesn't catch anything around the `commit_all()` call, and the CLI (`cli.py`) only catches
+`ExcelRunnerError` — so a real-world `PermissionError`/sharing-violation `OSError` propagates as
+an **unhandled Python traceback**, not the structured JSON error the CLI is supposed to always
+produce. The one thing that accidentally already works: since the exception happens before
+`scratch.cleanup(keep_on_failure=False)` runs, the scratch copies do survive — but nothing
+surfaces that fact today.
+
+**Also confirmed**: `RunResult` (`runner.py`) exposes only `status`, `step_results`, and
+`audit_log_path` — **not** the scratch directory path. So even when the scratch copies survive
+a failed commit, an external caller (e.g. a UiPath xaml step wrapping the CLI) has no
+programmatic way to find them today.
+
+**Decision needed**:
+1. Wrap the commit phase so a per-workbook commit failure becomes a structured error (which
+   workbook, its scratch path, the underlying `OSError`), not a raw traceback.
+2. Attempt every workbook's commit rather than stopping at the first failure, so a partial
+   commit failure reports the *complete* picture (which workbooks made it back, which didn't),
+   not just the first blocker.
+3. Expose the run's scratch directory path on `RunResult` (and therefore in the CLI's JSON
+   output) unconditionally — not only when something fails — so external tooling can always
+   locate it if it needs to, per the user's stated intent to build recovery logic around it
+   from a UiPath xaml.
+4. Open question for spec phase: does a partial commit failure (2 of 3 workbooks committed,
+   1 blocked) count as the run's overall `status`? Leaning towards still `"error"` — the run
+   didn't fully complete what it promised — but this needs to be explicit, not implied.
 
 ### 6.4 No per-action "step reference" field
 
