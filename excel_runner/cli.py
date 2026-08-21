@@ -1,9 +1,10 @@
 """CLI entrypoint: run a workflow YAML file and print its result as JSON.
 
-Exists so a workflow can be triggered from outside Python — the driving use case is a UiPath
-xaml workflow invoking this as a process/command-line step, but any external caller that can
-run a command and read stdout/exit code works the same way. Only wraps `run_workflow()`
-(Spec sec 6.1); no behavior of its own beyond argument parsing and result formatting.
+Exists so a workflow can be triggered from outside Python — the driving use case is an external
+orchestration/automation workflow invoking this as a process/command-line step, but any external
+caller that can run a command and read stdout/exit code works the same way. Only wraps
+`run_workflow()` (Spec sec 6.1); no behavior of its own beyond argument parsing and result
+formatting.
 """
 
 import argparse

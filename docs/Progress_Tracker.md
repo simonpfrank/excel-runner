@@ -1,13 +1,44 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-08-21g, Windows)
+**Status:** Ready to build — item 12 (crash/lock-safety hardening) unblocked; items 10/13/14
+now also unblocked (Windows + real Excel confirmed available)
+**Working on:** Two things. First, redacted every remaining reference to the user's internal
+tool name and automation platform (a few the user's own edits had already caught, several more
+found in `docs/Progress_Tracker.md`, `README.md`, and `excel_runner/cli.py`'s own module
+docstring) — replaced with generic language ("external orchestration/automation", "a 3rd party
+workflow tool"). Repo-wide `git grep` sweep confirms none remain anywhere.
+
+Second: confirmed we're on Windows with a real Excel install available now — this directly
+unblocks `read_links`/`write_links`, previously deferred specifically because verifying them
+needed a real, Excel-generated fixture workbook with a genuine external link (openpyxl can only
+*reflect* an external-link relationship real Excel already created, not create one from
+scratch) and no way to generate/verify that without Windows + Excel. PRD updated (§7's catalog
+rows, §12's reopened item) to record this as unblocked rather than carried forward.
+
+Also confirmed the "persist `read_links`' results in memory so `write_links` can use them as a
+source" requirement is **already fully designed for** — PRD §11 item 18 already shows
+`write_links.links: "{{ steps.original_links.output }}"`, replaying a `read_links` step's whole
+output directly via the existing step-output/templating mechanism (already in-memory for the
+run's duration). No new mechanism needed; `read_links`' output shape and `write_links`' `links`
+input shape just need to stay symmetric, which the catalog already specifies. Made this
+explicit in the PRD rather than leaving it implicit.
+
+**Next step:** Begin building. Specification.md build order item 12 (working_dir relocation,
+read-only staging, rename-based commit/rollback, console logging, CLI flags) has no external
+dependency and is fully TDD-buildable now. Items 10/13/14 (live-Excel actions incl.
+`read_links`/`write_links`, hang safety, timeouts, linked-workbook refresh) are also unblocked
+now that Windows + Excel are confirmed, but need a live Excel instance to build/verify against
+directly, rather than reasoning about it in the abstract.
+
 ## Last Session (2026-08-21f, Windows)
 **Status:** Design complete, spec written — ready to build once reviewed
 **Working on:** Wrote Specification.md sections for the entire crash/lock-safety design thread
 from this multi-session discussion (PRD §6.2.3/6.2.4/6.3.2/6.3.3/6.3.4/6.7.1, all decided).
 Concrete additions:
 - **§1**: fixed a stale claim ("no cli.py in v1") — `cli.py`/`__main__.py` added to the layout,
-  noted as built for a real reason (UiPath xaml driving need), not the originally-deferred
-  scope.
+  noted as built for a real reason (an external orchestration/automation driving need), not the
+  originally-deferred scope.
 - **§3.2/§3.3** (new): `run_with_timeout`'s process-isolation mechanism for live-Excel hang
   safety; `recalculate`/`run_macro`'s `timeout` param + `CalculationWaitSummary` audit
   summarization (`state_counts`/`last_state`/`poll_count`/`elapsed_seconds`/`outcome`).
@@ -52,7 +83,7 @@ the audit log (real-time human narration vs. after-the-fact evidence). **Correct
 feedback**: handler/stream configuration (stdout vs. stderr, formatting) is explicitly out of
 scope for excel_runner entirely — both the library and the CLI only ever call `getLogger(...)`,
 never attach handlers themselves; that's the responsibility of whatever wraps this (the user's
-"Unify" tool), not something to design here. The only thing the CLI owns is a standard
+own log-viewing tool), not something to design here. The only thing the CLI owns is a standard
 `--logging-level` argument (`DEBUG`/`INFO`/`WARNING`/`ERROR`, default `INFO`), matching the
 user's existing convention across other tools. Content-per-level guidance stands: `INFO` covers
 every step/action start+completion; `DEBUG` is a bit more detail, not a firehose;
@@ -76,9 +107,9 @@ adjust as real-world behavior is observed. Audit summary shape decided: `state_c
 `elapsed_seconds`, `outcome` (`completed`/`timed_out`/`no_signal_available` — the last one
 covers `run_macro`, which has no progress signal at all). Timeout semantics confirmed as final:
 if a timeout is specified and elapses, that's a hard failure — no retry, no partial credit,
-clean up what's safely possible and stop. Soak-testing real client workbooks (desktop + xaml)
-to establish actual reliability is noted as a planned validation activity once xlwings/COM
-(item 9) is far enough along, not a blocker for the design itself.
+clean up what's safely possible and stop. Soak-testing real client workbooks (desktop + other
+automation contexts) to establish actual reliability is noted as a planned validation activity
+once xlwings/COM (item 9) is far enough along, not a blocker for the design itself.
 
 **Next step:** §6.3.3 (commit-time failure when the real file is locked elsewhere — points
 1/2/4; point 3 already superseded by §6.3.4) is the only remaining open item before writing
@@ -90,8 +121,8 @@ design, §6.3.3 commit-failure structuring) before Specification.md work
 **Working on:** Settled the working-directory location design (§6.3.4, DECIDED) via a few
 rounds of clarifying questions with the user. Supersedes §6.3.3's "expose scratch dir on
 RunResult" idea entirely — a fixed, predictable path is more useful than a random path surfaced
-after the fact, since a xaml can construct it itself in advance from just the yaml's filename,
-with no need to read any CLI output field.
+after the fact, since external orchestration tooling can construct it itself in advance from
+just the yaml's filename, with no need to read any CLI output field.
 
 **Decided**: renamed "scratch dir" → **`working_dir`** throughout (it now holds the audit log
 too, not just workbook copies). Location: `<base>/excel_runner_runs/<yaml_stem>/` — `<base>` is
@@ -134,7 +165,7 @@ exact v1 scope is still open. Two new proposed PRD sections added, neither built
   `run_workflow()` doesn't catch around it, and the CLI only catches `ExcelRunnerError`, so a
   real `PermissionError` would surface as an unhandled traceback, not clean JSON. Also confirmed
   `RunResult` doesn't expose the scratch directory path at all — even though scratch copies
-  survive a failed commit, external tooling (the user's planned UiPath xaml recovery logic) has
+  survive a failed commit, external tooling (the user's planned automation recovery logic) has
   no way to find them today. Proposed: catch and structure commit failures per-workbook, attempt
   every workbook's commit rather than stopping at the first failure, and expose the scratch dir
   path on `RunResult` unconditionally.
@@ -228,7 +259,7 @@ tooling). Then resume `_switch_backend` (PRD §6.2.2, Spec §5.2).
 **CLI fixes**: `cli.py` had no `if __name__ == "__main__":` guard of its own (only
 `__main__.py` did), so `python excel_runner\cli.py --help` silently did nothing — it imported
 the module and defined `main()` without ever calling it. Added the guard directly to `cli.py`
-too, since a UiPath xaml step is likely to invoke a script path directly rather than
+too, since an external orchestration step is likely to invoke a script path directly rather than
 `python -m excel_runner`. Also clarified the `--env` help text: repeat the flag once per
 KEY=VALUE pair (`--env a=1 --env b=2`), not comma/semicolon-separated — not obvious from the
 original one-line help text.
@@ -292,7 +323,8 @@ imports left over from the abandoned approach.
 
 **CLI entrypoint added** (`excel_runner/cli.py`, `excel_runner/__main__.py`, `excel-runner`
 console script in `pyproject.toml`) — the actual driver for this: the user needs to invoke a
-workflow from a UiPath xaml workflow as an external process. `main(argv)` parses a workflow path
+workflow from an external orchestration/automation workflow as an external process. `main(argv)`
+parses a workflow path
 and repeatable `--env KEY=VALUE` overrides, calls `run_workflow()`, prints the `RunResult` as
 JSON to stdout, and returns 0 (success) or 1 (any step errored, or the workflow itself failed to
 load/validate/execute — caught as `ExcelRunnerError` and printed as structured JSON too). 4 new

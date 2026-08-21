@@ -28,8 +28,8 @@ the action list below skips macros, recalculation, and a few other Excel-specifi
   `OwnedInstanceRegistry.close_owned()` on Windows (`spawn()` now uses `add_book=True` so
   spawned instances register in `xw.apps`). Added a CLI entrypoint (`excel_runner/cli.py`,
   `__main__.py`, `excel-runner` console script) to run a workflow YAML file and print its
-  result as JSON — driven by the need to invoke a workflow from a UiPath xaml workflow as an
-  external process. Full quality-gate suite (pytest, ruff, mypy --strict, pyright, vulture,
+  result as JSON — driven by the need to invoke a workflow from an external orchestration
+  workflow as an external process. Full quality-gate suite (pytest, ruff, mypy --strict, pyright,
   radon) confirmed clean on Windows for the first time.
 
 ## Install and run

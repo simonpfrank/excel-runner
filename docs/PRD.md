@@ -10,7 +10,7 @@ Excel automation work is currently built as one-off scripts per project, with no
 abstraction — every project reinvents file access (openpyxl/pandas) and live-Excel automation
 (xlwings) from scratch. This is **not** an RPA tool (no click-simulation/UI automation) — it's a
 declarative, code-based automation layer for Excel workbook operations, closer in spirit to
-Ansible/GitHub Actions than to UiPath/Power Automate Desktop.
+Ansible/GitHub Actions than to RPA/UI-automation-desktop tools.
 
 Design principles established up front, driving every decision below:
 
@@ -670,8 +670,8 @@ Three things that apply to every row below, not repeated per-row:
 | `find_columns` | file | workbook, sheet, header_row, patterns: {name: pattern, ...} | Multiple named patterns → a mapping of logical name to column letter, in one step. |
 | `aggregate` — **flagged for discussion when we get to it, not resolved now** | file (pandas, in-memory) | source (step ref), group_by, value_column, operation: count\|sum\|avg | No workbook access — pure in-memory aggregation of a prior step's data. |
 | `update_summary_table` — **kept as a dedicated action; exact parameters deliberately deferred, not a phase-1 design task** | file | *(not designed yet)* | Conceptually composes `find_headers_row` + `find_row` + `find_columns` + `aggregate` + `write_row` — see §11 item 19 for a worked composed-vs-wrapper comparison kept for reference. |
-| `read_links` | file — **status downgraded, see below** | workbook | Reads current external-link target paths. |
-| `write_links` | com (raw COM object) | workbook, links: {link_id or old_path: new_path} | Rewrites external-link target paths via `ChangeLink`/`LinkSources` — real Excel object-model methods, not part of xlwings' own portable API, hence the raw-COM tier rather than file-backend or xlw. openpyxl's write support for external links isn't confirmed reliable enough to depend on. Enables the move-rewrite-refresh-restore scenario in §11 item 18. |
+| `read_links` | file (read path) — **unblocked, see below** | workbook | Reads current external-link target paths. **Output must persist as a normal step output** (PRD §10.4) — no separate in-memory mechanism needed; `{{ steps.<id>.output }}` already lives for the run's duration, which is exactly what §11 item 18's read→write round-trip relies on. |
+| `write_links` | com (raw COM object) | workbook, links: {link_id or old_path: new_path} | Rewrites external-link target paths via `ChangeLink`/`LinkSources` — real Excel object-model methods, not part of xlwings' own portable API, hence the raw-COM tier rather than file-backend or xlw. `links` is deliberately the *same shape* as `read_links`' output — a `read_links` step's whole output can be fed straight into a later `write_links` step (`links: "{{ steps.original_links.output }}"`, §11 item 18) for manual, workflow-author-controlled link rewriting, not just the move-rewrite-refresh-restore scenario that motivated it originally. |
 | `refresh_links` | xlw (tier to confirm when built) | workbook | Forces Excel to actually re-pull values through the links — distinct from just changing where they point (`read_links`/`write_links` above). |
 | `recalculate` | xlw or com, depending on `mode` | workbook, mode: normal\|full\|full_rebuild (optional, default normal) | `mode: normal` uses xlwings' portable `app.calculate()` (works on Mac and Windows) — xlw tier. `full`/`full_rebuild` require the raw COM object (`app.api.CalculateFull()`/`CalculateFullRebuild()`) — com tier, **Windows-only**; requesting either on Mac raises a clear unsupported-platform error, never a silent downgrade. |
 | `run_macro` | xlw | workbook, macro_name, args (optional list) | xlwings has a portable macro-invocation API (`app.macro(name)(...)`), works on both platforms — not a raw-COM case. |
@@ -695,8 +695,13 @@ Updated against actual build progress (Specification.md §8/§4 track this in de
   `aggregate` (its `source` param is likewise a step reference — this compounds its existing
   "flagged for discussion" status from §7/§11.17). All three become buildable once `runner.py`
   threads accumulated step-output context through to action calls.
-- **Deferred — empirically confirmed openpyxl limitation, see §7's `read_links` note**:
-  `read_links`, alongside the already-deferred `write_links`.
+- **Unblocked as of 2026-08-21 (was: deferred, empirically confirmed openpyxl limitation, see
+  §7's `read_links` note)**: `read_links`/`write_links` were blocked specifically on needing a
+  *real, Excel-generated* fixture workbook with a genuine external link in it — openpyxl can
+  only reflect a link relationship that real Excel already created, not one written from
+  scratch by openpyxl itself, and there was no confirmed way to generate/verify that fixture
+  without Windows + a real Excel install. **Both are now available** (confirmed 2026-08-21) —
+  this blocker can be resolved directly, not carried forward as an open item.
 - **Later phase (xlwings/live-Excel promotion)**: recalculate, run_macro, refresh_links, write_links.
 - **Kept, syntax deferred (not phase-1 design work)**: update_summary_table.
 - **Backlog**: export_pdf.
@@ -1347,12 +1352,14 @@ anything is still pending:
 - ~~Full templating/expression grammar depth~~ — **resolved by §10.1**: real Jinja2 gives
   `if:` comparisons/booleans for free, no bespoke evaluator to design.
 - **Whether openpyxl supports reading/writing external-link target paths — reopened, was
-  wrongly marked resolved.** The earlier "reading looks solid" call was based on reading
-  openpyxl's docs, not on testing it. Empirical test during implementation: writing a formula
-  string containing an external reference (`=[Source.xlsx]Sheet1!A1`) via openpyxl and
-  reopening the file leaves `workbook._external_links` empty — openpyxl doesn't create the
-  underlying external-link relationship from a formula at all, it only reflects one that
-  already exists in a file created by real Excel. Reading may still work *given* such a file,
+  wrongly marked resolved. Unblocked as of 2026-08-21 — Windows + a real Excel install are now
+  confirmed available, resolving the fixture-generation blocker below directly.** The earlier
+  "reading looks solid" call was based on reading openpyxl's docs, not on testing it. Empirical
+  test during implementation: writing a formula string containing an external reference
+  (`=[Source.xlsx]Sheet1!A1`) via openpyxl and reopening the file leaves `workbook._external_links`
+  empty — openpyxl doesn't create the underlying external-link relationship from a formula at
+  all, it only reflects one that already exists in a file created by real Excel. Reading may
+  still work *given* such a file,
   but there's no way to build or verify that without a real Excel-generated fixture (or manual
   zip/XML surgery to fabricate one) — a real task, not a quick check. `read_links` is
   downgraded from "resolved: file-backend" to **deferred, same bucket as `write_links`**, until
