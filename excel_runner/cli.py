@@ -1,21 +1,22 @@
-"""CLI entrypoint: run a workflow YAML file and print its result as JSON.
+"""CLI entrypoint: run a workflow YAML file.
 
 Exists so a workflow can be triggered from outside Python — the driving use case is an external
 orchestration/automation workflow invoking this as a process/command-line step, but any external
-caller that can run a command and read stdout/exit code works the same way. Only wraps
-`run_workflow()` (Spec sec 6.1); no behavior of its own beyond argument parsing and result
-formatting.
+caller that can run a command and check the exit code works the same way. Only wraps
+`run_workflow()` (Spec sec 6.1); no behavior of its own beyond argument parsing. Results live at
+the run's fixed `working_dir` path (`excel_runner_runs/<yaml_stem>/audit.jsonl`, PRD sec
+6.3.4) — an external caller can read that file directly, so nothing is printed to stdout beyond
+whatever the console logger (Spec sec 6.2.1) is configured to show.
 """
 
 import argparse
-import json
 import logging
 import sys
-from dataclasses import asdict
-from typing import Any
 
 from excel_runner.core import ExcelRunnerError
 from excel_runner.runner import run_workflow
+
+logger = logging.getLogger(__name__)
 
 
 def _parse_env_override(raw: str) -> tuple[str, str]:
@@ -39,7 +40,7 @@ def _parse_env_override(raw: str) -> tuple[str, str]:
 
 
 def main(argv: list[str] | None = None) -> int:
-    """Run a workflow YAML file and print its result as JSON to stdout.
+    """Run a workflow YAML file.
 
     Args:
         argv: Command-line arguments, excluding the program name. Defaults to `sys.argv[1:]`.
@@ -82,11 +83,9 @@ def main(argv: list[str] | None = None) -> int:
     try:
         result = run_workflow(args.workflow, env_overrides or None, working_dir=args.working_dir)
     except ExcelRunnerError as exc:
-        print(json.dumps({"status": "error", "error": asdict(exc.detail)}, default=str))
+        logger.error(exc.detail.message)
         return 1
 
-    output: dict[str, Any] = asdict(result)
-    print(json.dumps(output, default=str))
     return 0 if result.status == "success" else 1
 
 

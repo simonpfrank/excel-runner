@@ -52,7 +52,8 @@ tests/
 
 **Correction**: `cli.py` was originally deferred out of v1 ("no CLI/agent wrapper" — PRD §3/§5),
 but was built once a real, concrete driving need showed up (invoking a workflow from a 3rd party workflow system as an external process) — see §6.4. It stays thin by design, exactly as this section
-originally anticipated: argument parsing and JSON result formatting only, no logic of its own.
+originally anticipated: argument parsing only, no logic of its own — **correction (2026-08-21):
+it no longer prints the RunResult as JSON to stdout either** (see §6.4).
 
 ## 2. Core layer — `core.py`
 
@@ -916,14 +917,14 @@ rewriting to support this.
 just `discover_actions` (§5.1) wired to the real `actions` module, not a second source of truth
 that could drift from it.
 
-### 6.4 CLI — `cli.py` — **built** (2026-08-21)
+### 6.4 CLI — `cli.py` — **built** (2026-08-21, corrected same day — no longer prints JSON)
 
 ```python
 def main(argv: list[str] | None = None) -> int:
 ```
 
-Thin wrapper over `run_workflow()` — argument parsing and JSON result formatting only, no logic
-of its own (§1's correction). Args: `workflow` (positional path), `--env KEY=VALUE`
+Thin wrapper over `run_workflow()` — argument parsing only, no logic of its own (§1's
+correction). Args: `workflow` (positional path), `--env KEY=VALUE`
 (repeatable), and (added 2026-08-21, PRD §6.3.4/§6.7.1):
 
 ```python
@@ -938,6 +939,15 @@ running the workflow — setting the level on the package's parent logger, not e
 `__name__`-based logger, so it propagates down to every child logger (`excel_runner.runner`,
 etc.) that doesn't set its own explicit level. No handler or formatter configuration (§6.2.1's
 decided scope boundary).
+
+**Correction, same day (2026-08-21): no longer prints the `RunResult` as JSON to stdout.**
+Originally sketched to do so (the driving use case being external orchestration parsing
+stdout), but removed after the user found it redundant/noisy alongside console logging —
+`working_dir` is now a fixed, predictable path (PRD §6.3.4), so an external caller can read
+`working_dir/audit.jsonl` directly instead of parsing stdout, which isn't a regression for that
+use case, just a different (arguably more robust) place to get results from. `main()` now only
+returns an exit code (0/1); a caught `ExcelRunnerError`'s message is logged at `ERROR` (§6.2.1),
+not printed as JSON.
 
 ## 7. Testing approach
 

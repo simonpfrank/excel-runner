@@ -1,13 +1,17 @@
 """Unit tests for the CLI entrypoint (excel_runner.cli) — mocks run_workflow itself, since the
 integration-level, zero-mock, real-YAML/real-workbook exercise of run_workflow already exists in
-tests/integration/test_run_workflow.py. This file only tests the CLI's own argument parsing and
-result-formatting responsibility.
+tests/integration/test_run_workflow.py. This file only tests the CLI's own argument-parsing and
+exit-code responsibility. Nothing is printed to stdout (Spec sec 6.4's correction — results live
+at the run's fixed working_dir/audit.jsonl path, not stdout) beyond whatever a console logging
+handler is configured to show, which is the console-logging tests' job (test_runner_logging.py),
+not this file's.
 """
 
-import json
 import logging
 from pathlib import Path
 from unittest.mock import patch
+
+import pytest
 
 from excel_runner.cli import main
 from excel_runner.core import ErrorDetail, ValidationError
@@ -40,7 +44,7 @@ def _error_result() -> RunResult:
 
 
 class TestMain:
-    def test_success_returns_zero_and_prints_json_result(self, capsys) -> None:
+    def test_success_returns_zero(self) -> None:
         with patch(
             "excel_runner.cli.run_workflow", return_value=_success_result()
         ) as mock_run:
@@ -48,16 +52,12 @@ class TestMain:
 
         mock_run.assert_called_once_with("workflow.yaml", None, working_dir=None)
         assert exit_code == 0
-        printed = json.loads(capsys.readouterr().out)
-        assert printed["status"] == "success"
 
-    def test_step_error_returns_one(self, capsys) -> None:
+    def test_step_error_returns_one(self) -> None:
         with patch("excel_runner.cli.run_workflow", return_value=_error_result()):
             exit_code = main(["workflow.yaml"])
 
         assert exit_code == 1
-        printed = json.loads(capsys.readouterr().out)
-        assert printed["status"] == "error"
 
     def test_env_overrides_are_parsed_from_key_value_pairs(self) -> None:
         with patch(
@@ -87,16 +87,15 @@ class TestMain:
 
         assert logging.getLogger("excel_runner").level == logging.INFO
 
-    def test_validation_error_returns_one_and_prints_structured_error(
-        self, capsys
+    def test_validation_error_returns_one_and_logs_the_message(
+        self, caplog: pytest.LogCaptureFixture
     ) -> None:
         error = ValidationError(
             ErrorDetail(message="bad workflow", technical_reason="oops")
         )
         with patch("excel_runner.cli.run_workflow", side_effect=error):
-            exit_code = main(["workflow.yaml"])
+            with caplog.at_level(logging.ERROR, logger="excel_runner.cli"):
+                exit_code = main(["workflow.yaml"])
 
         assert exit_code == 1
-        printed = json.loads(capsys.readouterr().out)
-        assert printed["status"] == "error"
-        assert printed["error"]["message"] == "bad workflow"
+        assert any("bad workflow" in record.message for record in caplog.records)

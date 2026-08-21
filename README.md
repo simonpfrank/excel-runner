@@ -24,7 +24,9 @@ the action list below skips macros, recalculation, and a few other Excel-specifi
   hang-related file-lock exposure. Committing a workbook back to its real path is now
   rename-based with per-file rollback if a later workbook in the same run fails to commit.
   Nothing in `working_dir` is deleted automatically anymore. Added console logging (stdlib
-  `logging`, `--logging-level` flag) alongside the existing structured audit log.
+  `logging`, `--logging-level` flag) alongside the existing structured audit log — the CLI no
+  longer prints the `RunResult` as JSON to stdout either; since `working_dir` is now a fixed
+  path, an external caller reads `working_dir/audit.jsonl` directly instead.
 - **2026-08-20**: Added `create_sheet`/`rename_sheet`/`delete_sheet` actions (no prior way to
   add/rename/remove a worksheet). Also fixed a real design gap found while adding them: whether
   an action needs its workbook opened read-write was tracked in a hardcoded list disconnected

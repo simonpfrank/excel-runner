@@ -1,5 +1,32 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-08-21i, Windows)
+**Status:** Ready for item 13/14 or item 10's remaining live-Excel actions
+**Working on:** User manually verified item 12's console logging by attaching a handler
+(`logging.basicConfig()`) — confirmed `INFO`/`DEBUG` records are genuinely emitted, just
+invisible by default since neither the library nor the CLI attaches a handler (by design).
+Then asked to remove the CLI's `RunResult`-as-JSON stdout print entirely (it was redundant/
+noisy now that console logging exists). Flagged the tension first — that JSON print was the
+CLI's originally-documented automation contract — but proceeded once the user confirmed: since
+`working_dir` is now a fixed, predictable path (item 12), an external caller can read
+`working_dir/audit.jsonl` directly instead of parsing stdout, so this isn't actually a
+regression for that use case. `cli.py main()` now only returns an exit code; a caught
+`ExcelRunnerError` is logged at `ERROR` instead of printed as JSON. Updated `test_cli.py`
+(dropped `capsys`-based JSON assertions, added a `caplog`-based one for the error-logging path),
+Specification.md §1/§6.4, and the README changelog to match. Also clarified for the user (no
+code change) that `.bak` files live next to the *real* workbook, not inside
+`working_dir/scratch/`, and are deleted immediately on a fully successful commit — not seeing
+one after a normal run is expected, not a bug.
+
+293 tests pass, full quality gate clean.
+
+**Next step:** Item 13 (live-Excel hang safety + configurable timeouts) and item 14
+(linked-workbook refresh) both need a live Windows Excel instance to build/verify for real —
+now available. Alternatively, resume item 10's remaining live-Excel actions (`recalculate`,
+`run_macro`, `refresh_links`, `write_links`, `read_metadata`'s textbox sub-case) —
+`read_links`/`write_links` specifically are unblocked now that a real Excel-generated fixture
+can be produced to test against.
+
 ## Last Session (2026-08-21h, Windows)
 **Status:** Build order item 12 (crash/lock-safety hardening) — **done**. Ready for item 13/14
 (needs a live Windows Excel instance) or item 10's remaining live-Excel actions.
