@@ -229,7 +229,11 @@ def run_workflow(
                 if action_result.status == "error":
                     any_failed = True
                     error_message = action_result.error.message if action_result.error else ""
-                    logger.error('Step "%s" (%s): failed — %s', step.id, step.action, error_message)
+                    # A normal, anticipated "didn't work" outcome (Spec sec 4's error-handling
+                    # policy) — the loop keeps going and a workflow author can react to it via
+                    # if:. WARNING, not ERROR: ERROR is reserved for something that actually
+                    # halts the run (a raised exception, logged separately by the CLI).
+                    logger.warning('Step "%s" (%s): failed — %s', step.id, step.action, error_message)
                 else:
                     logger.info('Step "%s" (%s): %s', step.id, step.action, action_result.status)
                 stop_triggered = step.action == "stop"

@@ -66,9 +66,13 @@ class TestStepLogging:
         assert "write_cell" in messages
         assert "success" in messages
 
-    def test_error_level_logs_a_failed_step(
+    def test_warning_level_logs_a_normal_anticipated_step_error(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:
+        """An ActionResult(status="error") like find_row finding nothing is a normal,
+        anticipated outcome the workflow can react to via if: (not a raised exception) — logged
+        at WARNING, not ERROR, since ERROR is reserved for something that actually halts the
+        run."""
         _make_workbook(tmp_path / "output" / "manip.xlsx")
         workflow_path = _write_yaml(
             tmp_path / "workflow.yaml",
@@ -95,8 +99,9 @@ class TestStepLogging:
                 working_dir=str(tmp_path),
             )
 
-        error_records = [r for r in caplog.records if r.levelno >= logging.ERROR]
-        assert any("find_it" in r.message for r in error_records)
+        warning_records = [r for r in caplog.records if r.levelno == logging.WARNING]
+        assert any("find_it" in r.message for r in warning_records)
+        assert not any(r.levelno >= logging.ERROR for r in caplog.records)
 
     def test_debug_logs_resolved_params(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
