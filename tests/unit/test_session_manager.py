@@ -16,6 +16,7 @@ import pytest
 from excel_runner import engine
 from excel_runner.core import ActionExecutionError, WorkbookRef, WorkbookSession
 from excel_runner.engine import ScratchManager, SessionManager
+from tests.unit.conftest import requires_excel
 
 
 def _write_workbook(path: Path, cell_value: str = "original") -> Path:
@@ -115,11 +116,7 @@ class TestNeededBackend:
             engine._needed_backend("none")
 
 
-class TestCapabilityBackendMismatch:
-    """PRD sec 6.2.2: bidirectional backend switching isn't built yet, so a capability that
-    doesn't match a session's current backend must raise clearly rather than silently return
-    the wrong backend or crash unhelpfully."""
-
+class TestCapabilityBackendMatch:
     def test_matching_capability_returns_the_session_normally(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
@@ -140,28 +137,93 @@ class TestCapabilityBackendMismatch:
 
         assert session.backend == "file"
 
-    def test_mismatched_capability_on_a_brand_new_session_raises_clearly(self, tmp_path: Path) -> None:
-        """A brand-new session always opens file-backend today (Spec sec 5.2) — an xlw/com
-        capability request against it can't be served without switching, which isn't built
-        yet (PRD sec 6.2.2)."""
+
+@requires_excel
+class TestBackendSwitching:
+    """PRD sec 6.2.2: bidirectional backend switching, against a real Excel instance — no
+    mocks (project convention, matches test_owned_instance_registry.py)."""
+
+    def test_brand_new_session_opens_directly_on_the_needed_backend(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
         manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
 
-        with pytest.raises(ActionExecutionError) as exc_info:
-            manager.get_or_open("manip", capability="xlw")
+        try:
+            session = manager.get_or_open("manip", capability="xlw")
+            assert session.backend == "xlw"
+            assert session.handle.name == "manip.xlsx"
+        finally:
+            manager.close_all()
 
-        assert "manip" in exc_info.value.detail.message
-        assert "switch" in exc_info.value.detail.message.lower()
-
-    def test_mismatched_capability_on_an_already_open_session_raises_clearly(self, tmp_path: Path) -> None:
+    def test_switching_an_open_file_session_to_xlw_reopens_it_there(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
         manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
-        manager.get_or_open("manip", capability="file")  # opens it as file-backend first
+        file_session = manager.get_or_open("manip", capability="file")
+        file_session.handle["Sheet"]["A1"] = "written on file backend"
+        file_session.dirty = True
 
-        with pytest.raises(ActionExecutionError):
-            manager.get_or_open("manip", capability="xlw")
+        try:
+            xlw_session = manager.get_or_open("manip", capability="xlw")
+            assert xlw_session is file_session  # same session object, mutated in place
+            assert xlw_session.backend == "xlw"
+            assert xlw_session.handle.sheets["Sheet"]["A1"].value == "written on file backend"
+        finally:
+            manager.close_all()
+
+    def test_switching_an_open_xlw_session_back_to_file_reopens_it_there(self, tmp_path: Path) -> None:
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+        xlw_session = manager.get_or_open("manip", capability="xlw")
+        xlw_session.handle.sheets["Sheet"]["A1"].value = "written on xlw backend"
+        xlw_session.dirty = True
+
+        try:
+            file_session = manager.get_or_open("manip", capability="file")
+            assert file_session is xlw_session
+            assert file_session.backend == "file"
+            assert file_session.handle["Sheet"]["A1"].value == "written on xlw backend"
+        finally:
+            manager.close_all()
+
+    def test_two_workbooks_needing_xlw_share_one_excel_instance(self, tmp_path: Path) -> None:
+        real_a = _write_workbook(tmp_path / "real" / "a.xlsx")
+        real_b = _write_workbook(tmp_path / "real" / "b.xlsx")
+        workbooks = {
+            "a": WorkbookRef(name="a", file=str(real_a)),
+            "b": WorkbookRef(name="b", file=str(real_b)),
+        }
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+
+        try:
+            session_a = manager.get_or_open("a", capability="xlw")
+            session_b = manager.get_or_open("b", capability="xlw")
+            assert session_a.handle.app.pid == session_b.handle.app.pid
+        finally:
+            manager.close_all()
+
+    def test_close_all_quits_the_shared_owned_excel_instance(self, tmp_path: Path) -> None:
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+        manager.get_or_open("manip", capability="xlw")
+
+        manager.close_all()
+
+        assert manager._owned_instances.pids == ()
+
+    def test_close_all_is_a_no_op_for_the_owned_instance_when_xlw_was_never_needed(
+        self, tmp_path: Path
+    ) -> None:
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+        manager.get_or_open("manip", capability="file")
+
+        manager.close_all()  # should not raise, nothing xlw-related was ever spawned
+
+        assert manager._owned_instances.pids == ()
 
 
 class TestCreateIfMissing:

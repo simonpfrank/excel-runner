@@ -22,4 +22,6 @@ docs/research/
 /excel_runner_runs/
 tests/data/agent_completion_check_real/counter.txt
 demos/output/
+/input/
+/output/
 

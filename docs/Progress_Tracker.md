@@ -1,5 +1,40 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-08-26, Windows)
+**Status:** `recalculate` action built and fully tested — first of the "known gaps" from the
+`input/` migration project (see `input/Instructions.md`).
+**Working on:** Built via TDD, real Excel throughout (no mocks, project convention):
+- **`SessionManager` bidirectional backend switching**: `get_or_open` now switches an
+  already-open session's backend in place (file<->xlw, both directions) instead of raising —
+  save (if dirty) -> close -> reopen, strictly in that order, to avoid a Windows file-lock
+  race. Verified empirically that opening two workbooks via `app.books.open()` on the same
+  `xw.App` puts both in the same Excel process, so `SessionManager` now spawns and reuses one
+  shared `OwnedInstanceRegistry` App instance for the whole run (not one per workbook) — needed
+  for cross-workbook links to resolve/recalculate correctly later. `close_all()` now dispatches
+  save/close by backend and also quits the shared owned instance.
+- **`backends.py` recalculation primitives**: `xlw_calculate_all` (portable, scope=all/normal),
+  `com_calculate_workbook` (loops `Worksheet.Calculate()` over every sheet — `Workbook.Calculate`
+  does not exist in the COM object model at all, found by a failing test), `com_calculate_sheet`,
+  `com_calculate_full`/`com_calculate_full_rebuild` (always application-wide — no per-workbook
+  equivalent), `com_wait_until_calculation_done` (polls `CalculationState`, bounded timeout).
+- **`recalculate` action** (`@com_action(writes=True)`): `scope` (`sheet`/`workbook`/`all`,
+  default `workbook`), `mode` (`normal`/`full`/`full_rebuild`, default `normal`), `sheet`
+  (optional, only for `scope: sheet`, falls back to the active sheet + `output.warning` if
+  omitted). Validates `full`/`full_rebuild` require `scope: all`, and `sheet` requires
+  `scope: sheet` — both raise `ActionExecutionError` otherwise. Always saves before returning.
+- Updated `test_registry.py`/`test_list_actions.py` allowlists, `vulture_whitelist.py`, README
+  (status, changelog, action reference, not-yet-available list), and the `excel-runner-yaml`
+  SKILL.md action catalog.
+
+298 unit tests pass (up from 293), full quality gate clean (ruff, mypy --strict, pyright on
+changed files, vulture, radon — no D+ complexity introduced).
+
+**Next step:** Extend `input/workflow.yaml` with a `recalculate` step for `backtesting_manip`
+(config step 6), re-validate (dry-run), re-back-up `input/_backup/` fresh, run for real, verify
+output. Then continue to the next gap in `input/Instructions.md`'s "Known gaps" list
+(external-link repointing, config step 9) — same discuss -> approve -> TDD -> extend -> test ->
+docs -> repeat cycle.
+
 ## Last Session (2026-08-21i, Windows)
 **Status:** Ready for item 13/14 or item 10's remaining live-Excel actions
 **Working on:** User manually verified item 12's console logging by attaching a handler

@@ -15,6 +15,7 @@ that difference, which is exactly why it was chosen over raw `win32com` (PRD sec
 
 import re
 import shutil
+import time
 from typing import Any, Literal
 
 import openpyxl
@@ -457,6 +458,104 @@ def xlw_save_workbook(book: xw.Book) -> None:
         book: The workbook to save.
     """
     book.save()
+
+
+# --- Recalculation (PRD sec 7's `recalculate` action) --------------------------------------
+#
+# `app.calculate()` is xlwings' own portable call — the only one of this group that isn't
+# `com_`-prefixed, since it isn't reaching through `.api` at all. Everything else here needs
+# per-workbook/per-sheet granularity or the app-wide "full"/"full_rebuild" force-refresh modes,
+# neither of which xlwings exposes on its own portable surface — hence the raw COM object.
+
+# COM's `Application.CalculationState` enum (xlCalculationState) — not wrapped by xlwings,
+# these are the raw, stable Excel constants.
+_XL_CALCULATION_DONE = 0  # xlDone
+_DEFAULT_CALCULATION_WAIT_TIMEOUT_SECONDS = 300.0
+_CALCULATION_POLL_INTERVAL_SECONDS = 0.25
+
+
+def xlw_calculate_all(app: xw.App) -> None:
+    """Recalculate every open workbook in `app` (xlwings' own portable API).
+
+    Args:
+        app: The App instance whose open workbooks should recalculate.
+    """
+    app.calculate()
+
+
+def com_calculate_workbook(book: xw.Book) -> None:
+    """Recalculate every sheet in a single workbook, via COM.
+
+    There is no `Workbook.Calculate` in the Excel object model at all — only
+    `Application.Calculate` (every open workbook) and `Worksheet.Calculate` (one sheet).
+    Workbook-scoped recalculation is built here as looping `Worksheet.Calculate` over every
+    sheet in `book` — confirmed necessary the hard way: `book.api.Calculate()` itself raises
+    `AttributeError`/COM "Unknown name" since the member genuinely doesn't exist.
+
+    Args:
+        book: The workbook to recalculate.
+    """
+    for sheet in book.sheets:
+        sheet.api.Calculate()
+
+
+def com_calculate_sheet(book: xw.Book, sheet: str) -> None:
+    """Recalculate a single worksheet, via COM (no portable xlwings equivalent exists at this
+    granularity).
+
+    Args:
+        book: The workbook containing the sheet.
+        sheet: Worksheet name.
+    """
+    book.sheets[sheet].api.Calculate()
+
+
+def com_calculate_full(app: xw.App) -> None:
+    """Force a full recalculation of every open workbook in `app`, including cells Excel
+    wouldn't otherwise consider dirty — always application-wide, there is no per-workbook
+    equivalent in COM.
+
+    Args:
+        app: The App instance to fully recalculate.
+    """
+    app.api.CalculateFull()
+
+
+def com_calculate_full_rebuild(app: xw.App) -> None:
+    """Force a full rebuild recalculation (rechecks dependency trees too, not just marks-dirty
+    cells) of every open workbook in `app` — always application-wide, there is no per-workbook
+    equivalent in COM.
+
+    Args:
+        app: The App instance to fully rebuild-recalculate.
+    """
+    app.api.CalculateFullRebuild()
+
+
+def com_wait_until_calculation_done(
+    app: xw.App, timeout: float = _DEFAULT_CALCULATION_WAIT_TIMEOUT_SECONDS
+) -> None:
+    """Block until `app`'s calculation has actually finished.
+
+    Excel can return control from a Calculate()/CalculateFull() call before a large model has
+    actually finished recalculating — saving before that completes would silently persist
+    stale values. Polls `Application.CalculationState` rather than trusting the call to be
+    synchronous.
+
+    Args:
+        app: The App instance to wait on.
+        timeout: Maximum seconds to wait before giving up.
+
+    Raises:
+        TimeoutError: If calculation hasn't finished within `timeout`.
+    """
+    deadline = time.monotonic() + timeout
+    while app.api.CalculationState != _XL_CALCULATION_DONE:
+        if time.monotonic() >= deadline:
+            raise TimeoutError(
+                f"Excel calculation did not finish within {timeout} seconds"
+            )
+        time.sleep(_CALCULATION_POLL_INTERVAL_SECONDS)
 
 
 # --- xlwings — owned-instance tracking (PRD sec 6.2.1, Spec sec 3.1) ----------------------

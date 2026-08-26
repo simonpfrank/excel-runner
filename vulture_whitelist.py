@@ -59,6 +59,7 @@ actions.copy
 actions.read_metadata
 actions.write_row
 actions.stop
+actions.recalculate
 
 backends.open_workbook
 
@@ -82,6 +83,12 @@ backends.OwnedInstanceRegistry.close_owned
 backends.xlw_open_workbook
 backends.xlw_close_workbook
 backends.xlw_save_workbook
+backends.xlw_calculate_all
+backends.com_calculate_workbook
+backends.com_calculate_sheet
+backends.com_calculate_full
+backends.com_calculate_full_rebuild
+backends.com_wait_until_calculation_done
 
 # `backends.rename_sheet` assigns `worksheet.title = new_name` — openpyxl's own writable
 # property on its Worksheet class, not something we own, but vulture can't tell that and flags

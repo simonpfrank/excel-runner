@@ -29,6 +29,7 @@ class TestDiscoverActions:
             "find_row",
             "find_column",
             "find_columns",
+            "recalculate",
             "stop",
         }
 

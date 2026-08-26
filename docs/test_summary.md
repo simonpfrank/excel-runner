@@ -146,6 +146,16 @@ Each action tested directly against a real openpyxl fixture workbook wrapped in 
 - Positional mode: writes values in order starting from a given column.
 - Positional mode without `start_column` raises a clear error.
 
+**test_recalculate.py — `recalculate`** (xlwings-backed, live Excel)
+- Registers as a `com` action.
+- Default scope/mode (`workbook`/`normal`) recalculates every sheet in the workbook.
+- `scope: sheet` recalculates only the named sheet.
+- `scope: sheet` without `sheet` falls back to the active sheet and adds `output.warning`.
+- `scope: all` with `mode: full`/`full_rebuild` recalculates.
+- Always saves before returning, clearing `session.dirty`.
+- `sheet` given with a non-`sheet` scope raises a clear error.
+- `mode: full`/`full_rebuild` with a non-`all` scope raises a clear error.
+
 ## Unit tests — action types, registry, public API
 
 **test_action_types.py**
@@ -167,7 +177,7 @@ Each action tested directly against a real openpyxl fixture workbook wrapped in 
 
 **test_list_actions.py — `list_actions()`**
 - Returns a tuple of `ActionSpec`s.
-- Includes every one of the 19 built actions.
+- Includes every one of the 20 built actions.
 - Every entry has a description.
 - Consistent with what `discover_actions()` itself returns.
 
@@ -213,6 +223,8 @@ Raw openpyxl-mechanics tests, no `ActionResult`/session wrapping.
 - `xlw_open_workbook`: opens an existing workbook; a missing file raises `FileNotFoundError`.
 - `xlw_close_workbook`: closes the book without quitting the whole app.
 - `xlw_save_workbook`: saves in place and the change persists.
+- `com_calculate_workbook`/`com_calculate_sheet`/`xlw_calculate_all`/`com_calculate_full`/`com_calculate_full_rebuild`: each updates a live formula's result.
+- `com_wait_until_calculation_done`: raises `TimeoutError` if `CalculationState` never reports done within the timeout (fake app, no real Excel needed).
 
 ## Unit tests — validation (`tests/unit/test_validation.py`)
 
@@ -325,10 +337,16 @@ Both tiers: tier 1 (static schema, no workbook access) and tier 2 (dry-run step-
 - `"file"` capability needs the file backend; `"xlw"` and `"com"` both need the xlw backend.
 - `"depends_on_param"` and `"none"` capabilities aren't resolvable here (need a live action call).
 
-**TestCapabilityBackendMismatch**
+**TestCapabilityBackendMatch**
 - A matching capability returns the session normally.
 - The default capability (unset) is treated as `"file"`, unchanged from before this param existed.
-- A mismatched capability raises clearly, whether the session is brand new or already open.
+
+**TestBackendSwitching** (xlwings-backed, live Excel)
+- A brand-new session opens directly on the needed backend (no mismatch/raise).
+- Switching an open file session to `xlw` reopens it there, preserving in-memory writes.
+- Switching an open `xlw` session back to file reopens it there, preserving in-memory writes.
+- Two workbooks needing `xlw` share one Excel instance (`app.pid` matches).
+- `close_all()` quits the shared owned Excel instance; is a no-op when `xlw` was never needed.
 
 **TestCreateIfMissing**
 - Read-only + `create_if_missing` creates the file at the real path.

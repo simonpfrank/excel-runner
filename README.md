@@ -8,15 +8,21 @@ Design notes live in [`docs/PRD.md`](docs/PRD.md) and [`docs/Specification.md`](
 ## Status
 
 v1 file-backend engine is built and tested: loading, templating, validation, session/scratch
-management, 19 actions, and the orchestration loop (`run_workflow`). A CLI entrypoint is also
+management, 20 actions, and the orchestration loop (`run_workflow`). A CLI entrypoint is also
 available (`python -m excel_runner`, the `excel-runner` console script, or running
-`excel_runner/cli.py` directly) for triggering a run from outside Python. Every action so far
-runs against files directly via openpyxl — no live Excel process involved, which is also why
-the action list below skips macros, recalculation, and a few other Excel-specific things (see
-[Not yet available](#not-yet-available)). Live-Excel support (via xlwings) is in progress.
+`excel_runner/cli.py` directly) for triggering a run from outside Python. Almost every action
+runs against files directly via openpyxl — no live Excel process involved. The exception is
+`recalculate`, which needs a real, locally-spawned Excel instance (via xlwings/COM) — the
+session it's given switches to that backend automatically. A few other Excel-specific things
+still aren't built (see [Not yet available](#not-yet-available)).
 
 ## Changelog
 
+- **2026-08-26**: Added `recalculate` (live-Excel formula recalculation via xlwings/COM).
+  `SessionManager` now supports bidirectional file<->xlw backend switching mid-run (closing
+  and reopening a workbook's handle in place) instead of raising, and every xlw/com-capability
+  session in a run shares one lazily-spawned Excel instance so cross-workbook links resolve
+  correctly.
 - **2026-08-21**: Crash/lock-safety hardening. `working_dir` (`excel_runner_runs/<yaml_stem>/`,
   under cwd by default or `--working-dir`) replaces the old random temp directory — a fixed,
   predictable location external tooling can construct itself from just the yaml's filename.
@@ -315,7 +321,7 @@ Writes one value to one cell. A value starting with `=` is stored as a formula.
 ```
 
 Note: openpyxl doesn't evaluate formulas — reading `D10` back gives `None`/stale data until
-the file is recalculated in real Excel (recalculation isn't built yet, see below).
+the workbook is recalculated (see `recalculate` below).
 
 #### `write_range`
 
@@ -514,6 +520,31 @@ absent from the output — not an error.
 
 Output: logical name → column letter (e.g. `.output.region`).
 
+#### `recalculate`
+
+Forces Excel to recalculate formulas, then saves immediately. Needs a real, locally-spawned
+Excel instance — the workbook's session switches to that backend automatically the first time
+this (or another live-Excel) action needs it, closing/reopening its openpyxl handle in the
+process. Every workbook a run opens this way shares one Excel instance, so cross-workbook
+links resolve correctly.
+
+| Field | Required | Notes |
+|---|---|---|
+| `scope` | no | `"sheet"`, `"workbook"` (default), or `"all"` (every workbook open in this run's shared Excel instance) |
+| `mode` | no | `"normal"` (default), `"full"`, or `"full_rebuild"` — the latter two are always application-wide in Excel, so they require `scope: "all"` |
+| `sheet` | no | only meaningful with `scope: "sheet"`; if omitted, the active sheet is used and `.output.warning` names which one |
+
+```yaml
+- id: recalc_manip
+  action: recalculate
+  workbook: manip
+  scope: workbook
+  mode: normal
+```
+
+Output: `.output.scope`, `.output.mode`, plus `.output.sheet`/`.output.warning` when `scope` is
+`"sheet"`.
+
 ## Not yet available
 
 Flagged clearly rather than silently missing:
@@ -523,7 +554,7 @@ Flagged clearly rather than silently missing:
   yet.
 - **`read_links`, `write_links`** — reading/rewriting external workbook links. A real
   limitation in openpyxl (not just unbuilt), see `docs/PRD.md` §7.
-- **`refresh_links`, `recalculate`, `run_macro`, `export_pdf`** — all need a live Excel session
+- **`refresh_links`, `run_macro`, `export_pdf`** — all need a live Excel session
   (via xlwings), which these specific actions don't use yet.
 - **`read_metadata` with `target: textboxes`** — same live-Excel limitation; raises a clear
   error if requested.

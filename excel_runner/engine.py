@@ -278,10 +278,16 @@ class SessionManager:
 
     Read/write mode is caller-specified, not statically inferred — tier-2 validation
     (Spec sec 5.4, not built yet) will compute that and hand it in later; for now the caller
-    decides. Bidirectional backend switching (file <-> xlw mid-run, PRD sec 6.2.2) isn't built
-    yet either — it needs the remaining live-Excel-phase pieces (PRD sec 8, Spec sec 8 item 10)
-    — `get_or_open` currently raises rather than switching when a capability doesn't match a
-    session's current backend, see below.
+    decides. Bidirectional backend switching (file <-> xlw mid-run, PRD sec 6.2.2) is built:
+    `get_or_open` switches a session's backend in place (closing/reopening its handle) rather
+    than raising, when a capability doesn't match a session's current backend.
+
+    Every xlw/com-capability session opened by this manager, for every workbook, shares one
+    lazily-spawned Excel instance (`self._owned_instances`, spawned on first need) — not one
+    instance per workbook. Verified empirically: two workbooks opened via `app.books.open()`
+    on the same `xw.App` land in the same Excel process (same `app.pid` on both), which is
+    also what lets Excel resolve/recalculate live links between them. A per-workbook instance
+    would defeat that.
 
     Args:
         workbooks: The workflow's `workbooks:` registry, name to WorkbookRef.
@@ -294,6 +300,15 @@ class SessionManager:
         self._workbooks = workbooks
         self._scratch = scratch
         self._sessions: dict[str, WorkbookSession] = {}
+        self._owned_instances = backends.OwnedInstanceRegistry()
+        self._app: Any = None
+
+    def _shared_app(self) -> Any:
+        """Return the run's one shared, lazily-spawned Excel instance, spawning it on first
+        need (PRD sec 6.2.1) — never one instance per workbook, see class docstring."""
+        if self._app is None:
+            self._app = self._owned_instances.spawn()
+        return self._app
 
     def get_or_open(
         self,
@@ -317,77 +332,104 @@ class SessionManager:
                 yet), so this only matters for detecting a mismatch, not yet for resolving one.
 
         Returns:
-            The (possibly newly-opened) WorkbookSession, on the backend `capability` needs.
+            The (possibly newly-opened, possibly just-switched) WorkbookSession, on the
+            backend `capability` needs.
 
         Raises:
-            ActionExecutionError: If `name` isn't in the registry, its file doesn't exist and
-                `create_if_missing` isn't set, or the session would need a backend switch that
-                isn't built yet (PRD sec 6.2.2).
+            ActionExecutionError: If `name` isn't in the registry, or its file doesn't exist
+                and `create_if_missing` isn't set.
         """
+        needed = _needed_backend(capability)
         if name in self._sessions:
             session = self._sessions[name]
-        else:
-            if name not in self._workbooks:
-                raise ActionExecutionError(
-                    ErrorDetail(
-                        message=f'Workbook "{name}" is not declared in the workbooks: registry.',
-                        technical_reason=f"SessionManager.get_or_open: unknown workbook name {name!r}",
-                    )
-                )
-            ref = self._workbooks[name]
-            session = (
-                self._open_read_write(name, ref)
-                if mode == "read_write"
-                else self._open_read_only(name, ref)
-            )
-            self._sessions[name] = session
+            if session.backend != needed:
+                self._switch_backend(session, needed)
+            return session
 
-        needed = _needed_backend(capability)
-        if session.backend != needed:
+        if name not in self._workbooks:
             raise ActionExecutionError(
                 ErrorDetail(
-                    message=(
-                        f'Workbook "{name}" is open on the "{session.backend}" backend, but this '
-                        f'step needs "{needed}" — switching backends mid-run isn\'t built yet '
-                        "(PRD sec 6.2.2)."
-                    ),
-                    technical_reason=(
-                        f"SessionManager.get_or_open: capability {capability!r} needs backend "
-                        f"{needed!r}, session {name!r} is currently on {session.backend!r}"
-                    ),
+                    message=f'Workbook "{name}" is not declared in the workbooks: registry.',
+                    technical_reason=f"SessionManager.get_or_open: unknown workbook name {name!r}",
                 )
             )
+        ref = self._workbooks[name]
+        session = (
+            self._open_read_write(name, ref, needed)
+            if mode == "read_write"
+            else self._open_read_only(name, ref, needed)
+        )
+        self._sessions[name] = session
         return session
 
-    def _open_read_write(self, name: str, ref: WorkbookRef) -> WorkbookSession:
+    def _open_handle(
+        self, scratch_path: Path, mode: Literal["read_only", "read_write"], backend: Literal["file", "xlw"]
+    ) -> Any:
+        if backend == "file":
+            return backends.open_workbook(str(scratch_path), mode=mode)
+        return backends.xlw_open_workbook(self._shared_app(), str(scratch_path), mode)
+
+    def _open_read_write(
+        self, name: str, ref: WorkbookRef, backend: Literal["file", "xlw"] = "file"
+    ) -> WorkbookSession:
         real_path = Path(ref.file)
         scratch_path = self._scratch.stage(name, real_path)
         if not scratch_path.exists():
             self._create(ref, scratch_path)
-        handle = backends.open_workbook(str(scratch_path), mode="read_write")
+        handle = self._open_handle(scratch_path, "read_write", backend)
         return WorkbookSession(
             name=name,
-            backend="file",
+            backend=backend,
             handle=handle,
             path=str(scratch_path),
             mode="read_write",
             scratch_path=scratch_path,
         )
 
-    def _open_read_only(self, name: str, ref: WorkbookRef) -> WorkbookSession:
+    def _open_read_only(
+        self, name: str, ref: WorkbookRef, backend: Literal["file", "xlw"] = "file"
+    ) -> WorkbookSession:
         real_path = Path(ref.file)
         scratch_path = self._scratch.stage(name, real_path, writes=False)
         if not scratch_path.exists():
             self._create(ref, scratch_path)
-        handle = backends.open_workbook(str(scratch_path), mode="read_only")
+        handle = self._open_handle(scratch_path, "read_only", backend)
         return WorkbookSession(
             name=name,
-            backend="file",
+            backend=backend,
             handle=handle,
             path=str(scratch_path),
             mode="read_only",
             scratch_path=scratch_path,
         )
+
+    def _switch_backend(self, session: WorkbookSession, needed: Literal["file", "xlw"]) -> None:
+        """Switch an already-open session's backend in place (PRD sec 6.2.2).
+
+        Save-then-close-then-reopen, strictly in that order, with nothing else interleaved —
+        both backends' save()/close() calls are synchronous, so this ordering is what avoids a
+        Windows file-lock race (the new backend opening the same scratch path before the old
+        one has actually released it).
+
+        Args:
+            session: The session to switch — mutated in place (`WorkbookSession` is
+                deliberately not frozen).
+            needed: The backend to switch to.
+        """
+        if session.backend == needed:
+            return
+        if session.dirty:
+            if session.backend == "file":
+                backends.save_workbook(session.handle, session.path)
+            else:
+                backends.xlw_save_workbook(session.handle)
+            session.dirty = False
+        if session.backend == "file":
+            backends.close_workbook(session.handle)
+        else:
+            backends.xlw_close_workbook(session.handle)
+        session.handle = self._open_handle(Path(session.path), session.mode, needed)
+        session.backend = needed
 
     def _create(self, ref: WorkbookRef, at_path: Path) -> None:
         if not ref.create_if_missing:
@@ -404,7 +446,10 @@ class SessionManager:
     def _save_dirty_staged_sessions(self) -> None:
         for session in self._sessions.values():
             if session.scratch_path is not None and session.dirty:
-                backends.save_workbook(session.handle, session.path)
+                if session.backend == "file":
+                    backends.save_workbook(session.handle, session.path)
+                else:
+                    backends.xlw_save_workbook(session.handle)
                 session.dirty = False
 
     def checkpoint(self) -> None:
@@ -431,20 +476,29 @@ class SessionManager:
         self._scratch.commit_all()
 
     def close_all(self) -> None:
-        """Close every open session, attempting all of them even if some fail.
+        """Close every open session, then quit the shared owned Excel instance (if one was ever
+        spawned), attempting all of it even if some steps fail.
 
         Raises:
-            ExceptionGroup: If one or more sessions failed to close. Every session still gets
-                a close attempt regardless (PRD sec 6.3's crash-safety requirement) — this
-                isn't a defensive catch-and-ignore, every failure is still surfaced, just
-                after giving every other session a chance to close too.
+            ExceptionGroup: If one or more sessions, or the owned Excel instance, failed to
+                close. Every session still gets a close attempt regardless (PRD sec 6.3's
+                crash-safety requirement) — this isn't a defensive catch-and-ignore, every
+                failure is still surfaced, just after giving every other session (and the
+                owned instance) a chance to close too.
         """
         errors: list[Exception] = []
         for session in self._sessions.values():
             try:
-                backends.close_workbook(session.handle)
+                if session.backend == "file":
+                    backends.close_workbook(session.handle)
+                else:
+                    backends.xlw_close_workbook(session.handle)
             except Exception as exc:  # noqa: BLE001 - intentional, see docstring
                 errors.append(exc)
+        try:
+            self._owned_instances.close_owned()
+        except ExceptionGroup as exc:
+            errors.extend(exc.exceptions)
         if errors:
             raise ExceptionGroup(
                 "failed to close one or more workbook sessions", errors

@@ -21,6 +21,7 @@ from excel_runner.core import (
     ActionResult,
     ErrorDetail,
     WorkbookSession,
+    com_action,
     control_action,
     file_action,
 )
@@ -74,6 +75,95 @@ def close(session: WorkbookSession) -> ActionResult:
     """
     backends.close_workbook(session.handle)
     return ActionResult(status="success", output={})
+
+
+@com_action(writes=True)
+def recalculate(
+    session: WorkbookSession,
+    scope: Literal["sheet", "workbook", "all"] = "workbook",
+    mode: Literal["normal", "full", "full_rebuild"] = "normal",
+    sheet: str | None = None,
+) -> ActionResult:
+    """Force Excel to recalculate formulas in a live session, then save the result immediately.
+
+    Requires a live Excel session (the `com` capability puts `session` on the `xlw` backend,
+    switching it there automatically if it wasn't already — PRD sec 6.2.2). Always saves
+    before returning, regardless of the session's dirty-tracking, so the recalculated values
+    are on disk immediately rather than deferred to end-of-run commit.
+
+    `mode: "full"`/`"full_rebuild"` are always application-wide in Excel — there is no
+    per-workbook or per-sheet equivalent in the COM object model — so they require
+    `scope: "all"`.
+
+    Args:
+        session: The workbook session to recalculate (switched to the `xlw` backend first if
+            needed).
+        scope: What to recalculate — `"sheet"` (one worksheet), `"workbook"` (default, every
+            sheet in this workbook), or `"all"` (every workbook open in this run's shared
+            Excel instance).
+        mode: `"normal"` (default, only cells Excel considers dirty), `"full"` (force every
+            formula to recompute), or `"full_rebuild"` (force recompute and re-check
+            dependency trees too). `"full"`/`"full_rebuild"` require `scope: "all"`.
+        sheet: Worksheet name, only meaningful when `scope: "sheet"`. If omitted, the
+            workbook's active sheet is used instead, and the result's `output.warning` names
+            which sheet that was.
+
+    Returns:
+        A success result. `output` echoes the effective `scope`/`mode`, plus `sheet` when
+        `scope` is `"sheet"`, plus `warning` if `sheet` had to fall back to the active sheet.
+
+    Raises:
+        ActionExecutionError: If `sheet` is given with a `scope` other than `"sheet"`
+            (ambiguous), or if `mode` is `"full"`/`"full_rebuild"` with a `scope` other than
+            `"all"` (not possible in the Excel object model).
+    """
+    if sheet is not None and scope != "sheet":
+        raise ActionExecutionError(
+            ErrorDetail(
+                message=(
+                    f'recalculate: `sheet` was given but `scope` is "{scope}" — `sheet` only '
+                    'applies when `scope` is "sheet".'
+                ),
+                technical_reason=f"recalculate called with sheet={sheet!r}, scope={scope!r}",
+            )
+        )
+    if mode in ("full", "full_rebuild") and scope != "all":
+        raise ActionExecutionError(
+            ErrorDetail(
+                message=(
+                    f'recalculate: mode "{mode}" is always application-wide in Excel (there is '
+                    f'no per-{scope} equivalent) — use scope: "all", or mode: "normal" for a '
+                    "single sheet/workbook."
+                ),
+                technical_reason=f"recalculate called with mode={mode!r}, scope={scope!r}",
+            )
+        )
+
+    book = session.handle
+    app = book.app
+    output: dict[str, Any] = {"scope": scope, "mode": mode}
+
+    if scope == "sheet":
+        if sheet is None:
+            sheet = book.sheets.active.name
+            output["warning"] = f'recalculate: `sheet` not specified — used the active sheet "{sheet}".'
+        assert sheet is not None
+        output["sheet"] = sheet
+        backends.com_calculate_sheet(book, sheet)
+    elif scope == "workbook":
+        backends.com_calculate_workbook(book)
+    elif mode == "normal":
+        backends.xlw_calculate_all(app)
+    elif mode == "full":
+        backends.com_calculate_full(app)
+    else:
+        backends.com_calculate_full_rebuild(app)
+
+    backends.com_wait_until_calculation_done(app)
+    backends.xlw_save_workbook(book)
+    session.dirty = False
+
+    return ActionResult(status="success", output=output)
 
 
 @control_action

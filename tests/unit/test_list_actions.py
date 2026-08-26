@@ -15,7 +15,8 @@ class TestListActions:
         names = {spec.name for spec in list_actions()}
         assert "read_range" in names
         assert "write_cell" in names
-        assert len(names) == 19
+        assert "recalculate" in names
+        assert len(names) == 20
 
     def test_each_entry_has_a_description(self) -> None:
         specs = {spec.name: spec for spec in list_actions()}
