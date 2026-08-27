@@ -146,7 +146,9 @@ def recalculate(
     if scope == "sheet":
         if sheet is None:
             sheet = book.sheets.active.name
-            output["warning"] = f'recalculate: `sheet` not specified — used the active sheet "{sheet}".'
+            output["warning"] = (
+                f'recalculate: `sheet` not specified — used the active sheet "{sheet}".'
+            )
         assert sheet is not None
         output["sheet"] = sheet
         backends.com_calculate_sheet(book, sheet)

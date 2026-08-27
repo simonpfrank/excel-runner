@@ -30,7 +30,9 @@ def _write_workbook(path: Path, cell_value: str = "original") -> Path:
 
 
 class TestGetOrOpen:
-    def test_opens_an_existing_workbook_read_write_by_default(self, tmp_path: Path) -> None:
+    def test_opens_an_existing_workbook_read_write_by_default(
+        self, tmp_path: Path
+    ) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
         manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
@@ -65,7 +67,9 @@ class TestGetOrOpen:
         assert str(tmp_path / "working" / "scratch") in session.path
         assert session.path != str(real)
 
-    def test_second_call_for_the_same_name_returns_the_cached_session(self, tmp_path: Path) -> None:
+    def test_second_call_for_the_same_name_returns_the_cached_session(
+        self, tmp_path: Path
+    ) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
         manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
@@ -81,8 +85,12 @@ class TestGetOrOpen:
             manager.get_or_open("nonexistent")
         assert "nonexistent" in exc_info.value.detail.message
 
-    def test_missing_file_without_create_if_missing_raises_a_clear_error(self, tmp_path: Path) -> None:
-        workbooks = {"manip": WorkbookRef(name="manip", file=str(tmp_path / "missing.xlsx"))}
+    def test_missing_file_without_create_if_missing_raises_a_clear_error(
+        self, tmp_path: Path
+    ) -> None:
+        workbooks = {
+            "manip": WorkbookRef(name="manip", file=str(tmp_path / "missing.xlsx"))
+        }
         manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
         with pytest.raises(ActionExecutionError) as exc_info:
             manager.get_or_open("manip")
@@ -105,7 +113,8 @@ class TestNeededBackend:
 
     def test_depends_on_param_capability_is_not_resolvable_here(self) -> None:
         """read_metadata's real capability depends on its target: param at runtime — that
-        resolution isn't built yet (Spec sec 5.1), so this can't be mapped to a backend yet."""
+        resolution isn't built yet (Spec sec 5.1), so this can't be mapped to a backend yet.
+        """
         with pytest.raises(ActionExecutionError):
             engine._needed_backend("depends_on_param")
 
@@ -117,7 +126,9 @@ class TestNeededBackend:
 
 
 class TestCapabilityBackendMatch:
-    def test_matching_capability_returns_the_session_normally(self, tmp_path: Path) -> None:
+    def test_matching_capability_returns_the_session_normally(
+        self, tmp_path: Path
+    ) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
         manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
@@ -143,7 +154,9 @@ class TestBackendSwitching:
     """PRD sec 6.2.2: bidirectional backend switching, against a real Excel instance — no
     mocks (project convention, matches test_owned_instance_registry.py)."""
 
-    def test_brand_new_session_opens_directly_on_the_needed_backend(self, tmp_path: Path) -> None:
+    def test_brand_new_session_opens_directly_on_the_needed_backend(
+        self, tmp_path: Path
+    ) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
         manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
@@ -155,7 +168,9 @@ class TestBackendSwitching:
         finally:
             manager.close_all()
 
-    def test_switching_an_open_file_session_to_xlw_reopens_it_there(self, tmp_path: Path) -> None:
+    def test_switching_an_open_file_session_to_xlw_reopens_it_there(
+        self, tmp_path: Path
+    ) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
         manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
@@ -167,11 +182,16 @@ class TestBackendSwitching:
             xlw_session = manager.get_or_open("manip", capability="xlw")
             assert xlw_session is file_session  # same session object, mutated in place
             assert xlw_session.backend == "xlw"
-            assert xlw_session.handle.sheets["Sheet"]["A1"].value == "written on file backend"
+            assert (
+                xlw_session.handle.sheets["Sheet"]["A1"].value
+                == "written on file backend"
+            )
         finally:
             manager.close_all()
 
-    def test_switching_an_open_xlw_session_back_to_file_reopens_it_there(self, tmp_path: Path) -> None:
+    def test_switching_an_open_xlw_session_back_to_file_reopens_it_there(
+        self, tmp_path: Path
+    ) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
         manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
@@ -187,7 +207,9 @@ class TestBackendSwitching:
         finally:
             manager.close_all()
 
-    def test_two_workbooks_needing_xlw_share_one_excel_instance(self, tmp_path: Path) -> None:
+    def test_two_workbooks_needing_xlw_share_one_excel_instance(
+        self, tmp_path: Path
+    ) -> None:
         real_a = _write_workbook(tmp_path / "real" / "a.xlsx")
         real_b = _write_workbook(tmp_path / "real" / "b.xlsx")
         workbooks = {
@@ -203,7 +225,9 @@ class TestBackendSwitching:
         finally:
             manager.close_all()
 
-    def test_close_all_quits_the_shared_owned_excel_instance(self, tmp_path: Path) -> None:
+    def test_close_all_quits_the_shared_owned_excel_instance(
+        self, tmp_path: Path
+    ) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
         manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
@@ -227,13 +251,17 @@ class TestBackendSwitching:
 
 
 class TestCreateIfMissing:
-    def test_read_only_with_create_if_missing_creates_at_the_scratch_path(self, tmp_path: Path) -> None:
+    def test_read_only_with_create_if_missing_creates_at_the_scratch_path(
+        self, tmp_path: Path
+    ) -> None:
         """Unusual combination (why read a workbook you just created blank?) but not
         forbidden — must still work correctly rather than being an untested code path.
         Creates at the scratch path now, not the real path (PRD sec 6.2.3's correction —
         read-only is staged too)."""
         real = tmp_path / "real" / "new.xlsx"
-        workbooks = {"new": WorkbookRef(name="new", file=str(real), create_if_missing=True)}
+        workbooks = {
+            "new": WorkbookRef(name="new", file=str(real), create_if_missing=True)
+        }
         manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
 
         session = manager.get_or_open("new", mode="read_only")
@@ -244,7 +272,9 @@ class TestCreateIfMissing:
 
     def test_creates_a_blank_workbook_at_the_scratch_path(self, tmp_path: Path) -> None:
         real = tmp_path / "real" / "new.xlsx"
-        workbooks = {"new": WorkbookRef(name="new", file=str(real), create_if_missing=True)}
+        workbooks = {
+            "new": WorkbookRef(name="new", file=str(real), create_if_missing=True)
+        }
         manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
 
         session = manager.get_or_open("new")
@@ -253,12 +283,17 @@ class TestCreateIfMissing:
         assert session.handle.sheetnames
 
     def test_creates_from_a_template_workbook(self, tmp_path: Path) -> None:
-        template_real = _write_workbook(tmp_path / "real" / "historical.xlsx", "template content")
+        template_real = _write_workbook(
+            tmp_path / "real" / "historical.xlsx", "template content"
+        )
         new_real = tmp_path / "real" / "results.xlsx"
         workbooks = {
             "historical": WorkbookRef(name="historical", file=str(template_real)),
             "results": WorkbookRef(
-                name="results", file=str(new_real), create_if_missing=True, template="historical"
+                name="results",
+                file=str(new_real),
+                create_if_missing=True,
+                template="historical",
             ),
         }
         manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
@@ -282,11 +317,15 @@ class TestCloseAll:
 
         manager.close_all()  # should not raise
 
-    def test_close_all_with_no_sessions_opened_does_not_raise(self, tmp_path: Path) -> None:
+    def test_close_all_with_no_sessions_opened_does_not_raise(
+        self, tmp_path: Path
+    ) -> None:
         manager = SessionManager({}, ScratchManager(tmp_path / "working"))
         manager.close_all()
 
-    def test_one_failing_close_does_not_prevent_others_from_closing(self, tmp_path: Path) -> None:
+    def test_one_failing_close_does_not_prevent_others_from_closing(
+        self, tmp_path: Path
+    ) -> None:
         """Crash-safety requirement (PRD sec 6.3): every session must get a close attempt,
         even if an earlier one fails. Uses a fake handle whose close() raises — openpyxl's
         own Workbook.close() is a no-op even when called twice, so it can't produce a real
@@ -302,7 +341,11 @@ class TestCloseAll:
         # "a" (which will fail to close) is inserted first, so iteration reaches it before "b" —
         # this is what actually proves close_all() doesn't stop after the first failure.
         manager._sessions["a"] = WorkbookSession(
-            name="a", backend="file", handle=_ExplodingHandle(), path="a.xlsx", mode="read_write"
+            name="a",
+            backend="file",
+            handle=_ExplodingHandle(),
+            path="a.xlsx",
+            mode="read_write",
         )
         session_b = manager.get_or_open("b")
         closed_b = False
@@ -328,7 +371,9 @@ class TestCheckpoint:
     only ever reflected whatever was there at staging time, since openpyxl writes stay in
     memory until an explicit save and nothing else triggers one mid-run."""
 
-    def test_checkpoint_saves_a_dirty_staged_session_to_its_scratch_file(self, tmp_path: Path) -> None:
+    def test_checkpoint_saves_a_dirty_staged_session_to_its_scratch_file(
+        self, tmp_path: Path
+    ) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
         manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
@@ -338,7 +383,9 @@ class TestCheckpoint:
 
         manager.checkpoint()
 
-        assert openpyxl.load_workbook(session.path)["Sheet"]["A1"].value == "in progress"
+        assert (
+            openpyxl.load_workbook(session.path)["Sheet"]["A1"].value == "in progress"
+        )
 
     def test_checkpoint_does_not_touch_the_real_path(self, tmp_path: Path) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
@@ -381,7 +428,9 @@ class TestCheckpoint:
 
 
 class TestCommitAll:
-    def test_saves_dirty_staged_sessions_and_commits_them_to_the_real_path(self, tmp_path: Path) -> None:
+    def test_saves_dirty_staged_sessions_and_commits_them_to_the_real_path(
+        self, tmp_path: Path
+    ) -> None:
         real = _write_workbook(tmp_path / "real" / "manip.xlsx")
         workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
         manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
@@ -401,4 +450,3 @@ class TestCommitAll:
         manager.get_or_open("manip", mode="read_only")
 
         manager.commit_all()  # should not raise, nothing to commit
-

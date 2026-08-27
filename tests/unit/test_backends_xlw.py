@@ -166,7 +166,9 @@ class TestRecalculatePrimitives:
         finally:
             registry.close_owned()
 
-    def test_wait_raises_timeout_error_if_calculation_never_finishes(self, tmp_path: Path) -> None:
+    def test_wait_raises_timeout_error_if_calculation_never_finishes(
+        self, tmp_path: Path
+    ) -> None:
         """A fake app whose CalculationState never reports done — proves the timeout path
         is real, without needing an actual multi-minute Excel calculation."""
 
@@ -178,4 +180,3 @@ class TestRecalculatePrimitives:
 
         with pytest.raises(TimeoutError):
             backends.com_wait_until_calculation_done(_FakeApp(), timeout=0.05)  # type: ignore[arg-type]
-

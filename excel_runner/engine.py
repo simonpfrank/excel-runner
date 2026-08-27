@@ -121,7 +121,9 @@ class ScratchManager:
         self._staged: dict[str, tuple[Path, Path, bool]] = (
             {}
         )  # name -> (real_path, scratch_path, writes)
-        self._backups: dict[str, Path] = {}  # name -> .bak path, only set during a commit_all()
+        self._backups: dict[str, Path] = (
+            {}
+        )  # name -> .bak path, only set during a commit_all()
 
     def stage(self, name: str, real_path: Path, writes: bool = True) -> Path:
         """Copy a workbook into the scratch dir, or reserve a scratch path for a new one.
@@ -363,7 +365,10 @@ class SessionManager:
         return session
 
     def _open_handle(
-        self, scratch_path: Path, mode: Literal["read_only", "read_write"], backend: Literal["file", "xlw"]
+        self,
+        scratch_path: Path,
+        mode: Literal["read_only", "read_write"],
+        backend: Literal["file", "xlw"],
     ) -> Any:
         if backend == "file":
             return backends.open_workbook(str(scratch_path), mode=mode)
@@ -403,7 +408,9 @@ class SessionManager:
             scratch_path=scratch_path,
         )
 
-    def _switch_backend(self, session: WorkbookSession, needed: Literal["file", "xlw"]) -> None:
+    def _switch_backend(
+        self, session: WorkbookSession, needed: Literal["file", "xlw"]
+    ) -> None:
         """Switch an already-open session's backend in place (PRD sec 6.2.2).
 
         Save-then-close-then-reopen, strictly in that order, with nothing else interleaved —
