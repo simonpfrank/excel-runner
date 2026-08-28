@@ -439,7 +439,14 @@ def xlw_open_workbook(
         FileNotFoundError: If path does not exist — xlwings itself raises this before any
             Apple Event/COM call is made, same contract as `open_workbook`.
     """
-    return app.books.open(path, read_only=(mode == "read_only"))
+    # update_links=False, always: this project controls every external link refresh itself,
+    # explicitly, via com_change_link/com_update_link (docs/recalc_and_link_refresh_plan.md).
+    # Leaving Excel's own implicit link-update-on-open behavior enabled is not just redundant —
+    # in a headless, invisible spawned App it can block indefinitely on a dialog nothing can
+    # dismiss (confirmed empirically: reproduced exactly this hang, root-caused to this).
+    return app.books.open(
+        path, read_only=(mode == "read_only"), update_links=False
+    )
 
 
 def xlw_close_workbook(book: xw.Book) -> None:
@@ -558,6 +565,56 @@ def com_wait_until_calculation_done(
         time.sleep(_CALCULATION_POLL_INTERVAL_SECONDS)
 
 
+# --- Link management (external link repointing, docs/recalc_and_link_refresh_plan.md) ------
+
+_XL_LINK_TYPE_EXCEL_LINKS = 1  # xlLinkTypeExcelLinks — the only link type this project handles
+
+
+def com_link_sources(book: xw.Book) -> list[str]:
+    """List every external Excel-workbook link source a workbook currently has.
+
+    Args:
+        book: The workbook to inspect.
+
+    Returns:
+        Each link's current source, in whatever form Excel currently has it stored (a bare
+        filename for an unsaved/same-folder link, an absolute/UNC path otherwise). Empty if
+        the workbook has no external Excel-workbook links.
+    """
+    sources = book.api.LinkSources(_XL_LINK_TYPE_EXCEL_LINKS)
+    return list(sources) if sources else []
+
+
+def com_change_link(book: xw.Book, name: str, new_name: str) -> None:
+    """Repoint one of a workbook's external links to a new target.
+
+    `name` must match one of `com_link_sources(book)`'s current strings exactly — Excel
+    matches a link to an open workbook by that stored string, not by filename alone. If
+    `new_name` exists on disk, Excel immediately re-evaluates dependent cells against its
+    current content (confirmed empirically); if it does not exist, dependent cells are
+    blanked immediately instead. See docs/recalc_and_link_refresh_plan.md.
+
+    Args:
+        book: The workbook whose link is being repointed.
+        name: The link's current source, exactly as returned by `com_link_sources`.
+        new_name: The new target path.
+    """
+    book.api.ChangeLink(Name=name, NewName=new_name, Type=_XL_LINK_TYPE_EXCEL_LINKS)
+
+
+def com_update_link(book: xw.Book, name: str) -> None:
+    """Force a fresh read of one of a workbook's external links from disk.
+
+    Works even if the source workbook was never opened by this process at all — confirmed
+    empirically to read directly from the file on disk (docs/recalc_and_link_refresh_plan.md).
+
+    Args:
+        book: The workbook whose link should be refreshed.
+        name: The link's current source, exactly as returned by `com_link_sources`.
+    """
+    book.api.UpdateLink(Name=name, Type=_XL_LINK_TYPE_EXCEL_LINKS)
+
+
 # --- xlwings — owned-instance tracking (PRD sec 6.2.1, Spec sec 3.1) ----------------------
 
 
@@ -603,6 +660,13 @@ class OwnedInstanceRegistry:
         # default of the older, previously-reliable reference implementation this project
         # replaces (Risk Demo's excel_core.py).
         app = xw.App(visible=visible, add_book=True)
+        # Suppress every alert/prompt dialog by default: an automation run has no user to
+        # answer them, and in a headless/invisible instance an unanswered modal blocks
+        # forever (confirmed empirically — reproduced exactly this hang, root-caused to
+        # missing alert suppression). This project never wants interactive prompts, so these
+        # are unconditional defaults, not per-call opt-ins.
+        app.display_alerts = False
+        app.api.AskToUpdateLinks = False
         self._owned[app.pid] = app
         return app
 

@@ -7,6 +7,7 @@ from pathlib import Path
 
 import openpyxl
 import pytest
+import xlwings as xw
 
 from excel_runner import backends
 from excel_runner.backends import OwnedInstanceRegistry
@@ -180,3 +181,119 @@ class TestRecalculatePrimitives:
 
         with pytest.raises(TimeoutError):
             backends.com_wait_until_calculation_done(_FakeApp(), timeout=0.05)  # type: ignore[arg-type]
+
+
+def _make_link_target(app: xw.App, path: Path, value: float) -> Path:
+    """A standalone workbook with a single value, saved and closed — a genuine link source."""
+    book = app.books.add()
+    book.sheets[0].range("A1").value = value
+    book.save(str(path))
+    book.close()
+    return path
+
+
+@requires_excel
+@requires_working_xlwings_save
+class TestLinkPrimitives:
+    """docs/recalc_and_link_refresh_plan.md sec 2 (R1/R4) — the raw COM link primitives that
+    plan depends on. Real xlwings/Excel throughout, matching project convention."""
+
+    def test_com_link_sources_lists_the_external_link(self, tmp_path: Path) -> None:
+        registry = OwnedInstanceRegistry()
+        app = registry.spawn()
+        try:
+            _make_link_target(app, tmp_path / "target.xlsx", 5)
+            linking = app.books.add()
+            linking.sheets[0].range("A1").formula = "='[target.xlsx]Sheet1'!A1*2"
+            linking.save(str(tmp_path / "linking.xlsx"))
+
+            assert backends.com_link_sources(linking) == ["target.xlsx"]
+        finally:
+            registry.close_owned()
+
+    def test_com_link_sources_is_empty_with_no_external_links(
+        self, tmp_path: Path
+    ) -> None:
+        registry = OwnedInstanceRegistry()
+        app = registry.spawn()
+        try:
+            book = app.books.add()
+            book.sheets[0].range("A1").value = "no links here"
+            book.save(str(tmp_path / "standalone.xlsx"))
+
+            assert backends.com_link_sources(book) == []
+        finally:
+            registry.close_owned()
+
+    def test_com_change_link_repoints_and_instantly_refreshes_from_an_existing_target(
+        self, tmp_path: Path
+    ) -> None:
+        """Matches probe9/probe7's finding: ChangeLink to a target that exists on disk
+        re-evaluates dependent cells against its current content immediately, no separate
+        recalculate/UpdateLink call needed."""
+        registry = OwnedInstanceRegistry()
+        app = registry.spawn()
+        try:
+            _make_link_target(app, tmp_path / "old.xlsx", 5)
+            new_target = _make_link_target(app, tmp_path / "new.xlsx", 100)
+
+            linking = app.books.add()
+            linking.sheets[0].range("A1").formula = "='[old.xlsx]Sheet1'!A1*2"
+            linking.save(str(tmp_path / "linking.xlsx"))
+
+            backends.com_change_link(linking, "old.xlsx", str(new_target))
+
+            assert linking.sheets[0].range("A1").value == 200
+        finally:
+            registry.close_owned()
+
+    def test_com_update_link_reads_a_closed_workbook_from_disk(
+        self, tmp_path: Path
+    ) -> None:
+        """Matches probe6b's finding: UpdateLink refreshes from a file this process never
+        opened at all, as long as it's genuinely closed and current on disk."""
+        setup_registry = OwnedInstanceRegistry()
+        setup_app = setup_registry.spawn()
+        try:
+            target_path = _make_link_target(setup_app, tmp_path / "target.xlsx", 5)
+
+            # Absolute reference (R4's case), not a same-folder relative one (R1) — the bare
+            # filename form Excel stores for same-folder links can't always be resolved by a
+            # separate app instance with a different default working folder.
+            linking = setup_app.books.add()
+            linking.sheets[0].range("A1").formula = (
+                f"='{target_path.parent}\\[{target_path.name}]Sheet1'!A1*2"
+            )
+            linking.save(str(tmp_path / "linking.xlsx"))
+            linking.close()
+        finally:
+            setup_registry.close_owned()
+
+        # Edit and close the target directly, in a separate, already-closed session.
+        editor_registry = OwnedInstanceRegistry()
+        editor_app = editor_registry.spawn()
+        try:
+            editor_book = backends.xlw_open_workbook(
+                editor_app, str(target_path), mode="read_write"
+            )
+            editor_book.sheets[0].range("A1").value = 999
+            backends.xlw_save_workbook(editor_book)
+            backends.xlw_close_workbook(editor_book)
+        finally:
+            editor_registry.close_owned()
+
+        # A third, separate app instance never opens target.xlsx directly at all.
+        main_registry = OwnedInstanceRegistry()
+        main_app = main_registry.spawn()
+        try:
+            linking = backends.xlw_open_workbook(
+                main_app, str(tmp_path / "linking.xlsx"), mode="read_write"
+            )
+            assert linking.sheets[0].range("A1").value != 1998  # not yet the fresh value
+
+            (source,) = backends.com_link_sources(linking)
+            backends.com_update_link(linking, source)
+
+            assert linking.sheets[0].range("A1").value == 1998
+        finally:
+            main_registry.close_owned()
