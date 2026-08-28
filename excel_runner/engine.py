@@ -8,11 +8,14 @@ import re
 import shutil
 import types as pytypes
 import typing
+import zipfile
 from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
 from typing import Any, Literal
+from urllib.parse import unquote, urlparse
+from xml.etree import ElementTree
 
 from excel_runner import backends
 from excel_runner.core import (
@@ -102,6 +105,79 @@ def _first_line(docstring: str) -> str:
 
 
 # --- R4 link commit ordering (docs/recalc_and_link_refresh_plan.md R5-R7) ------------------
+
+
+_UNC_OR_DRIVE_ABSOLUTE = re.compile(r"^([a-zA-Z]:[\\/]|\\\\|//)")
+
+
+def classify_link_target(target: str) -> Literal["same_folder", "relative_subpath", "absolute"]:
+    """Classify a raw external-link Target string (as stored in an xlsx's
+    `externalLinks/_rels/*.rels`) per plan doc sec 2's R1/R2/R3-R4 categories.
+
+    Args:
+        target: The raw `Target` attribute value from an external-link relationship.
+
+    Returns:
+        `"same_folder"` (R1 — a bare filename, no path separator at all), `"relative_subpath"`
+        (R2, backlog/unsupported — relative but not same-folder, e.g. `"other/x.xlsx"` or
+        `"../x.xlsx"`), or `"absolute"` (R3/R4 — a drive-letter path, a UNC path, or a
+        `file://` URI).
+    """
+    if target.startswith("file://"):
+        return "absolute"
+    if _UNC_OR_DRIVE_ABSOLUTE.match(target):
+        return "absolute"
+    if "/" in target or "\\" in target:
+        return "relative_subpath"
+    return "same_folder"
+
+
+def resolve_link_target(target: str, linking_workbook_path: Path) -> Path:
+    """Resolve a raw external-link Target string to a real, absolute filesystem path.
+
+    Args:
+        target: The raw `Target` attribute value from an external-link relationship — same
+            or relative form resolved against `linking_workbook_path`'s folder, or an
+            already-absolute drive/UNC path, or a `file://` URI, returned as-is (converted).
+        linking_workbook_path: Real path of the workbook the link was found in — same/relative
+            targets are resolved relative to its parent folder.
+
+    Returns:
+        The resolved, absolute `Path`.
+    """
+    if target.startswith("file://"):
+        return Path(unquote(urlparse(target).path).lstrip("/")).resolve()
+    if _UNC_OR_DRIVE_ABSOLUTE.match(target):
+        return Path(target).resolve()
+    return (linking_workbook_path.parent / target).resolve()
+
+
+def scan_external_link_targets(path: Path) -> list[str]:
+    """Read every external-link Target string out of a real xlsx file, with no Excel/COM
+    involved at all — a plain zipfile/XML read, safe to call during planning.
+
+    Args:
+        path: Real path of an existing `.xlsx` file.
+
+    Returns:
+        Raw `Target` strings, one per external link found (order as stored in the file).
+        Empty list if the workbook has no external links.
+    """
+    targets: list[str] = []
+    with zipfile.ZipFile(path) as archive:
+        rels_names = sorted(
+            name
+            for name in archive.namelist()
+            if name.startswith("xl/externalLinks/_rels/") and name.endswith(".rels")
+        )
+        for rels_name in rels_names:
+            root = ElementTree.fromstring(archive.read(rels_name))
+            for relationship in root:
+                if relationship.get("TargetMode") == "External":
+                    target = relationship.get("Target")
+                    if target is not None:
+                        targets.append(target)
+    return targets
 
 
 def compute_link_commit_order(link_targets: dict[str, set[str]]) -> list[str]:

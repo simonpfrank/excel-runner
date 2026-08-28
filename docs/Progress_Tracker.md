@@ -1,5 +1,53 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-08-28, Windows)
+**Status:** In Progress — gap-2 (link-aware repointing/recalc, `docs/recalc_and_link_refresh_plan.md`)
+**Working on:**
+- Static, pure-Python external-link discovery pass added to `engine.py` — no Excel/COM
+  involved, safe to call during planning:
+  - `scan_external_link_targets(path)`: reads an xlsx's `xl/externalLinks/_rels/*.rels` via
+    plain `zipfile`/`xml.etree`, returns the raw `Target` strings (filtered to
+    `TargetMode="External"`). Confirmed empirically (throwaway probe, deleted after use) that
+    Excel always serializes a link's Target relative to the workbook's own folder when
+    possible (even one typed as an absolute path collapses back to a bare filename or a
+    forward-slash subpath if the target is on the same drive) — genuinely absolute/UNC/`file://`
+    Targets only occur when a relative form isn't expressible at all.
+  - `classify_link_target(target)`: pure string classification into `"same_folder"` (R1),
+    `"relative_subpath"` (R2, backlog/unsupported), or `"absolute"` (R3/R4) — bare filename vs.
+    contains a separator vs. drive-letter/UNC/`file://`.
+  - `resolve_link_target(target, linking_workbook_path)`: resolves any of the three forms to a
+    real absolute `Path`, relative ones resolved against the linking workbook's own folder.
+  - 13 new tests in `tests/unit/test_link_discovery.py` (10 pure, 3 `@requires_excel` using a
+    real Excel-saved fixture only to prove the scan reads real Target strings correctly).
+- Full unit suite: 323 passed (up from 310). One unrelated flaky failure seen in
+  `test_owned_instance_registry.py` (Excel process teardown timing) — passes in isolation, not
+  a regression, pre-existing flakiness.
+- ruff + mypy --strict clean on all changed files.
+
+**Next step:** These three functions are still standalone — not yet wired into anything that
+builds the `link_targets` graph `compute_link_commit_order()` consumes. Still needed, in order:
+1. A function that, given the workflow's real per-workbook paths and `plan()`'s read/write
+   modes, scans every declared workbook that exists on disk, resolves each `"absolute"`-
+   classified link target against the other declared workbooks' real paths, and — for targets
+   that resolve to another *write-intent* declared workbook — builds the `link_targets` graph
+   for `compute_link_commit_order()`. Note: `plan()` itself explicitly promises no workbook
+   access (tier-2, static-only) — this scanning function is a separate pass, not an addition to
+   `plan()`; still deciding where it's actually invoked from (likely at scratch-staging time,
+   alongside `ScratchManager`, not tier-2 validation).
+2. `ScratchManager` restructuring per plan doc sec 1: `scratch/working/` (original basenames,
+   for R1 resolution) + `scratch/originals/` (write-intent pre-edit backups), replacing the
+   current single flat `scratch/` dir. Bigger rewrite of `test_scratch.py` too.
+3. Staging-time `ChangeLink` (real path -> target's scratch path) wiring, once per run per
+   R4 link.
+4. Commit-time revert-and-save wiring (per plan doc sec 3): switch to `xlw` backend if needed,
+   `ChangeLink` back to the real path, save — no extra recalc call needed (probe10). Must run
+   in `compute_link_commit_order()`'s order.
+5. Rewrite `ScratchManager.commit()`/`commit_all()`/`_rollback()` to the copy-based (not
+   rename-based) semantics from plan doc sec 3, since commit is no longer "just" a rename —
+   R4 workbooks need the link-revert-and-save step first.
+**Notes:** `unify_storage/` remains an untracked directory in git status — not yet discussed
+with the user, not currently blocking anything.
+
 ## Last Session (2026-08-27, Windows)
 **Status:** In Progress — gap-2 (link-aware repointing/recalc, `docs/recalc_and_link_refresh_plan.md`)
 **Working on:**
