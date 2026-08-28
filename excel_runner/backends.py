@@ -444,9 +444,7 @@ def xlw_open_workbook(
     # Leaving Excel's own implicit link-update-on-open behavior enabled is not just redundant —
     # in a headless, invisible spawned App it can block indefinitely on a dialog nothing can
     # dismiss (confirmed empirically: reproduced exactly this hang, root-caused to this).
-    return app.books.open(
-        path, read_only=(mode == "read_only"), update_links=False
-    )
+    return app.books.open(path, read_only=(mode == "read_only"), update_links=False)
 
 
 def xlw_close_workbook(book: xw.Book) -> None:
@@ -567,7 +565,9 @@ def com_wait_until_calculation_done(
 
 # --- Link management (external link repointing, docs/recalc_and_link_refresh_plan.md) ------
 
-_XL_LINK_TYPE_EXCEL_LINKS = 1  # xlLinkTypeExcelLinks — the only link type this project handles
+_XL_LINK_TYPE_EXCEL_LINKS = (
+    1  # xlLinkTypeExcelLinks — the only link type this project handles
+)
 
 
 def com_link_sources(book: xw.Book) -> list[str]:

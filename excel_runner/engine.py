@@ -101,6 +101,70 @@ def _first_line(docstring: str) -> str:
     return docstring.split("\n", 1)[0].strip()
 
 
+# --- R4 link commit ordering (docs/recalc_and_link_refresh_plan.md R5-R7) ------------------
+
+
+def compute_link_commit_order(link_targets: dict[str, set[str]]) -> list[str]:
+    """Topologically order write-intent workbooks so each is committed after every workbook
+    its R4 links point to (R5).
+
+    Args:
+        link_targets: For every write-intent workbook, the set of other write-intent
+            workbooks it has an R4 (absolute/UNC, to-be-modified) link to. Workbooks with no
+            outbound R4 links must still be present as keys, mapped to an empty set.
+
+    Returns:
+        Workbook names in commit order.
+
+    Raises:
+        ValidationError: On a cyclical R4 link between two workbooks (R6), or a link chain
+            deeper than one hop (R7) — a workbook that is both an R4 link's target and the
+            source of an R4 link to a different workbook.
+    """
+    incoming: dict[str, set[str]] = {name: set() for name in link_targets}
+    for name, targets in link_targets.items():
+        for target in targets:
+            incoming.setdefault(target, set()).add(name)
+    for name, targets in link_targets.items():
+        sources = incoming.get(name, set())
+        # A clean two-way pair (A->B, B->A) is a cycle (R6), caught below by the topological
+        # sort itself never finding a ready node. Only reject here when this workbook's
+        # outbound target(s) go beyond exactly mirroring back its own incoming source(s) —
+        # that's a genuine chain (R7), not just a two-node cycle.
+        if targets and sources and targets != sources:
+            raise ValidationError(
+                ErrorDetail(
+                    message=(
+                        f'Workbook "{name}" is both the target of an R4 link and has its own '
+                        "outbound R4 link to a different workbook — link chains beyond one "
+                        "hop are not supported."
+                    ),
+                    technical_reason=f"link_targets={link_targets!r}",
+                )
+            )
+
+    order: list[str] = []
+    remaining = {name: set(targets) for name, targets in link_targets.items()}
+    while remaining:
+        ready = sorted(name for name, targets in remaining.items() if not targets)
+        if not ready:
+            raise ValidationError(
+                ErrorDetail(
+                    message=(
+                        "Cyclical R4 links detected between: "
+                        f"{', '.join(sorted(remaining))} — no valid commit order exists."
+                    ),
+                    technical_reason=f"remaining={remaining!r}",
+                )
+            )
+        order.extend(ready)
+        for name in ready:
+            del remaining[name]
+        for targets in remaining.values():
+            targets.difference_update(ready)
+    return order
+
+
 # --- Scratch-copy execution model (Spec sec 5.3, PRD sec 6.3.1) --------------------------
 
 

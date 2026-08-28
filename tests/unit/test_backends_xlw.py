@@ -261,9 +261,9 @@ class TestLinkPrimitives:
             # filename form Excel stores for same-folder links can't always be resolved by a
             # separate app instance with a different default working folder.
             linking = setup_app.books.add()
-            linking.sheets[0].range("A1").formula = (
-                f"='{target_path.parent}\\[{target_path.name}]Sheet1'!A1*2"
-            )
+            linking.sheets[0].range(
+                "A1"
+            ).formula = f"='{target_path.parent}\\[{target_path.name}]Sheet1'!A1*2"
             linking.save(str(tmp_path / "linking.xlsx"))
             linking.close()
         finally:
@@ -289,7 +289,9 @@ class TestLinkPrimitives:
             linking = backends.xlw_open_workbook(
                 main_app, str(tmp_path / "linking.xlsx"), mode="read_write"
             )
-            assert linking.sheets[0].range("A1").value != 1998  # not yet the fresh value
+            assert (
+                linking.sheets[0].range("A1").value != 1998
+            )  # not yet the fresh value
 
             (source,) = backends.com_link_sources(linking)
             backends.com_update_link(linking, source)

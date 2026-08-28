@@ -1,5 +1,56 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-08-27, Windows)
+**Status:** In Progress — gap-2 (link-aware repointing/recalc, `docs/recalc_and_link_refresh_plan.md`)
+**Working on:**
+- Built and committed the raw COM link primitives in `backends.py`: `com_link_sources`,
+  `com_change_link`, `com_update_link` (all thin `.api` wrappers, same convention as the
+  existing `com_calculate_*` primitives). `_XL_LINK_TYPE_EXCEL_LINKS = 1` module constant.
+- Fixed a real hang bug found while testing against live Excel: `xlw_open_workbook` now always
+  passes `update_links=False` to `app.books.open()` — without it, opening a workbook with an
+  existing external link in a headless spawned Excel instance could trigger an invisible-but-
+  modal dialog and hang forever.
+- Centralized alert suppression: `OwnedInstanceRegistry.spawn()` now unconditionally sets
+  `app.display_alerts = False` and `app.api.AskToUpdateLinks = False` — project-wide decision,
+  confirmed with the user, that this tool never wants interactive Excel prompts.
+- `TestLinkPrimitives` (4 real-Excel tests) added to `tests/unit/test_backends_xlw.py`, all
+  passing. Full unit suite: 302 passed at that point (up from ~298).
+- Revised `docs/recalc_and_link_refresh_plan.md`'s R4 to the final three-phase stage/commit-
+  once design, added R5 (commit order is a dependency graph), R6 (reject cycles), R7 (reject
+  link chains beyond one hop, backlog). Added `_link_probe9.py`/`_link_probe10.py` as committed
+  evidence scripts proving the new design (including under manual calculation mode).
+- Implemented `compute_link_commit_order()` in `engine.py`: pure topological-sort function
+  over a `{workbook_name: set_of_r4_link_targets}` graph, implementing R5 (dependency order),
+  R6 (raises `ValidationError` on a 2-node cycle), and R7 (raises `ValidationError` on a chain
+  — a workbook that's both an R4 target and has its own outbound link to a *different*
+  workbook than what links to it; a clean mutual pair is left to the cycle check instead of
+  being misreported as a chain). 8 new tests in `tests/unit/test_link_commit_order.py`, all
+  passing. Full unit suite: 310 passed (up from 302), no regressions.
+- Confirmed relevance to the real production `input/workflow.yaml`: its "STOPPED HERE" blocker
+  (config step 9, repointing `Premium Risk Back-testing.xlsx`'s links at `Backtesting
+  Manip.xlsx`) is exactly gap-2. Per the finalized R4 design, this will NOT become an explicit
+  new YAML action — repointing happens automatically at staging/commit time based on statically
+  detected links, not something a workflow author writes as a step.
+
+**Next step:** `compute_link_commit_order()` is pure and not yet wired to anything — still
+needed, in order:
+1. A static link-discovery pass (likely a fast zipfile/XML scan of real `.xlsx` files, no
+   Excel/COM needed) that finds R1 same-folder siblings and R4 absolute/UNC link targets,
+   wired into `plan()`.
+2. `ScratchManager` restructuring per plan doc sec 1: `scratch/working/` (original basenames,
+   for R1 resolution) + `scratch/originals/` (write-intent pre-edit backups), replacing the
+   current single flat `scratch/` dir. This is a bigger rewrite of `test_scratch.py` too.
+3. Staging-time `ChangeLink` (real path -> target's scratch path) wiring, once per run per
+   R4 link.
+4. Commit-time revert-and-save wiring (per plan doc sec 3): switch to `xlw` backend if needed,
+   `ChangeLink` back to the real path, save — no extra recalc call needed (probe10). Must run
+   in `compute_link_commit_order()`'s order.
+5. Rewrite `ScratchManager.commit()`/`commit_all()`/`_rollback()` to the copy-based (not
+   rename-based) semantics from plan doc sec 3, since commit is no longer "just" a rename —
+   R4 workbooks need the link-revert-and-save step first.
+**Notes:** `unify_storage/` remains an untracked directory in git status — not yet discussed
+with the user, not currently blocking anything.
+
 ## Last Session (2026-08-26, Windows)
 **Status:** `recalculate` action built and fully tested — first of the "known gaps" from the
 `input/` migration project (see `input/Instructions.md`).
