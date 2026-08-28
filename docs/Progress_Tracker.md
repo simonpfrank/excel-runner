@@ -1,5 +1,48 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-08-28b, Windows)
+**Status:** In Progress — gap-2 (link-aware repointing/recalc, `docs/recalc_and_link_refresh_plan.md`)
+**Working on:**
+- `discover_write_intent_link_graph(workbook_paths, write_intent)` added to `engine.py`: scans
+  every write-intent workbook's real file (via `scan_external_link_targets`), keeps only
+  `"absolute"`-classified links (R3/R4), resolves each and matches it against the other
+  declared workbooks' real paths — an edge is added only when the resolved target is itself a
+  write-intent workbook (R4); a match against a non-write-intent declared workbook (R3) or no
+  match at all is ignored. Produces exactly the `{name: set(targets)}` shape
+  `compute_link_commit_order()` consumes.
+- 6 new tests in `tests/unit/test_link_commit_graph.py`. `scan_external_link_targets` is
+  monkeypatched in these tests (deliberate, documented choice) — it's already covered by real-
+  Excel tests in `test_link_discovery.py`, and a genuinely absolute (R3/R4) link is hard to
+  reproduce portably in a fixture (Excel collapses same-drive links back to relative form, per
+  last session's probe finding).
+- Full unit suite: 329 passed (up from 323), no regressions. ruff + mypy --strict clean.
+- **Important scope finding, raised with and acknowledged by the user**: the actual production
+  blocker in `input/workflow.yaml` (config step 9, repointing `Premium Risk Back-testing.xlsx`
+  at `Backtesting Manip.xlsx`) is almost certainly R1 (same-folder — both workbooks live under
+  the same `input_folder`), not R4. R1 needs no link repointing at all per the plan doc, just
+  the `scratch/working/` same-folder co-location mechanism (sec 1.2) — a much smaller change
+  than the full R4 dependency-graph/commit-order machinery just built. User explicitly chose to
+  finish the R4 graph-wiring work first (this and the prior two sessions' work) before
+  switching to the R1/`ScratchManager` rework — this was a deliberate priority decision, not an
+  oversight, and should not be second-guessed without asking again.
+
+**Next step:** The R4 side (`compute_link_commit_order`, `discover_write_intent_link_graph`,
+`scan_external_link_targets`/`classify_link_target`/`resolve_link_target`) is now feature-
+complete as pure/composable functions, but still not wired into any real run — no caller
+invokes `discover_write_intent_link_graph` yet. Two remaining threads, in the order the user
+chose:
+1. Finish R4 end-to-end: wire staging-time `ChangeLink` (real path -> target's scratch path,
+   once per R4 link) and commit-time revert-and-save (switch to `xlw` backend if needed,
+   `ChangeLink` back to real path, save — no extra recalc call needed per probe10) using
+   `compute_link_commit_order()`'s order. Needs a real invocation point — likely wherever
+   `ScratchManager`/`SessionManager.plan()` orchestration happens in the runner, since `plan()`
+   itself is explicitly no-workbook-access (tier-2, static-only).
+2. Then the R1/`ScratchManager` rework (`scratch/working/` + `scratch/originals/` subfolders
+   per plan doc sec 1, replacing the current flat `scratch/` dir) — this is what will actually
+   unblock `input/workflow.yaml`'s config step 9, once R4 is done.
+**Notes:** `unify_storage/` remains an untracked directory in git status — not yet discussed
+with the user, not currently blocking anything.
+
 ## Last Session (2026-08-28, Windows)
 **Status:** In Progress — gap-2 (link-aware repointing/recalc, `docs/recalc_and_link_refresh_plan.md`)
 **Working on:**

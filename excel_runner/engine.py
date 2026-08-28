@@ -180,6 +180,49 @@ def scan_external_link_targets(path: Path) -> list[str]:
     return targets
 
 
+def discover_write_intent_link_graph(
+    workbook_paths: dict[str, Path], write_intent: set[str]
+) -> dict[str, set[str]]:
+    """Build the R4 `link_targets` graph `compute_link_commit_order()` consumes, by scanning
+    every write-intent workbook's real, on-disk file for `"absolute"`-classified external
+    links (R3/R4) that resolve to another *write-intent* declared workbook.
+
+    R1 (same-folder) and R2 (relative-subpath) links are not R4 concerns — ignored here. An
+    absolute link that resolves to a declared workbook which is *not* write-intent is R3 (leave
+    untouched) — also ignored, since nothing about that target changes this run. An absolute
+    link that doesn't resolve to any declared workbook at all (something outside this run
+    entirely) is likewise ignored.
+
+    Args:
+        workbook_paths: Every declared workbook's logical name to its real, on-disk path.
+        write_intent: Logical names of workbooks that will be modified this run (`plan()`'s
+            `"read_write"` workbooks).
+
+    Returns:
+        Logical name -> set of other write-intent workbook names it R4-links to. Every name in
+        `write_intent` is present as a key (empty set if it has no R4 links), matching
+        `compute_link_commit_order()`'s expected input shape.
+    """
+    resolved_paths = {
+        name: path.resolve() for name, path in workbook_paths.items() if path.exists()
+    }
+    graph: dict[str, set[str]] = {name: set() for name in write_intent}
+    for name in write_intent:
+        path = workbook_paths.get(name)
+        if path is None or not path.exists():
+            continue
+        for target in scan_external_link_targets(path):
+            if classify_link_target(target) != "absolute":
+                continue
+            resolved_target = resolve_link_target(target, path)
+            for other_name, other_path in resolved_paths.items():
+                if other_name != name and other_path == resolved_target:
+                    if other_name in write_intent:
+                        graph[name].add(other_name)
+                    break
+    return graph
+
+
 def compute_link_commit_order(link_targets: dict[str, set[str]]) -> list[str]:
     """Topologically order write-intent workbooks so each is committed after every workbook
     its R4 links point to (R5).
