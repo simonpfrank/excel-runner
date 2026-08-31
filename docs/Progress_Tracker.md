@@ -1,5 +1,47 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-08-28c, Windows)
+**Status:** In Progress — gap-2 (link-aware repointing/recalc, `docs/recalc_and_link_refresh_plan.md`)
+**Working on:** User said "finish it" — delegated the full remaining gap-2 scope (R1
+`ScratchManager` rework, plus wiring R4's already-built pure functions into the real run
+pipeline). Started with the `ScratchManager` rework, since both remaining threads depend on it:
+- `ScratchManager` restructured per plan doc sec 1/3: `scratch/` now has two subfolders instead
+  of one flat directory — `scratch/working/` (every staged workbook's live copy, named with its
+  *real basename*, not its logical/YAML name — needed so a same-folder R1 external link between
+  two staged workbooks still resolves once both sit in the same working folder) and
+  `scratch/originals/` (a pre-edit backup, write-intent workbooks only, purely defensive/never
+  read by this class).
+- `commit()`/`commit_all()`/`_rollback()` rewritten to be copy-based throughout (plan doc sec
+  3.2/3.4): the pre-edit `.bak` is made via `shutil.copy2` (never a rename), the working copy is
+  copied onto `real_path` directly (no `.tmp` intermediate), and rollback copies the `.bak` back
+  over `real_path` rather than renaming it back.
+- New `working_path(name)`/`real_path(name)` accessor methods added — needed by the still-to-
+  come R4 `ChangeLink` wiring to know both paths for a staged workbook.
+- `tests/unit/test_scratch.py` fully rewritten (13 tests, all passing) to match the new layout
+  and semantics, including two new tests (`..._named_with_the_real_basename_not_the_logical_name`,
+  `..._gets_an_originals_backup` / `..._gets_no_originals_backup`).
+- Fixed one integration test (`test_crash_mid_run_leaves_real_file_untouched_and_scratch_copy_in_place`)
+  whose hardcoded scratch path (`run_dir / "scratch" / "manip.xlsx"`) needed the new
+  `working` subfolder segment (`run_dir / "scratch" / "working" / "manip.xlsx"`).
+- Full unit suite: 332 passed, no regressions. Integration suite: 15 passed. ruff + mypy
+  --strict clean on `engine.py`/`test_scratch.py`/`test_run_workflow.py`.
+
+**Next step:** With `ScratchManager` done, the two remaining R4 wiring pieces (not yet started):
+1. Wire staging-time `ChangeLink` — for every write-intent workbook with an outbound R4 link
+   (from `discover_write_intent_link_graph`), open via `xlw`, call
+   `backends.com_change_link(book, raw_target_string, str(target_working_path))`, save. Likely
+   a new `SessionManager` method, invoked once per run from `runner.py` after `plan()`.
+2. Wire commit-time revert-and-save `ChangeLink` — per `compute_link_commit_order()`'s order,
+   open via `xlw` (switch backend if needed), `ChangeLink` from the target's working path back
+   to its real path, save, *then* call `ScratchManager.commit(name)` for that workbook (the
+   actual file copy) — no extra recalc call needed per an earlier session's probe10 finding.
+3. Both need `runner.py`'s `run_workflow()` to compute
+   `discover_write_intent_link_graph(workbook_paths, write_intent)` +
+   `compute_link_commit_order(...)` once, right after `plan = engine.plan(...)` (since `plan()`
+   itself must stay workbook-access-free), and pass the result into `SessionManager`.
+**Notes:** None outstanding. Ready to proceed straight into the `SessionManager`/`runner.py`
+wiring next session/turn.
+
 ## Last Session (2026-08-28b, Windows)
 **Status:** In Progress — gap-2 (link-aware repointing/recalc, `docs/recalc_and_link_refresh_plan.md`)
 **Working on:**

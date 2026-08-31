@@ -549,7 +549,7 @@ class TestCrashSafety:
         assert openpyxl.load_workbook(real)["Sheet"]["B1"].value is None
 
         # the scratch copy survives as the recovery artifact, with the in-progress work intact
-        scratch_file = run_dir / "scratch" / "manip.xlsx"
+        scratch_file = run_dir / "scratch" / "working" / "manip.xlsx"
         assert scratch_file.exists()
         assert openpyxl.load_workbook(scratch_file)["Sheet"]["B1"].value == "in progress"
 

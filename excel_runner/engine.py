@@ -284,7 +284,8 @@ def compute_link_commit_order(link_targets: dict[str, set[str]]) -> list[str]:
     return order
 
 
-# --- Scratch-copy execution model (Spec sec 5.3, PRD sec 6.3.1) --------------------------
+# --- Scratch-copy execution model (Spec sec 5.3, PRD sec 6.3.1;
+# docs/recalc_and_link_refresh_plan.md sec 1/3) --------------------------------------------
 
 
 class ScratchManager:
@@ -293,76 +294,108 @@ class ScratchManager:
     openpyxl/xlwings, so file-backend and (later) COM-backend sessions stage and commit through
     the same code path (PRD sec 6.3.1).
 
+    Scratch has two subfolders (plan doc sec 1), not one flat directory:
+    `working_dir/scratch/working/` holds every staged workbook's live copy, named with its
+    *original real basename* (not its logical/YAML name) — needed so a same-folder (R1)
+    external link between two staged workbooks still resolves once both sit in this same
+    folder. `working_dir/scratch/originals/` holds a pre-edit backup, made only for
+    write-intent workbooks, for commit-time rollback safety and as an untouched reference
+    (sec 1.4) — a purely defensive copy, never opened or read by this class itself.
+
     Args:
-        working_dir: The run's working directory (PRD sec 6.3.4) — scratch copies are staged
-            into `working_dir/scratch/`, created lazily on first `stage()` call, never just by
-            constructing a `ScratchManager`.
+        working_dir: The run's working directory (PRD sec 6.3.4) — scratch subfolders are
+            created lazily on first `stage()` call, never just by constructing a
+            `ScratchManager`.
     """
 
     def __init__(self, working_dir: Path) -> None:
-        self._scratch_dir = working_dir / "scratch"
+        self._working_subdir = working_dir / "scratch" / "working"
+        self._originals_dir = working_dir / "scratch" / "originals"
         self._staged: dict[str, tuple[Path, Path, bool]] = (
             {}
-        )  # name -> (real_path, scratch_path, writes)
+        )  # name -> (real_path, working_path, writes)
         self._backups: dict[str, Path] = (
             {}
         )  # name -> .bak path, only set during a commit_all()
 
     def stage(self, name: str, real_path: Path, writes: bool = True) -> Path:
-        """Copy a workbook into the scratch dir, or reserve a scratch path for a new one.
+        """Copy a workbook into `scratch/working/`, or reserve a path there for a new one.
 
         Args:
             name: The workbook's logical name.
             real_path: Its real file path. If it doesn't exist yet (a `create_if_missing`
                 workbook), no copy happens — the caller creates the workbook directly at the
-                returned scratch path instead.
+                returned working path instead.
             writes: Whether this workbook may be written to and needs committing back later.
                 False for a read-only session (PRD sec 6.2.3's correction — staged too now, to
                 avoid holding a handle open on the real file, but never committed since
-                nothing about it ever changes).
+                nothing about it ever changes). Only a `writes=True` workbook gets a
+                `scratch/originals/` backup — a read-only copy never changes, so there's
+                nothing to back up.
 
         Returns:
-            The scratch path to open/create the workbook at instead of `real_path`.
+            The `scratch/working/` path to open/create the workbook at instead of `real_path`.
+
+        Note:
+            Two declared workbooks with the same real basename (in different real folders)
+            would collide in `scratch/working/` — not handled specially; not expected in
+            practice and not worth the extra complexity unless it actually comes up.
         """
-        self._scratch_dir.mkdir(parents=True, exist_ok=True)
-        scratch_path = self._scratch_dir / f"{name}{real_path.suffix}"
+        self._working_subdir.mkdir(parents=True, exist_ok=True)
+        working_path = self._working_subdir / real_path.name
         if real_path.exists():
-            shutil.copy2(real_path, scratch_path)
-        self._staged[name] = (real_path, scratch_path, writes)
-        return scratch_path
+            shutil.copy2(real_path, working_path)
+            if writes:
+                self._originals_dir.mkdir(parents=True, exist_ok=True)
+                shutil.copy2(real_path, self._originals_dir / real_path.name)
+        self._staged[name] = (real_path, working_path, writes)
+        return working_path
 
-    def commit(self, name: str) -> None:
-        """Commit one staged workbook's scratch content back to its real path.
-
-        Rename-based, not copy-based (PRD sec 6.3.3): the new content is prepared at a `.tmp`
-        sibling *before* `real_path` is touched at all, so a failure at that step leaves
-        `real_path` completely untouched. If `real_path` already exists, it's renamed aside to
-        a `.bak` sibling (an instant, zero-copy move — the original was already sitting there
-        untouched pre-commit) before the `.tmp` file is renamed into place. The `.bak` is left
-        in place here — `commit_all()` deletes every one only after every workbook in the
-        batch has committed successfully, or uses it to roll back on a later failure.
+    def working_path(self, name: str) -> Path:
+        """The `scratch/working/` path a staged workbook was given, as returned by `stage()`.
 
         Args:
             name: The workbook's logical name, as passed to `stage()`.
         """
-        real_path, scratch_path, _ = self._staged[name]
+        return self._staged[name][1]
+
+    def real_path(self, name: str) -> Path:
+        """The real, on-disk path a staged workbook will eventually be committed back to.
+
+        Args:
+            name: The workbook's logical name, as passed to `stage()`.
+        """
+        return self._staged[name][0]
+
+    def commit(self, name: str) -> None:
+        """Commit one staged workbook's working content back to its real path.
+
+        Copy-based, not rename-based (plan doc sec 3.2): if `real_path` already exists, it is
+        first *copied* (never moved/deleted) to a `.bak` sibling, so the original stays
+        recoverable even if the following overwrite is interrupted. The working copy is then
+        copied onto `real_path`. The `.bak` is left in place here — `commit_all()` deletes
+        every one only after every workbook in the batch has committed successfully, or copies
+        it back to roll back on a later failure.
+
+        Args:
+            name: The workbook's logical name, as passed to `stage()`.
+        """
+        real_path, working_path, _ = self._staged[name]
         real_path.parent.mkdir(parents=True, exist_ok=True)
-        tmp_path = real_path.with_name(real_path.name + ".tmp")
-        shutil.copy2(scratch_path, tmp_path)
         if real_path.exists():
             bak_path = real_path.with_name(real_path.name + ".bak")
-            real_path.rename(bak_path)
+            shutil.copy2(real_path, bak_path)
             self._backups[name] = bak_path
-        tmp_path.rename(real_path)
+        shutil.copy2(working_path, real_path)
 
     def commit_all(self) -> None:
         """Commit every staged, write-intent workbook, rolling back on a later failure (PRD
-        sec 6.3.3). Read-only staged workbooks (`stage(..., writes=False)`) are skipped
-        entirely — nothing about them ever changes, so there's nothing to commit back.
+        sec 6.3.3; plan doc sec 3). Read-only staged workbooks (`stage(..., writes=False)`) are
+        skipped entirely — nothing about them ever changes, so there's nothing to commit back.
 
         No separate upfront precheck pass — each workbook's commit is attempted directly. If
         one fails, every workbook already committed *in this call* is rolled back (its `.bak`
-        renamed back over `real_path`, reverse order), and whether each individual rollback
+        copied back over `real_path`, reverse order), and whether each individual rollback
         itself succeeded is recorded. A workbook whose rollback also fails needs a human — its
         `.bak` is deliberately left in place rather than deleted, so the original content is
         still recoverable from disk. On full success, every `.bak` created this call is deleted.
@@ -419,7 +452,7 @@ class ScratchManager:
             try:
                 real_path.unlink(missing_ok=True)
                 if bak_path is not None:
-                    bak_path.rename(real_path)
+                    shutil.copy2(bak_path, real_path)
                 results[name] = True
             except OSError:
                 results[name] = False
