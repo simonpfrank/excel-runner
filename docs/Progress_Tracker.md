@@ -1,5 +1,45 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-08-31, Windows)
+**Status:** gap-2 (link-aware repointing/recalc, `docs/recalc_and_link_refresh_plan.md`) —
+**feature-complete**. All three remaining threads from "finish it" are done, tested (real
+Excel throughout, no mocks), and passing the full quality gate.
+**Working on:**
+- Wired R4 end to end into `SessionManager` (`engine.py`):
+  - `__init__` gains `link_targets`/`commit_order` params (both optional, default empty/None —
+    zero behavior change for callers with no R4 links); builds a reverse `_link_sources` index
+    and a `_wired_r4_links` dedup set.
+  - `get_or_open` now calls `_wire_r4_links_touching(name)` after registering a new session —
+    `_wire_one_r4_link(source, target)` fires (plan doc sec 2 R4.1) the first time *both* sides
+    of a pair are staged, in either order: switches `source`'s session to the `xlw` backend if
+    needed, finds which of `com_link_sources(source)`'s current entries resolves to `target`'s
+    real path, and `ChangeLink`s it to `target`'s scratch/working path.
+  - `commit_all` now passes `self._commit_order` and a new `_revert_r4_links_before_commit`
+    hook into `ScratchManager.commit_all()` (see below) — for each write-intent workbook with
+    outbound R4 link(s), repoints them from the target's scratch path back to its real path and
+    saves, right before that workbook's own scratch-to-real copy (plan doc sec 3.2.1); no extra
+    recalculation call needed (probe10).
+- `ScratchManager.commit_all()` (`engine.py`) gains two optional params: `order` (falls back to
+  natural staged order when `None`) and `before_commit` (called right before each workbook's own
+  `commit()` — this is the hook `SessionManager` uses for the link-revert-and-save step). The
+  failure `except` was widened from `OSError` to `Exception` (`# noqa: BLE001`, matching an
+  existing project convention) since `before_commit` can raise a COM error too — same rollback
+  path either way.
+- `runner.py`'s `run_workflow()` computes `discover_write_intent_link_graph(...)` and
+  `compute_link_commit_order(...)` once, right after `plan = engine.plan(...)` (so a cyclical/
+  chained R4 link, R6/R7, raises before any workbook is ever opened), and passes both into
+  `SessionManager`.
+- 3 new real-Excel tests in `tests/unit/test_session_manager.py` (`TestR4LinkWiringAtStaging`,
+  `TestR4LinkRevertAndCommit`), plus a shared `_make_target_and_linking_workbooks` helper that
+  builds a genuine on-disk R4 link (same-folder relative link, `ChangeLink`'d to an absolute
+  path, then the linking workbook moved to its own separate real folder) — matches the project
+  convention of no mocks for anything COM-touching. All 3 passed first run, no debugging needed.
+- Full suite: 350 passed (up from 332), no regressions. ruff + mypy --strict clean; vulture/
+  radon show only pre-existing findings (all complexity flags are C, none D — within policy).
+**Next step:** None outstanding for gap-2 — it's done. If picked up again, worth a final harsh
+code review per AGENTS.md's "every 3 features" rule, since this was a multi-session build.
+**Notes:** None outstanding.
+
 ## Last Session (2026-08-28c, Windows)
 **Status:** In Progress — gap-2 (link-aware repointing/recalc, `docs/recalc_and_link_refresh_plan.md`)
 **Working on:** User said "finish it" — delegated the full remaining gap-2 scope (R1

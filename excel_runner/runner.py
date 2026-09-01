@@ -196,7 +196,18 @@ def run_workflow(
     base = Path(working_dir) if working_dir is not None else Path.cwd()
     run_dir = base / "excel_runner_runs" / Path(path).stem
     scratch = engine.ScratchManager(run_dir)
-    session_manager = engine.SessionManager(workflow.workbooks, scratch)
+
+    # R4 link graph + commit order (docs/recalc_and_link_refresh_plan.md), computed once here,
+    # right after plan() — plan() itself must stay workbook-access-free (tier-2, static-only),
+    # and a cyclical/chained R4 link (R6/R7) must raise before any workbook is ever touched.
+    workbook_paths = {name: Path(ref.file) for name, ref in workflow.workbooks.items()}
+    write_intent = {name for name, mode in plan.modes.items() if mode == "read_write"}
+    link_targets = engine.discover_write_intent_link_graph(workbook_paths, write_intent)
+    commit_order = engine.compute_link_commit_order(link_targets)
+
+    session_manager = engine.SessionManager(
+        workflow.workbooks, scratch, link_targets=link_targets, commit_order=commit_order
+    )
     audit_log_path = run_dir / "audit.jsonl"
     audit = AuditLogger(audit_log_path)
 

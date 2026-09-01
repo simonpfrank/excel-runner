@@ -8,15 +8,16 @@ it" and gets staged through ScratchManager (PRD sec 6.3.1); mode="read_only" is 
 committed back since nothing about it ever changes.
 """
 
+import shutil
 from pathlib import Path
 
 import openpyxl
 import pytest
 
-from excel_runner import engine
+from excel_runner import backends, engine
 from excel_runner.core import ActionExecutionError, WorkbookRef, WorkbookSession
 from excel_runner.engine import ScratchManager, SessionManager
-from tests.unit.conftest import requires_excel
+from tests.unit.conftest import requires_excel, requires_working_xlwings_save
 
 
 def _write_workbook(path: Path, cell_value: str = "original") -> Path:
@@ -27,6 +28,44 @@ def _write_workbook(path: Path, cell_value: str = "original") -> Path:
     sheet["A1"] = cell_value
     workbook.save(path)
     return path
+
+
+def _make_target_and_linking_workbooks(
+    tmp_path: Path, target_value: float = 5
+) -> tuple[Path, Path]:
+    """A real xlsx pair with a genuine R4 (absolute-path) external link between them, in two
+    separate real folders. Built the same way the plan doc's probes did: `linking` first gets
+    a same-folder relative link (so the formula itself resolves), is `ChangeLink`'d to the
+    target's absolute path, then gets moved to its own separate real folder — reproducing
+    exactly what an R4 link looks like on disk, without needing to hand-author rels XML.
+
+    Returns:
+        (target_path, linking_path) — both real, on-disk, closed workbooks.
+    """
+    registry = backends.OwnedInstanceRegistry()
+    app = registry.spawn()
+    try:
+        target = app.books.add()
+        target.sheets[0].range("A1").value = target_value
+        target_path = tmp_path / "target_dir" / "target.xlsx"
+        target_path.parent.mkdir(parents=True, exist_ok=True)
+        target.save(str(target_path))
+
+        linking = app.books.add()
+        linking.sheets[0].range("A1").formula = "='[target.xlsx]Sheet1'!A1*2"
+        same_folder_path = tmp_path / "target_dir" / "linking.xlsx"
+        linking.save(str(same_folder_path))
+        linking.api.ChangeLink(Name="target.xlsx", NewName=str(target_path.resolve()), Type=1)
+        linking.save()
+        linking.close()
+        target.close()
+    finally:
+        registry.close_owned()
+
+    linking_path = tmp_path / "linking_dir" / "linking.xlsx"
+    linking_path.parent.mkdir(parents=True, exist_ok=True)
+    shutil.move(str(same_folder_path), str(linking_path))
+    return target_path, linking_path
 
 
 class TestGetOrOpen:
@@ -450,3 +489,106 @@ class TestCommitAll:
         manager.get_or_open("manip", mode="read_only")
 
         manager.commit_all()  # should not raise, nothing to commit
+
+
+@requires_excel
+@requires_working_xlwings_save
+class TestR4LinkWiringAtStaging:
+    """docs/recalc_and_link_refresh_plan.md sec 2 R4.1: staging-time ChangeLink, real Excel
+    throughout (project convention, matches TestBackendSwitching/TestLinkPrimitives)."""
+
+    def test_staging_both_sides_repoints_the_link_to_the_targets_scratch_copy(
+        self, tmp_path: Path
+    ) -> None:
+        target_path, linking_path = _make_target_and_linking_workbooks(tmp_path, target_value=5)
+        workbooks = {
+            "target": WorkbookRef(name="target", file=str(target_path)),
+            "linking": WorkbookRef(name="linking", file=str(linking_path)),
+        }
+        link_targets = {"linking": {"target"}, "target": set()}
+        manager = SessionManager(
+            workbooks, ScratchManager(tmp_path / "working"), link_targets=link_targets
+        )
+        try:
+            manager.get_or_open("target", capability="xlw")
+            # Diverge the real target file now that its scratch copy already holds 5 — a
+            # value only visible on the linking side if its link is NOT still pointing here.
+            stale = openpyxl.load_workbook(target_path)
+            stale.active["A1"] = 999
+            stale.save(target_path)
+
+            linking_session = manager.get_or_open("linking", capability="xlw")
+
+            assert ("linking", "target") in manager._wired_r4_links
+            assert linking_session.handle.sheets[0].range("A1").value == 10  # 5 * 2, from scratch
+        finally:
+            manager.close_all()
+
+    def test_wiring_a_pair_only_happens_once(self, tmp_path: Path) -> None:
+        target_path, linking_path = _make_target_and_linking_workbooks(tmp_path)
+        workbooks = {
+            "target": WorkbookRef(name="target", file=str(target_path)),
+            "linking": WorkbookRef(name="linking", file=str(linking_path)),
+        }
+        link_targets = {"linking": {"target"}, "target": set()}
+        manager = SessionManager(
+            workbooks, ScratchManager(tmp_path / "working"), link_targets=link_targets
+        )
+        try:
+            manager.get_or_open("target", capability="xlw")
+            manager.get_or_open("linking", capability="xlw")
+            manager.get_or_open("linking", capability="xlw")  # cached, second call
+            manager.get_or_open("target", capability="xlw")  # cached, second call
+
+            assert manager._wired_r4_links == {("linking", "target")}
+        finally:
+            manager.close_all()
+
+
+@requires_excel
+@requires_working_xlwings_save
+class TestR4LinkRevertAndCommit:
+    """docs/recalc_and_link_refresh_plan.md sec 3.2.1: commit-time ChangeLink revert (target
+    scratch path -> target real path), then save — once the target is already committed
+    (R5 commit order), before `name`'s own scratch-to-real commit."""
+
+    def test_commit_all_reverts_the_link_and_both_real_files_end_up_correct(
+        self, tmp_path: Path
+    ) -> None:
+        target_path, linking_path = _make_target_and_linking_workbooks(tmp_path, target_value=5)
+        workbooks = {
+            "target": WorkbookRef(name="target", file=str(target_path)),
+            "linking": WorkbookRef(name="linking", file=str(linking_path)),
+        }
+        link_targets = {"linking": {"target"}, "target": set()}
+        commit_order = engine.compute_link_commit_order(link_targets)
+        manager = SessionManager(
+            workbooks,
+            ScratchManager(tmp_path / "working"),
+            link_targets=link_targets,
+            commit_order=commit_order,
+        )
+        try:
+            target_session = manager.get_or_open("target", capability="xlw")
+            manager.get_or_open("linking", capability="xlw")  # triggers staging-time wiring
+
+            target_session.handle.sheets[0].range("A1").value = 50
+            target_session.dirty = True
+            manager.checkpoint()
+
+            manager.commit_all()
+        finally:
+            manager.close_all()
+
+        # target's real file now holds its final, committed content
+        assert openpyxl.load_workbook(target_path)["Sheet1"]["A1"].value == 50
+
+        # linking's real file's stored link is back to target's real, absolute path — not left
+        # pointing at a scratch copy that won't exist once this run's scratch dir is gone
+        raw_targets = engine.scan_external_link_targets(linking_path)
+        resolved = {engine.resolve_link_target(t, linking_path) for t in raw_targets}
+        assert target_path.resolve() in resolved
+
+        # and its cached formula value reflects target's final, real content
+        cached = openpyxl.load_workbook(linking_path, data_only=True)["Sheet1"]["A1"].value
+        assert cached == 100  # 50 * 2

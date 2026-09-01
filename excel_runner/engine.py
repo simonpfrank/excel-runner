@@ -388,7 +388,11 @@ class ScratchManager:
             self._backups[name] = bak_path
         shutil.copy2(working_path, real_path)
 
-    def commit_all(self) -> None:
+    def commit_all(
+        self,
+        order: list[str] | None = None,
+        before_commit: Callable[[str], None] | None = None,
+    ) -> None:
         """Commit every staged, write-intent workbook, rolling back on a later failure (PRD
         sec 6.3.3; plan doc sec 3). Read-only staged workbooks (`stage(..., writes=False)`) are
         skipped entirely — nothing about them ever changes, so there's nothing to commit back.
@@ -400,19 +404,37 @@ class ScratchManager:
         `.bak` is deliberately left in place rather than deleted, so the original content is
         still recoverable from disk. On full success, every `.bak` created this call is deleted.
 
+        Args:
+            order: Commit order, as names (plan doc sec 3.1's R5 dependency order — a workbook
+                that another one's R4 link points to must be committed first). Defaults to the
+                natural write-intent staging order when there's no R4 link graph to respect.
+            before_commit: Called with a workbook's name right before its own `commit()` —
+                this is where `SessionManager` hooks in R4's commit-time link-revert-and-save
+                (plan doc sec 3.2.1), so it runs while the workbook is still open and its link
+                still points at its target's scratch copy, before that copy's content gets
+                copied onto the workbook's own real path. Any exception it raises is treated
+                exactly like a `commit()` failure — same rollback of already-committed
+                workbooks.
+
         Raises:
-            ActionExecutionError: If any workbook's commit fails. The message names the
-                workbook that failed, and — if any earlier workbook's rollback in this same
-                call also failed — names which one(s) need manual attention.
+            ActionExecutionError: If any workbook's commit (or `before_commit` hook) fails.
+                The message names the workbook that failed, and — if any earlier workbook's
+                rollback in this same call also failed — names which one(s) need manual
+                attention.
         """
+        names = (
+            order
+            if order is not None
+            else [name for name, (_, _, writes) in self._staged.items() if writes]
+        )
         committed: list[str] = []
-        for name, (_, _, writes) in self._staged.items():
-            if not writes:
-                continue
+        for name in names:
             try:
+                if before_commit is not None:
+                    before_commit(name)
                 self.commit(name)
                 committed.append(name)
-            except OSError as exc:
+            except Exception as exc:  # noqa: BLE001 - before_commit may raise a COM error too
                 rollback_results = self._rollback(committed)
                 needs_human = [n for n, ok in rollback_results.items() if not ok]
                 rolled_back = [n for n, ok in rollback_results.items() if ok]
@@ -510,16 +532,36 @@ class SessionManager:
     Args:
         workbooks: The workflow's `workbooks:` registry, name to WorkbookRef.
         scratch: Where read-write sessions get staged (PRD sec 6.3.1).
+        link_targets: R4 link graph (`discover_write_intent_link_graph`'s output) — source
+            workbook name to the set of other write-intent workbook names it has an R4
+            (absolute/UNC) external link to. `None`/empty if there's no such link in this run,
+            the common case — nothing extra happens then.
+        commit_order: R4 commit order (`compute_link_commit_order`'s output over
+            `link_targets`, computed once upfront so a cyclical/chained link (R6/R7) raises
+            before any workbook is touched) — every write-intent workbook committed in this
+            order instead of arbitrary staged order, so a workbook is always committed after
+            every workbook its own R4 link(s) point to.
     """
 
     def __init__(
-        self, workbooks: dict[str, WorkbookRef], scratch: ScratchManager
+        self,
+        workbooks: dict[str, WorkbookRef],
+        scratch: ScratchManager,
+        link_targets: dict[str, set[str]] | None = None,
+        commit_order: list[str] | None = None,
     ) -> None:
         self._workbooks = workbooks
         self._scratch = scratch
         self._sessions: dict[str, WorkbookSession] = {}
         self._owned_instances = backends.OwnedInstanceRegistry()
         self._app: Any = None
+        self._link_targets: dict[str, set[str]] = link_targets or {}
+        self._link_sources: dict[str, set[str]] = {}
+        for source, targets in self._link_targets.items():
+            for target in targets:
+                self._link_sources.setdefault(target, set()).add(source)
+        self._commit_order = commit_order
+        self._wired_r4_links: set[tuple[str, str]] = set()
 
     def _shared_app(self) -> Any:
         """Return the run's one shared, lazily-spawned Excel instance, spawning it on first
@@ -578,6 +620,7 @@ class SessionManager:
             else self._open_read_only(name, ref, needed)
         )
         self._sessions[name] = session
+        self._wire_r4_links_touching(name)
         return session
 
     def _open_handle(
@@ -654,6 +697,78 @@ class SessionManager:
         session.handle = self._open_handle(Path(session.path), session.mode, needed)
         session.backend = needed
 
+    def _wire_r4_links_touching(self, name: str) -> None:
+        """After staging `name`, repoint (`ChangeLink`) any R4 link between it and another
+        workbook that's already staged too, in either direction (plan doc sec 2 R4.1) — a
+        no-op until both sides of a given pair have been staged; whichever one gets staged
+        second is what actually triggers the repoint.
+
+        Args:
+            name: The workbook logical name that was just staged/opened.
+        """
+        for target in self._link_targets.get(name, ()):
+            self._wire_one_r4_link(name, target)
+        for source in self._link_sources.get(name, ()):
+            self._wire_one_r4_link(source, name)
+
+    def _wire_one_r4_link(self, source: str, target: str) -> None:
+        """Repoint `source`'s R4 link(s) to `target` from `target`'s real path to its scratch
+        path, once, the first time both are staged (plan doc sec 2 R4.1). Safe even if
+        `target`'s scratch copy is a fresh, unedited copy — that's exactly the state its real
+        file was already in.
+
+        Args:
+            source: The workbook whose link is being repointed. Its session is temporarily
+                switched to the `xlw` backend if it isn't already — `ChangeLink` requires COM.
+            target: The workbook the link points to, already staged.
+        """
+        if source not in self._sessions or target not in self._sessions:
+            return
+        pair = (source, target)
+        if pair in self._wired_r4_links:
+            return
+        self._wired_r4_links.add(pair)
+        source_session = self._sessions[source]
+        if source_session.backend != "xlw":
+            self._switch_backend(source_session, "xlw")
+        target_real = self._scratch.real_path(target).resolve()
+        target_working = self._scratch.working_path(target)
+        for current_source_name in backends.com_link_sources(source_session.handle):
+            if resolve_link_target(current_source_name, Path(source_session.path)) == target_real:
+                backends.com_change_link(
+                    source_session.handle, current_source_name, str(target_working)
+                )
+                source_session.dirty = True
+
+    def _revert_r4_links_before_commit(self, name: str) -> None:
+        """Commit-time hook (plan doc sec 3.2.1): repoint every outbound R4 link `name` has,
+        from its target's scratch path back to the target's real path, and save — called by
+        `ScratchManager.commit_all()` right before `name`'s own commit, once its target(s) are
+        already committed (guaranteed by `commit_order`, R5). No extra recalculation needed
+        after this save (probe10).
+
+        Args:
+            name: The workbook about to be committed.
+        """
+        targets = self._link_targets.get(name)
+        if not targets:
+            return
+        session = self._sessions[name]
+        if session.backend != "xlw":
+            self._switch_backend(session, "xlw")
+        for target in targets:
+            target_real = self._scratch.real_path(target).resolve()
+            target_working = self._scratch.working_path(target).resolve()
+            for current_source_name in backends.com_link_sources(session.handle):
+                if resolve_link_target(current_source_name, Path(session.path)) == target_working:
+                    backends.com_change_link(
+                        session.handle, current_source_name, str(target_real)
+                    )
+                    session.dirty = True
+        if session.dirty:
+            backends.xlw_save_workbook(session.handle)
+            session.dirty = False
+
     def _create(self, ref: WorkbookRef, at_path: Path) -> None:
         if not ref.create_if_missing:
             raise ActionExecutionError(
@@ -694,9 +809,15 @@ class SessionManager:
         so this is mostly a no-op by the time a run reaches here) — kept anyway as the final
         safety net at the commit boundary, not something to remove just because it's usually
         a no-op.
+
+        Commits in `self._commit_order` (R5) when there's an R4 link graph, so a workbook is
+        always committed after every workbook its own R4 link(s) point to; `_revert_r4_links_
+        before_commit` runs right before each one's own commit (plan doc sec 3.2).
         """
         self._save_dirty_staged_sessions()
-        self._scratch.commit_all()
+        self._scratch.commit_all(
+            order=self._commit_order, before_commit=self._revert_r4_links_before_commit
+        )
 
     def close_all(self) -> None:
         """Close every open session, then quit the shared owned Excel instance (if one was ever
