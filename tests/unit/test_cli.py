@@ -99,3 +99,66 @@ class TestMain:
 
         assert exit_code == 1
         assert any("bad workflow" in record.message for record in caplog.records)
+
+
+class TestConsoleLogging:
+    """The CLI is the one place in this project that attaches logging handlers itself (every
+    library module just calls `logging.getLogger(__name__)`, see AGENTS.md's logging section).
+    WARNING/ERROR go to stderr; DEBUG/INFO go to stdout — so a caller piping only stdout
+    doesn't see anything that actually needs attention, and vice versa.
+    """
+
+    def test_debug_and_info_go_to_stdout_not_stderr(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with patch("excel_runner.cli.run_workflow", return_value=_success_result()):
+            main(["workflow.yaml", "--logging-level", "DEBUG"])
+        logging.getLogger("excel_runner.cli").info("hello-info-marker")
+        logging.getLogger("excel_runner.cli").debug("hello-debug-marker")
+
+        captured = capsys.readouterr()
+        assert "hello-info-marker" in captured.out
+        assert "hello-debug-marker" in captured.out
+        assert "hello-info-marker" not in captured.err
+        assert "hello-debug-marker" not in captured.err
+
+    def test_warning_and_error_go_to_stderr_not_stdout(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with patch("excel_runner.cli.run_workflow", return_value=_success_result()):
+            main(["workflow.yaml"])
+        logging.getLogger("excel_runner.cli").warning("hello-warning-marker")
+        logging.getLogger("excel_runner.cli").error("hello-error-marker")
+
+        captured = capsys.readouterr()
+        assert "hello-warning-marker" in captured.err
+        assert "hello-error-marker" in captured.err
+        assert "hello-warning-marker" not in captured.out
+        assert "hello-error-marker" not in captured.out
+
+    def test_default_info_level_does_not_show_debug(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with patch("excel_runner.cli.run_workflow", return_value=_success_result()):
+            main(["workflow.yaml"])
+        logging.getLogger("excel_runner.cli").debug("should-not-appear")
+        logging.getLogger("excel_runner.cli").info("should-appear")
+
+        captured = capsys.readouterr()
+        assert "should-not-appear" not in captured.out
+        assert "should-appear" in captured.out
+
+    def test_format_includes_level_module_function_and_line(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        with patch("excel_runner.cli.run_workflow", return_value=_success_result()):
+            main(["workflow.yaml"])
+        logging.getLogger("excel_runner.cli").warning("format-marker")
+
+        captured = capsys.readouterr()
+        line = next(
+            entry for entry in captured.err.splitlines() if "format-marker" in entry
+        )
+        assert "WARNING" in line
+        assert "cli" in line
+        assert "test_format_includes_level_module_function_and_line" in line

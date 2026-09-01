@@ -4,7 +4,8 @@ R3/R4): builds the graph `compute_link_commit_order()` consumes, from real workb
 covered by its own real-Excel tests in test_link_discovery.py, and an absolute (R3/R4) link is
 hard to reproduce portably in a fixture (Excel collapses same-drive links back to relative
 form, per test_link_discovery.py's probe finding) — so this is the correct mock boundary
-(project convention: mock only already-covered dependencies, never the thing under test)."""
+(project convention: mock only already-covered dependencies, never the thing under test).
+"""
 
 from pathlib import Path
 
@@ -22,7 +23,9 @@ class TestDiscoverWriteIntentLinkGraph:
     def test_no_links_gives_every_write_intent_workbook_an_empty_set(
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
-        monkeypatch.setattr("excel_runner.engine.scan_external_link_targets", lambda path: [])
+        monkeypatch.setattr(
+            "excel_runner.engine.scan_external_link_targets", lambda path: []
+        )
         paths = {
             "a": _touch(tmp_path / "a.xlsx"),
             "b": _touch(tmp_path / "b.xlsx"),

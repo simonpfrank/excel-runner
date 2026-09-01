@@ -10,6 +10,7 @@ sibling first, then the working copy is copied onto the real path. Rollback like
 `.bak` back over `real_path` rather than renaming it.
 """
 
+import logging
 from pathlib import Path
 
 import pytest
@@ -57,7 +58,9 @@ class TestStage:
         assert not working_path.exists()
         assert working_path.parent == tmp_path / "working" / "scratch" / "working"
 
-    def test_write_intent_workbook_gets_an_originals_backup(self, tmp_path: Path) -> None:
+    def test_write_intent_workbook_gets_an_originals_backup(
+        self, tmp_path: Path
+    ) -> None:
         real = _write_file(tmp_path / "real" / "manip.xlsx", "original")
         manager = ScratchManager(tmp_path / "working")
 
@@ -78,7 +81,9 @@ class TestStage:
 
 
 class TestCommit:
-    def test_commit_copies_working_content_back_to_the_real_path(self, tmp_path: Path) -> None:
+    def test_commit_copies_working_content_back_to_the_real_path(
+        self, tmp_path: Path
+    ) -> None:
         real = _write_file(tmp_path / "real" / "manip.xlsx", "original")
         manager = ScratchManager(tmp_path / "working")
         working_path = manager.stage("manip", real)
@@ -88,7 +93,9 @@ class TestCommit:
 
         assert real.read_text() == "changed"
 
-    def test_commit_creates_the_real_file_when_it_did_not_exist_before(self, tmp_path: Path) -> None:
+    def test_commit_creates_the_real_file_when_it_did_not_exist_before(
+        self, tmp_path: Path
+    ) -> None:
         real = tmp_path / "real" / "new.xlsx"
         manager = ScratchManager(tmp_path / "working")
         working_path = manager.stage("new", real)
@@ -98,7 +105,9 @@ class TestCommit:
 
         assert real.read_text() == "brand new content"
 
-    def test_commit_backs_up_the_original_via_copy_not_rename(self, tmp_path: Path) -> None:
+    def test_commit_backs_up_the_original_via_copy_not_rename(
+        self, tmp_path: Path
+    ) -> None:
         """The original is preserved as a <real>.bak sibling during commit — copied, never
         moved/deleted, before the overwrite (plan doc sec 3.2)."""
         real = _write_file(tmp_path / "real" / "manip.xlsx", "original")
@@ -165,7 +174,8 @@ class TestCommitAll:
         self, tmp_path: Path, monkeypatch: pytest.MonkeyPatch
     ) -> None:
         """A workbook staged with no real_path yet (create_if_missing) has no `.bak` to
-        restore from on rollback — it should simply be removed, not restored to nothing."""
+        restore from on rollback — it should simply be removed, not restored to nothing.
+        """
         new_real = tmp_path / "real" / "new.xlsx"
         real_b = _write_file(tmp_path / "real" / "b.xlsx", "b-original")
         manager = ScratchManager(tmp_path / "working")
@@ -209,7 +219,9 @@ class TestCommitAll:
 
         original_copy2 = shutil_module.copy2
 
-        def failing_copy2(src: object, dst: object, *args: object, **kwargs: object) -> object:
+        def failing_copy2(
+            src: object, dst: object, *args: object, **kwargs: object
+        ) -> object:
             # Only the rollback step ever copies a .bak sibling back over real_path — this
             # leaves the normal commit path (which copies real_path -> .bak, the other
             # direction) working normally, so "a" genuinely commits first before its rollback
@@ -227,5 +239,47 @@ class TestCommitAll:
         assert "a" in exc_info.value.detail.message  # needs_human, named explicitly
 
 
-        assert "b" in exc_info.value.detail.message  # the workbook whose commit failed
-        assert "a" in exc_info.value.detail.message  # needs_human, named explicitly
+class TestLogging:
+    """Production-visibility logging (AGENTS.md's logging section) — staging/committing a
+    workbook is exactly the kind of "meaningful step" that should be visible at INFO without
+    reading code, especially since a large workbook's commit can take a while."""
+
+    def test_stage_logs_at_info(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        real = _write_file(tmp_path / "real" / "manip.xlsx", "original")
+        manager = ScratchManager(tmp_path / "working")
+
+        with caplog.at_level(logging.INFO, logger="excel_runner.engine"):
+            manager.stage("manip", real)
+
+        messages = " ".join(r.message for r in caplog.records)
+        assert "manip" in messages
+        assert "manip.xlsx" in messages
+
+    def test_commit_logs_at_info(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        real = _write_file(tmp_path / "real" / "manip.xlsx", "original")
+        manager = ScratchManager(tmp_path / "working")
+        manager.stage("manip", real).write_text("changed")
+
+        with caplog.at_level(logging.INFO, logger="excel_runner.engine"):
+            manager.commit("manip")
+
+        messages = " ".join(r.message for r in caplog.records)
+        assert "manip" in messages
+
+    def test_commit_all_logs_start_and_completion(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        real = _write_file(tmp_path / "real" / "manip.xlsx", "original")
+        manager = ScratchManager(tmp_path / "working")
+        manager.stage("manip", real).write_text("changed")
+
+        with caplog.at_level(logging.INFO, logger="excel_runner.engine"):
+            manager.commit_all()
+
+        messages = [r.message for r in caplog.records]
+        assert any("1" in m for m in messages)  # count of workbooks committed
+        assert any("complete" in m.lower() or "committed" in m.lower() for m in messages)

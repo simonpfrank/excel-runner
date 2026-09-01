@@ -13,6 +13,7 @@ that difference, which is exactly why it was chosen over raw `win32com` (PRD sec
   where actually needed.
 """
 
+import logging
 import re
 import shutil
 import time
@@ -24,6 +25,8 @@ from openpyxl.cell.cell import Cell
 from openpyxl.cell.read_only import ReadOnlyCell
 from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.workbook.workbook import Workbook
+
+logger = logging.getLogger(__name__)
 
 _SingleCell = (Cell, ReadOnlyCell)
 _WHOLE_COLUMN_RE = re.compile(r"^([A-Za-z]+):([A-Za-z]+)$")
@@ -444,6 +447,7 @@ def xlw_open_workbook(
     # Leaving Excel's own implicit link-update-on-open behavior enabled is not just redundant —
     # in a headless, invisible spawned App it can block indefinitely on a dialog nothing can
     # dismiss (confirmed empirically: reproduced exactly this hang, root-caused to this).
+    logger.info("Opening workbook via Excel COM: %s (mode=%s)", path, mode)
     return app.books.open(path, read_only=(mode == "read_only"), update_links=False)
 
 
@@ -453,6 +457,7 @@ def xlw_close_workbook(book: xw.Book) -> None:
     Args:
         book: The workbook to close.
     """
+    logger.debug('Closing workbook "%s"', book.name)
     book.close()
 
 
@@ -462,6 +467,7 @@ def xlw_save_workbook(book: xw.Book) -> None:
     Args:
         book: The workbook to save.
     """
+    logger.info('Saving workbook via Excel COM: "%s"', book.name)
     book.save()
 
 
@@ -485,6 +491,7 @@ def xlw_calculate_all(app: xw.App) -> None:
     Args:
         app: The App instance whose open workbooks should recalculate.
     """
+    logger.info("Recalculating all open workbooks")
     app.calculate()
 
 
@@ -500,6 +507,7 @@ def com_calculate_workbook(book: xw.Book) -> None:
     Args:
         book: The workbook to recalculate.
     """
+    logger.info('Recalculating workbook "%s"', book.name)
     for sheet in book.sheets:
         sheet.api.Calculate()
 
@@ -512,6 +520,7 @@ def com_calculate_sheet(book: xw.Book, sheet: str) -> None:
         book: The workbook containing the sheet.
         sheet: Worksheet name.
     """
+    logger.info('Recalculating sheet "%s" in workbook "%s"', sheet, book.name)
     book.sheets[sheet].api.Calculate()
 
 
@@ -523,6 +532,7 @@ def com_calculate_full(app: xw.App) -> None:
     Args:
         app: The App instance to fully recalculate.
     """
+    logger.info("Forcing full recalculation of all open workbooks")
     app.api.CalculateFull()
 
 
@@ -534,6 +544,7 @@ def com_calculate_full_rebuild(app: xw.App) -> None:
     Args:
         app: The App instance to fully rebuild-recalculate.
     """
+    logger.info("Forcing full rebuild recalculation of all open workbooks")
     app.api.CalculateFullRebuild()
 
 
@@ -555,12 +566,14 @@ def com_wait_until_calculation_done(
         TimeoutError: If calculation hasn't finished within `timeout`.
     """
     deadline = time.monotonic() + timeout
+    logger.info("Waiting for Excel calculation to finish (timeout=%ss)", timeout)
     while app.api.CalculationState != _XL_CALCULATION_DONE:
         if time.monotonic() >= deadline:
             raise TimeoutError(
                 f"Excel calculation did not finish within {timeout} seconds"
             )
         time.sleep(_CALCULATION_POLL_INTERVAL_SECONDS)
+    logger.info("Excel calculation finished")
 
 
 # --- Link management (external link repointing, docs/recalc_and_link_refresh_plan.md) ------
@@ -582,7 +595,9 @@ def com_link_sources(book: xw.Book) -> list[str]:
         the workbook has no external Excel-workbook links.
     """
     sources = book.api.LinkSources(_XL_LINK_TYPE_EXCEL_LINKS)
-    return list(sources) if sources else []
+    result = list(sources) if sources else []
+    logger.debug('Workbook "%s" external link sources: %s', book.name, result)
+    return result
 
 
 def com_change_link(book: xw.Book, name: str, new_name: str) -> None:
@@ -599,6 +614,7 @@ def com_change_link(book: xw.Book, name: str, new_name: str) -> None:
         name: The link's current source, exactly as returned by `com_link_sources`.
         new_name: The new target path.
     """
+    logger.info('Repointing link "%s" -> "%s" in workbook "%s"', name, new_name, book.name)
     book.api.ChangeLink(Name=name, NewName=new_name, Type=_XL_LINK_TYPE_EXCEL_LINKS)
 
 
@@ -612,6 +628,7 @@ def com_update_link(book: xw.Book, name: str) -> None:
         book: The workbook whose link should be refreshed.
         name: The link's current source, exactly as returned by `com_link_sources`.
     """
+    logger.debug('Updating link "%s" in workbook "%s" from disk', name, book.name)
     book.api.UpdateLink(Name=name, Type=_XL_LINK_TYPE_EXCEL_LINKS)
 
 
@@ -668,6 +685,7 @@ class OwnedInstanceRegistry:
         app.display_alerts = False
         app.api.AskToUpdateLinks = False
         self._owned[app.pid] = app
+        logger.info("Spawned owned Excel instance (pid=%d)", app.pid)
         return app
 
     def close_owned(self) -> None:
@@ -682,6 +700,7 @@ class OwnedInstanceRegistry:
         """
         errors: list[Exception] = []
         for pid, app in tuple(self._owned.items()):
+            logger.info("Closing owned Excel instance (pid=%d)", pid)
             try:
                 # Quit through a fresh xw.apps[pid] lookup, not the stored App object directly
                 # — this is the same fix as `add_book=True` above: the instance is registered

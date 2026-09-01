@@ -3,10 +3,14 @@
 Exists so a workflow can be triggered from outside Python — the driving use case is an external
 orchestration/automation workflow invoking this as a process/command-line step, but any external
 caller that can run a command and check the exit code works the same way. Only wraps
-`run_workflow()` (Spec sec 6.1); no behavior of its own beyond argument parsing. Results live at
-the run's fixed `working_dir` path (`excel_runner_runs/<yaml_stem>/audit.jsonl`, PRD sec
-6.3.4) — an external caller can read that file directly, so nothing is printed to stdout beyond
-whatever the console logger (Spec sec 6.2.1) is configured to show.
+`run_workflow()` (Spec sec 6.1); no behavior of its own beyond argument parsing plus console
+logging setup. Results live at the run's fixed `working_dir` path
+(`excel_runner_runs/<yaml_stem>/audit.jsonl`, PRD sec 6.3.4) — an external caller can read that
+file directly.
+
+This is the one place in the project that attaches logging handlers (AGENTS.md's logging
+section) — every library module (`runner.py`, `engine.py`, `backends.py`, ...) only ever calls
+`logging.getLogger(__name__)` and never configures a handler itself.
 """
 
 import argparse
@@ -17,6 +21,46 @@ from excel_runner.core import ExcelRunnerError
 from excel_runner.runner import run_workflow
 
 logger = logging.getLogger(__name__)
+
+_LOG_FORMAT = "%(asctime)s %(levelname)-8s %(module)s %(funcName)s:%(lineno)d %(message)s"
+_LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
+
+
+class _BelowWarningFilter(logging.Filter):
+    """Lets only DEBUG/INFO records through a handler — WARNING and above go to stderr
+    instead, via a separate handler with its own level floor."""
+
+    def filter(self, record: logging.LogRecord) -> bool:
+        return record.levelno < logging.WARNING
+
+
+def configure_logging(level_name: str) -> None:
+    """Attach the CLI's stdout/stderr console handlers to the `excel_runner` logger.
+
+    DEBUG/INFO go to stdout; WARNING/ERROR/CRITICAL go to stderr — so a caller piping only one
+    stream still sees a coherent picture (AGENTS.md's logging section). Clears any handlers
+    already on the logger first, so repeated calls (e.g. `main()` invoked more than once in the
+    same process, as tests do) don't accumulate duplicate handlers.
+
+    Args:
+        level_name: One of "DEBUG", "INFO", "WARNING", "ERROR" — the `excel_runner` logger's
+            new severity threshold.
+    """
+    package_logger = logging.getLogger("excel_runner")
+    package_logger.handlers.clear()
+    formatter = logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT)
+
+    stdout_handler = logging.StreamHandler(sys.stdout)
+    stdout_handler.setFormatter(formatter)
+    stdout_handler.addFilter(_BelowWarningFilter())
+    package_logger.addHandler(stdout_handler)
+
+    stderr_handler = logging.StreamHandler(sys.stderr)
+    stderr_handler.setFormatter(formatter)
+    stderr_handler.setLevel(logging.WARNING)
+    package_logger.addHandler(stderr_handler)
+
+    package_logger.setLevel(getattr(logging, level_name))
 
 
 def _parse_env_override(raw: str) -> tuple[str, str]:
@@ -76,9 +120,7 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     env_overrides = dict(args.env)
 
-    # Only sets the severity threshold — no handler/formatter configuration here at all, that's
-    # entirely the responsibility of whatever wraps this (Spec sec 6.2.1).
-    logging.getLogger("excel_runner").setLevel(getattr(logging, args.logging_level))
+    configure_logging(args.logging_level)
 
     try:
         result = run_workflow(args.workflow, env_overrides or None, working_dir=args.working_dir)

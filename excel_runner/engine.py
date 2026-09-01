@@ -4,6 +4,7 @@ scratch-copy execution model, and both validation tiers. See Spec sec 5.
 
 import difflib
 import inspect
+import logging
 import re
 import shutil
 import types as pytypes
@@ -30,6 +31,8 @@ from excel_runner.core import (
     WorkbookSession,
     Workflow,
 )
+
+logger = logging.getLogger(__name__)
 
 
 @dataclass(frozen=True)
@@ -110,7 +113,9 @@ def _first_line(docstring: str) -> str:
 _UNC_OR_DRIVE_ABSOLUTE = re.compile(r"^([a-zA-Z]:[\\/]|\\\\|//)")
 
 
-def classify_link_target(target: str) -> Literal["same_folder", "relative_subpath", "absolute"]:
+def classify_link_target(
+    target: str,
+) -> Literal["same_folder", "relative_subpath", "absolute"]:
     """Classify a raw external-link Target string (as stored in an xlsx's
     `externalLinks/_rels/*.rels`) per plan doc sec 2's R1/R2/R3-R4 categories.
 
@@ -341,6 +346,7 @@ class ScratchManager:
             would collide in `scratch/working/` — not handled specially; not expected in
             practice and not worth the extra complexity unless it actually comes up.
         """
+        logger.info('Staging workbook "%s" into scratch: %s', name, real_path)
         self._working_subdir.mkdir(parents=True, exist_ok=True)
         working_path = self._working_subdir / real_path.name
         if real_path.exists():
@@ -348,6 +354,8 @@ class ScratchManager:
             if writes:
                 self._originals_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(real_path, self._originals_dir / real_path.name)
+        else:
+            logger.debug('Workbook "%s" has no real file yet — created on first write', name)
         self._staged[name] = (real_path, working_path, writes)
         return working_path
 
@@ -381,6 +389,7 @@ class ScratchManager:
             name: The workbook's logical name, as passed to `stage()`.
         """
         real_path, working_path, _ = self._staged[name]
+        logger.info('Committing workbook "%s" to %s', name, real_path)
         real_path.parent.mkdir(parents=True, exist_ok=True)
         if real_path.exists():
             bak_path = real_path.with_name(real_path.name + ".bak")
@@ -427,6 +436,7 @@ class ScratchManager:
             if order is not None
             else [name for name, (_, _, writes) in self._staged.items() if writes]
         )
+        logger.info("Committing %d workbook(s): %s", len(names), ", ".join(names))
         committed: list[str] = []
         for name in names:
             try:
@@ -434,7 +444,9 @@ class ScratchManager:
                     before_commit(name)
                 self.commit(name)
                 committed.append(name)
-            except Exception as exc:  # noqa: BLE001 - before_commit may raise a COM error too
+            except (
+                Exception
+            ) as exc:  # noqa: BLE001 - before_commit may raise a COM error too
                 rollback_results = self._rollback(committed)
                 needs_human = [n for n, ok in rollback_results.items() if not ok]
                 rolled_back = [n for n, ok in rollback_results.items() if ok]
@@ -457,6 +469,7 @@ class ScratchManager:
         for bak_path in self._backups.values():
             bak_path.unlink(missing_ok=True)
         self._backups.clear()
+        logger.info("Commit complete: %d workbook(s) committed", len(names))
 
     def _rollback(self, committed_names: list[str]) -> dict[str, bool]:
         """Undo every already-committed workbook in `committed_names`, reverse order.
@@ -684,6 +697,9 @@ class SessionManager:
         """
         if session.backend == needed:
             return
+        logger.info(
+            'Switching workbook "%s" backend: %s -> %s', session.name, session.backend, needed
+        )
         if session.dirty:
             if session.backend == "file":
                 backends.save_workbook(session.handle, session.path)
@@ -728,13 +744,23 @@ class SessionManager:
         if pair in self._wired_r4_links:
             return
         self._wired_r4_links.add(pair)
+        logger.info('Wiring R4 link: "%s" -> "%s" (staging)', source, target)
         source_session = self._sessions[source]
         if source_session.backend != "xlw":
             self._switch_backend(source_session, "xlw")
         target_real = self._scratch.real_path(target).resolve()
         target_working = self._scratch.working_path(target)
         for current_source_name in backends.com_link_sources(source_session.handle):
-            if resolve_link_target(current_source_name, Path(source_session.path)) == target_real:
+            if (
+                resolve_link_target(current_source_name, Path(source_session.path))
+                == target_real
+            ):
+                logger.debug(
+                    'Repointing link "%s" in "%s" to scratch copy: %s',
+                    current_source_name,
+                    source,
+                    target_working,
+                )
                 backends.com_change_link(
                     source_session.handle, current_source_name, str(target_working)
                 )
@@ -760,7 +786,13 @@ class SessionManager:
             target_real = self._scratch.real_path(target).resolve()
             target_working = self._scratch.working_path(target).resolve()
             for current_source_name in backends.com_link_sources(session.handle):
-                if resolve_link_target(current_source_name, Path(session.path)) == target_working:
+                if (
+                    resolve_link_target(current_source_name, Path(session.path))
+                    == target_working
+                ):
+                    logger.info(
+                        'Reverting R4 link: "%s" -> "%s" (before commit)', name, target
+                    )
                     backends.com_change_link(
                         session.handle, current_source_name, str(target_real)
                     )

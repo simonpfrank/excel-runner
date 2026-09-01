@@ -8,6 +8,7 @@ it" and gets staged through ScratchManager (PRD sec 6.3.1); mode="read_only" is 
 committed back since nothing about it ever changes.
 """
 
+import logging
 import shutil
 from pathlib import Path
 
@@ -55,7 +56,9 @@ def _make_target_and_linking_workbooks(
         linking.sheets[0].range("A1").formula = "='[target.xlsx]Sheet1'!A1*2"
         same_folder_path = tmp_path / "target_dir" / "linking.xlsx"
         linking.save(str(same_folder_path))
-        linking.api.ChangeLink(Name="target.xlsx", NewName=str(target_path.resolve()), Type=1)
+        linking.api.ChangeLink(
+            Name="target.xlsx", NewName=str(target_path.resolve()), Type=1
+        )
         linking.save()
         linking.close()
         target.close()
@@ -206,6 +209,25 @@ class TestBackendSwitching:
             assert session.handle.name == "manip.xlsx"
         finally:
             manager.close_all()
+
+    def test_switching_backend_logs_at_info(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+        manager.get_or_open("manip", capability="file")
+
+        try:
+            with caplog.at_level(logging.INFO, logger="excel_runner.engine"):
+                manager.get_or_open("manip", capability="xlw")
+        finally:
+            manager.close_all()
+
+        messages = " ".join(r.message for r in caplog.records)
+        assert "manip" in messages
+        assert "file" in messages
+        assert "xlw" in messages
 
     def test_switching_an_open_file_session_to_xlw_reopens_it_there(
         self, tmp_path: Path
@@ -500,7 +522,9 @@ class TestR4LinkWiringAtStaging:
     def test_staging_both_sides_repoints_the_link_to_the_targets_scratch_copy(
         self, tmp_path: Path
     ) -> None:
-        target_path, linking_path = _make_target_and_linking_workbooks(tmp_path, target_value=5)
+        target_path, linking_path = _make_target_and_linking_workbooks(
+            tmp_path, target_value=5
+        )
         workbooks = {
             "target": WorkbookRef(name="target", file=str(target_path)),
             "linking": WorkbookRef(name="linking", file=str(linking_path)),
@@ -520,7 +544,9 @@ class TestR4LinkWiringAtStaging:
             linking_session = manager.get_or_open("linking", capability="xlw")
 
             assert ("linking", "target") in manager._wired_r4_links
-            assert linking_session.handle.sheets[0].range("A1").value == 10  # 5 * 2, from scratch
+            assert (
+                linking_session.handle.sheets[0].range("A1").value == 10
+            )  # 5 * 2, from scratch
         finally:
             manager.close_all()
 
@@ -544,6 +570,31 @@ class TestR4LinkWiringAtStaging:
         finally:
             manager.close_all()
 
+    def test_wiring_logs_at_info(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        target_path, linking_path = _make_target_and_linking_workbooks(
+            tmp_path, target_value=5
+        )
+        workbooks = {
+            "target": WorkbookRef(name="target", file=str(target_path)),
+            "linking": WorkbookRef(name="linking", file=str(linking_path)),
+        }
+        link_targets = {"linking": {"target"}, "target": set()}
+        manager = SessionManager(
+            workbooks, ScratchManager(tmp_path / "working"), link_targets=link_targets
+        )
+        try:
+            manager.get_or_open("target", capability="xlw")
+            with caplog.at_level(logging.INFO, logger="excel_runner.engine"):
+                manager.get_or_open("linking", capability="xlw")
+        finally:
+            manager.close_all()
+
+        messages = " ".join(r.message for r in caplog.records)
+        assert "linking" in messages
+        assert "target" in messages
+
 
 @requires_excel
 @requires_working_xlwings_save
@@ -555,7 +606,9 @@ class TestR4LinkRevertAndCommit:
     def test_commit_all_reverts_the_link_and_both_real_files_end_up_correct(
         self, tmp_path: Path
     ) -> None:
-        target_path, linking_path = _make_target_and_linking_workbooks(tmp_path, target_value=5)
+        target_path, linking_path = _make_target_and_linking_workbooks(
+            tmp_path, target_value=5
+        )
         workbooks = {
             "target": WorkbookRef(name="target", file=str(target_path)),
             "linking": WorkbookRef(name="linking", file=str(linking_path)),
@@ -570,7 +623,9 @@ class TestR4LinkRevertAndCommit:
         )
         try:
             target_session = manager.get_or_open("target", capability="xlw")
-            manager.get_or_open("linking", capability="xlw")  # triggers staging-time wiring
+            manager.get_or_open(
+                "linking", capability="xlw"
+            )  # triggers staging-time wiring
 
             target_session.handle.sheets[0].range("A1").value = 50
             target_session.dirty = True
@@ -590,5 +645,38 @@ class TestR4LinkRevertAndCommit:
         assert target_path.resolve() in resolved
 
         # and its cached formula value reflects target's final, real content
-        cached = openpyxl.load_workbook(linking_path, data_only=True)["Sheet1"]["A1"].value
+        cached = openpyxl.load_workbook(linking_path, data_only=True)["Sheet1"][
+            "A1"
+        ].value
         assert cached == 100  # 50 * 2
+
+    def test_revert_logs_at_info(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        target_path, linking_path = _make_target_and_linking_workbooks(
+            tmp_path, target_value=5
+        )
+        workbooks = {
+            "target": WorkbookRef(name="target", file=str(target_path)),
+            "linking": WorkbookRef(name="linking", file=str(linking_path)),
+        }
+        link_targets = {"linking": {"target"}, "target": set()}
+        commit_order = engine.compute_link_commit_order(link_targets)
+        manager = SessionManager(
+            workbooks,
+            ScratchManager(tmp_path / "working"),
+            link_targets=link_targets,
+            commit_order=commit_order,
+        )
+        try:
+            manager.get_or_open("target", capability="xlw")
+            manager.get_or_open("linking", capability="xlw")
+
+            with caplog.at_level(logging.INFO, logger="excel_runner.engine"):
+                manager.commit_all()
+        finally:
+            manager.close_all()
+
+        messages = " ".join(r.message for r in caplog.records)
+        assert "linking" in messages
+        assert "target" in messages

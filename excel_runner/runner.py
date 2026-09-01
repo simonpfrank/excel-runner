@@ -156,7 +156,9 @@ def _dispatch(
 
 
 def run_workflow(
-    path: str | Path, env_overrides: dict[str, Any] | None = None, working_dir: str | Path | None = None
+    path: str | Path,
+    env_overrides: dict[str, Any] | None = None,
+    working_dir: str | Path | None = None,
 ) -> RunResult:
     """Load, validate, and execute a workflow YAML file end to end.
 
@@ -206,7 +208,10 @@ def run_workflow(
     commit_order = engine.compute_link_commit_order(link_targets)
 
     session_manager = engine.SessionManager(
-        workflow.workbooks, scratch, link_targets=link_targets, commit_order=commit_order
+        workflow.workbooks,
+        scratch,
+        link_targets=link_targets,
+        commit_order=commit_order,
     )
     audit_log_path = run_dir / "audit.jsonl"
     audit = AuditLogger(audit_log_path)
@@ -225,7 +230,9 @@ def run_workflow(
                 step.if_expr, context
             ):
                 step_result = StepResult(step_id=step.id, status="skipped", output={})
-                logger.info('Step "%s" (%s): skipped (if: was false)', step.id, step.action)
+                logger.info(
+                    'Step "%s" (%s): skipped (if: was false)', step.id, step.action
+                )
             else:
                 logger.info('Step "%s" (%s): starting', step.id, step.action)
                 action_result = _dispatch(
@@ -239,14 +246,23 @@ def run_workflow(
                 )
                 if action_result.status == "error":
                     any_failed = True
-                    error_message = action_result.error.message if action_result.error else ""
+                    error_message = (
+                        action_result.error.message if action_result.error else ""
+                    )
                     # A normal, anticipated "didn't work" outcome (Spec sec 4's error-handling
                     # policy) — the loop keeps going and a workflow author can react to it via
                     # if:. WARNING, not ERROR: ERROR is reserved for something that actually
                     # halts the run (a raised exception, logged separately by the CLI).
-                    logger.warning('Step "%s" (%s): failed — %s', step.id, step.action, error_message)
+                    logger.warning(
+                        'Step "%s" (%s): failed — %s',
+                        step.id,
+                        step.action,
+                        error_message,
+                    )
                 else:
-                    logger.info('Step "%s" (%s): %s', step.id, step.action, action_result.status)
+                    logger.info(
+                        'Step "%s" (%s): %s', step.id, step.action, action_result.status
+                    )
                 stop_triggered = step.action == "stop"
 
             audit.record_step(step, step_result, started_at, datetime.now())

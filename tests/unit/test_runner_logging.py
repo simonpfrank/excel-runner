@@ -1,9 +1,10 @@
 """Unit tests for console/application logging via stdlib logging (Spec sec 6.2.1, PRD sec
-6.7.1) — real-time narration distinct from the audit log. Library code only ever emits via
-`logging.getLogger(...)`; it never attaches handlers itself (standard Python library practice,
-also decided for the CLI — Spec sec 6.2.1's corrected scope). Tests use pytest's `caplog`
-fixture, which attaches its own handler for the duration of the test, rather than this project
-configuring one.
+6.7.1) — real-time narration distinct from the audit log. Library code (`runner.py`,
+`engine.py`, `backends.py`, `actions.py`) only ever emits via `logging.getLogger(...)`; it
+never attaches handlers itself (standard Python library practice) — only `cli.py` does that,
+via `configure_logging()` (see `test_cli.py::TestConsoleLogging`). Tests here use pytest's
+`caplog` fixture, which attaches its own handler for the duration of the test, rather than
+`configure_logging()`'s real `StreamHandler`s.
 """
 
 import logging

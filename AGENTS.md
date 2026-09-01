@@ -159,7 +159,16 @@ Try to stick to these without adding complexity. Code should always be easy to r
 - Import order: stdlib → third-party → local (blank line separated)
 - Naming: `PascalCase` classes, `snake_case` functions/variables, `UPPER_SNAKE_CASE` constants
 - Google-style docstrings with Args/Returns/Raises
-- Python logging format: Date, Time, Level, Module, Function, Line, Message
+- Python logging format: Date, Time, Level, Module, Function, Line, Message — concretely,
+  `"%(asctime)s %(levelname)-8s %(module)s %(funcName)s:%(lineno)d %(message)s"` with
+  `datefmt="%Y-%m-%d %H:%M:%S"`. WARNING and above go to stderr; DEBUG/INFO go to stdout.
+  INFO should narrate what's actually happening in production (each meaningful step: staging/
+  committing a workbook, switching backend, opening/saving/recalculating via Excel COM,
+  spawning/closing an Excel instance) — enough that someone watching a live run understands
+  progress without reading code. DEBUG adds the detail needed to debug a specific failure
+  (resolved params, exact paths, link names). Library modules never attach handlers
+  themselves (`logging.getLogger(__name__)` only) — only the CLI entrypoint configures
+  handlers/formatting.
 - Max 500 lines per file
 - ~50 lines per function (guideline, not hard limit — 60 is fine if the function is a clear linear sequence; don't split just to hit a number)
 - Max 2 levels of nesting

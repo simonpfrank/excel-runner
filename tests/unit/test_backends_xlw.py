@@ -3,6 +3,7 @@
 convention) — same spirit as test_owned_instance_registry.py.
 """
 
+import logging
 from pathlib import Path
 
 import openpyxl
@@ -299,3 +300,83 @@ class TestLinkPrimitives:
             assert linking.sheets[0].range("A1").value == 1998
         finally:
             main_registry.close_owned()
+
+
+@requires_excel
+@requires_working_xlwings_save
+class TestLogging:
+    """AGENTS.md's logging spec — meaningful COM operations narrated at INFO, exact
+    detail (paths/names) available at DEBUG. Real xlwings/Excel throughout, matching
+    project convention; extends existing scenarios rather than adding new slow ones."""
+
+    def test_open_and_save_log_at_info(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        path = _make_workbook(tmp_path / "fixture.xlsx")
+        registry = OwnedInstanceRegistry()
+        app = registry.spawn()
+        try:
+            with caplog.at_level(logging.INFO, logger="excel_runner.backends"):
+                book = backends.xlw_open_workbook(app, str(path), mode="read_write")
+                backends.xlw_save_workbook(book)
+        finally:
+            registry.close_owned()
+
+        messages = " ".join(r.message for r in caplog.records)
+        assert "fixture.xlsx" in messages
+        assert any("open" in r.message.lower() for r in caplog.records)
+        assert any("sav" in r.message.lower() for r in caplog.records)
+
+    def test_calculate_and_wait_log_at_info(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        path = _make_formula_workbook(tmp_path / "fixture.xlsx")
+        registry = OwnedInstanceRegistry()
+        app = registry.spawn()
+        try:
+            book = backends.xlw_open_workbook(app, str(path), mode="read_write")
+            book.sheets["Summary"]["A1"].value = 11
+            with caplog.at_level(logging.INFO, logger="excel_runner.backends"):
+                backends.com_calculate_workbook(book)
+                backends.com_wait_until_calculation_done(app)
+        finally:
+            registry.close_owned()
+
+        messages = [r.message.lower() for r in caplog.records]
+        assert any("calculat" in m for m in messages)
+        assert any("wait" in m for m in messages)
+        assert any("finish" in m or "done" in m for m in messages)
+
+    def test_change_link_logs_at_info(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        registry = OwnedInstanceRegistry()
+        app = registry.spawn()
+        try:
+            _make_link_target(app, tmp_path / "old.xlsx", 5)
+            new_target = _make_link_target(app, tmp_path / "new.xlsx", 100)
+            linking = app.books.add()
+            linking.sheets[0].range("A1").formula = "='[old.xlsx]Sheet1'!A1*2"
+            linking.save(str(tmp_path / "linking.xlsx"))
+
+            with caplog.at_level(logging.INFO, logger="excel_runner.backends"):
+                backends.com_change_link(linking, "old.xlsx", str(new_target))
+        finally:
+            registry.close_owned()
+
+        messages = " ".join(r.message for r in caplog.records)
+        assert "old.xlsx" in messages
+
+    def test_spawn_and_close_owned_log_at_info(
+        self, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        registry = OwnedInstanceRegistry()
+        with caplog.at_level(logging.INFO, logger="excel_runner.backends"):
+            app = registry.spawn()
+            pid = app.pid
+            registry.close_owned()
+
+        messages = [r.message.lower() for r in caplog.records]
+        assert any(str(pid) in r.message for r in caplog.records)
+        assert any("spawn" in m for m in messages)
+        assert any("clos" in m or "quit" in m for m in messages)

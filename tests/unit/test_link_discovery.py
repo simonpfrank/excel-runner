@@ -7,7 +7,11 @@ requires no Excel/COM at all (real-Excel is only needed to *create* fixtures for
 from pathlib import Path
 
 from excel_runner.backends import OwnedInstanceRegistry
-from excel_runner.engine import classify_link_target, resolve_link_target, scan_external_link_targets
+from excel_runner.engine import (
+    classify_link_target,
+    resolve_link_target,
+    scan_external_link_targets,
+)
 from tests.unit.conftest import requires_excel, requires_working_xlwings_save
 
 
@@ -101,9 +105,9 @@ class TestScanExternalLinkTargets:
             target.close()
 
             linking = app.books.add()
-            linking.sheets[0].range("A1").formula = (
-                f"='{tmp_path / 'other'}\\[target2.xlsx]Sheet1'!A1*2"
-            )
+            linking.sheets[0].range(
+                "A1"
+            ).formula = f"='{tmp_path / 'other'}\\[target2.xlsx]Sheet1'!A1*2"
             linking.save(str(tmp_path / "linking.xlsx"))
             linking.close()
 
