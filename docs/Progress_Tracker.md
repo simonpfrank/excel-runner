@@ -1,5 +1,55 @@
 # excel_runner — Progress Tracker
 
+## Last Session (2026-09-01, Windows)
+**Status:** Console logging overhaul — **complete**. Also extended `input/workflow.yaml` to
+cover config steps 1-11 and ran a real dry-run of the full workflow end to end (exit code 0).
+**Working on:**
+- Diagnosed the user's "no console output" report to two real gaps: `cli.py` never attached a
+  logging handler (only set the severity threshold), and `engine.py`/`backends.py`/`actions.py`
+  had zero logging calls at all (only `runner.py` had any, from before).
+- Formalized the logging spec in AGENTS.md: exact format string
+  (`"%(asctime)s %(levelname)-8s %(module)s %(funcName)s:%(lineno)d %(message)s"`,
+  `datefmt="%Y-%m-%d %H:%M:%S"`), WARNING+/ERROR → stderr, DEBUG/INFO → stdout, INFO =
+  production narration of meaningful steps, DEBUG = failure-debugging detail, library modules
+  never attach handlers (only the CLI entrypoint does).
+- `cli.py`: new `configure_logging(level_name)` — clears the `excel_runner` logger's handlers,
+  builds the formatter, attaches a stdout `StreamHandler` (filtered to below-WARNING) and a
+  stderr `StreamHandler` (WARNING+), sets the level. `main()` now calls this instead of a bare
+  `.setLevel(...)`.
+- `engine.py`: INFO logs for `ScratchManager.stage/commit/commit_all`,
+  `SessionManager._switch_backend`, and the R4 link-wiring/-revert methods
+  (`_wire_one_r4_link`, `_revert_r4_links_before_commit`); DEBUG for per-link repoint detail.
+- `backends.py`: added `logger = logging.getLogger(__name__)` (previously had none at all) and
+  logging throughout the xlwings/COM primitives — INFO for `xlw_open_workbook`,
+  `xlw_save_workbook`, `xlw_calculate_all`, all `com_calculate_*` variants,
+  `com_wait_until_calculation_done` (both wait-start and finish — the single biggest gap, since
+  this is exactly the silent, multi-minute black hole observed with a 217MB real workbook),
+  `com_change_link`, `OwnedInstanceRegistry.spawn`/`close_owned`; DEBUG for
+  `xlw_close_workbook`, `com_link_sources`, `com_update_link`.
+- Extended existing real-Excel test classes (project convention: no mocks for anything COM-
+  touching) with `caplog`-based assertions: `test_session_manager.py` (`TestBackendSwitching`,
+  `TestR4LinkWiringAtStaging`, `TestR4LinkRevertAndCommit`), `test_backends_xlw.py` (new
+  `TestLogging` class). All followed TDD (confirmed red, then green).
+- Fixed a stale docstring in `test_runner_logging.py` (claimed the CLI never attaches handlers
+  — no longer true) and a pre-existing `ruff` E741 violation (`l` variable name) in
+  `test_cli.py`, found while running the full quality gate.
+- Extended `input/workflow.yaml`/`input/Instructions.md` (gitignored, not version-controlled):
+  declared the `premium_risk` workbook and a `recalculate_premium_risk` step covering config
+  steps 8-11, after confirming R1 (same-folder external link) is genuinely sufficient by
+  inspecting the real workbook's externalLink XML. Statically validated (5 steps, 3 workbooks).
+- Ran a sandboxed dry run of the full `workflow.yaml` against a temp copy of `input/` with
+  `--logging-level DEBUG` — completed with exit code 0, console output now shows every
+  meaningful step (staging, backend switches, opens/saves, recalculation start/finish, link
+  repointing) as intended.
+- Full suite: 364 passed (up from 350). ruff/mypy --strict clean; vulture/radon show only
+  pre-existing findings (unchanged from last session).
+- Committed as `3d39c03` (local only — not pushed).
+**Next step:** Run `workflow.yaml` for real against production `input/` files (overwrites them
+on success) — needs the user's explicit go-ahead first. Also outstanding: the AGENTS.md "every
+3 features" harsh code review for the gap-2/logging work (multi-session build).
+**Notes:** `unify_storage/` untracked directory still deliberately ignored per user
+instruction ("Ignore unify storage for now").
+
 ## Last Session (2026-08-31, Windows)
 **Status:** gap-2 (link-aware repointing/recalc, `docs/recalc_and_link_refresh_plan.md`) —
 **feature-complete**. All three remaining threads from "finish it" are done, tested (real
