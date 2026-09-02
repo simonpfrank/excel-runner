@@ -30,6 +30,7 @@ from excel_runner.core import (
     WorkbookRef,
     WorkbookSession,
     Workflow,
+    is_whole_template_expression,
 )
 
 logger = logging.getLogger(__name__)
@@ -355,7 +356,9 @@ class ScratchManager:
                 self._originals_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(real_path, self._originals_dir / real_path.name)
         else:
-            logger.debug('Workbook "%s" has no real file yet — created on first write', name)
+            logger.debug(
+                'Workbook "%s" has no real file yet — created on first write', name
+            )
         self._staged[name] = (real_path, working_path, writes)
         return working_path
 
@@ -698,7 +701,10 @@ class SessionManager:
         if session.backend == needed:
             return
         logger.info(
-            'Switching workbook "%s" backend: %s -> %s', session.name, session.backend, needed
+            'Switching workbook "%s" backend: %s -> %s',
+            session.name,
+            session.backend,
+            needed,
         )
         if session.dirty:
             if session.backend == "file":
@@ -1071,6 +1077,8 @@ def _check_param_types(
             continue
         properties = registry[step.action].param_schema["properties"]
         for name, value in step.params.items():
+            if isinstance(value, str) and is_whole_template_expression(value):
+                continue  # can't know its real type until execution — see docstring above
             if name in _IMPLICIT_FIELDS:
                 expected: Any = str
             elif name in properties:

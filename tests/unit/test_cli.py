@@ -65,7 +65,9 @@ class TestMain:
         ) as mock_run:
             main(["workflow.yaml", "--env", "a=1", "--env", "b=2"])
 
-        mock_run.assert_called_once_with("workflow.yaml", {"a": "1", "b": "2"}, working_dir=None)
+        mock_run.assert_called_once_with(
+            "workflow.yaml", {"a": "1", "b": "2"}, working_dir=None
+        )
 
     def test_working_dir_flag_is_passed_through(self) -> None:
         with patch(
@@ -73,7 +75,9 @@ class TestMain:
         ) as mock_run:
             main(["workflow.yaml", "--working-dir", "/some/base"])
 
-        mock_run.assert_called_once_with("workflow.yaml", None, working_dir="/some/base")
+        mock_run.assert_called_once_with(
+            "workflow.yaml", None, working_dir="/some/base"
+        )
 
     def test_logging_level_flag_sets_the_package_logger_level(self) -> None:
         with patch("excel_runner.cli.run_workflow", return_value=_success_result()):

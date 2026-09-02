@@ -230,23 +230,37 @@ def copy(
 
 
 @file_action
-def read_range(session: WorkbookSession, sheet: str, range: str) -> ActionResult:
-    """Read a cell or range of cells.
+def read_range(
+    session: WorkbookSession, sheet: str | list[str] | dict[str, str], range: str
+) -> ActionResult:
+    """Read a cell or range of cells, from one sheet or several.
 
     `as: formulas` is not yet a parameter here — it depends on which `data_only` flag the
     workbook was opened with, a session-level decision not built until Spec sec 5.4.
 
     Args:
         session: The workbook session to read from.
-        sheet: Worksheet name.
-        range: An A1-style cell (e.g. "B2") or range (e.g. "A1:D50").
+        sheet: A single worksheet name (plain string), an explicit list of names (multi-sheet
+            capture), the literal string `"all"` (every sheet in the workbook), or
+            `{"matching": <regex>}` (every sheet whose name matches, via `re.search` — same
+            convention as `find_row`/`find_headers_row`'s `patterns`). See PRD sec 7.
+        range: An A1-style cell (e.g. "B2") or range (e.g. "A1:D50") — same for every sheet
+            read.
 
     Returns:
-        `{"values": ...}` — the cell's value for a single cell, or a 2D list for a range
-        (PRD sec 10.4's output-shape rule: always a keyed object).
+        `{"values": ...}` (PRD sec 10.4's output-shape rule: always a keyed object). For a
+        single sheet name, `values` is that sheet's cell value or 2D list, unchanged from
+        before this was multi-sheet-aware. For a list/`"all"`/`matching`, `values` is a dict
+        keyed by sheet name, one entry per resolved sheet.
     """
-    values = backends.read_range(session.handle, sheet, range)
-    return ActionResult(status="success", output={"values": values})
+    if isinstance(sheet, str) and sheet != "all":
+        values = backends.read_range(session.handle, sheet, range)
+        return ActionResult(status="success", output={"values": values})
+    sheet_names = backends.resolve_sheet_names(session.handle, sheet)
+    values_by_sheet = {
+        name: backends.read_range(session.handle, name, range) for name in sheet_names
+    }
+    return ActionResult(status="success", output={"values": values_by_sheet})
 
 
 @file_action

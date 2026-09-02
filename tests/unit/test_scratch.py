@@ -282,4 +282,6 @@ class TestLogging:
 
         messages = [r.message for r in caplog.records]
         assert any("1" in m for m in messages)  # count of workbooks committed
-        assert any("complete" in m.lower() or "committed" in m.lower() for m in messages)
+        assert any(
+            "complete" in m.lower() or "committed" in m.lower() for m in messages
+        )

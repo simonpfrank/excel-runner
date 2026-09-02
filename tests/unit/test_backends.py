@@ -43,12 +43,16 @@ class TestOpenWorkbook:
 
 class TestReadRange:
     def test_reads_a_single_cell_as_a_scalar(self, tmp_path: Path) -> None:
-        workbook = backends.open_workbook(str(_make_workbook(tmp_path)), mode="read_write")
+        workbook = backends.open_workbook(
+            str(_make_workbook(tmp_path)), mode="read_write"
+        )
         assert backends.read_range(workbook, "Summary", "A1") == "Region"
         workbook.close()
 
     def test_reads_a_multi_cell_range_as_a_2d_list(self, tmp_path: Path) -> None:
-        workbook = backends.open_workbook(str(_make_workbook(tmp_path)), mode="read_write")
+        workbook = backends.open_workbook(
+            str(_make_workbook(tmp_path)), mode="read_write"
+        )
         assert backends.read_range(workbook, "Summary", "A1:B2") == [
             ["Region", "Total"],
             ["North", 100],
@@ -56,20 +60,83 @@ class TestReadRange:
         workbook.close()
 
     def test_reads_a_single_row_range_as_a_2d_list(self, tmp_path: Path) -> None:
-        workbook = backends.open_workbook(str(_make_workbook(tmp_path)), mode="read_write")
-        assert backends.read_range(workbook, "Summary", "A1:B1") == [["Region", "Total"]]
+        workbook = backends.open_workbook(
+            str(_make_workbook(tmp_path)), mode="read_write"
+        )
+        assert backends.read_range(workbook, "Summary", "A1:B1") == [
+            ["Region", "Total"]
+        ]
         workbook.close()
+
+
+class TestResolveSheetNames:
+    """PRD sec 7's read_range row: sheet can be a single name, an explicit list, "all"
+    (every sheet), or {"matching": <regex>} (every sheet whose name matches, re.search-style
+    like find_row/find_headers_row's `patterns`) -- all resolved to an explicit list here,
+    one code path underneath either way."""
+
+    def test_single_string_returns_a_one_item_list(self, tmp_path: Path) -> None:
+        workbook = backends.open_workbook(
+            str(_make_workbook(tmp_path)), mode="read_write"
+        )
+        assert backends.resolve_sheet_names(workbook, "Summary") == ["Summary"]
+        workbook.close()
+
+    def test_a_list_is_returned_as_is(self, tmp_path: Path) -> None:
+        workbook = backends.open_workbook(
+            str(_make_workbook(tmp_path)), mode="read_write"
+        )
+        assert backends.resolve_sheet_names(workbook, ["Summary"]) == ["Summary"]
+        workbook.close()
+
+    def test_all_expands_to_every_sheet_in_workbook_order(self, tmp_path: Path) -> None:
+        path = tmp_path / "multi.xlsx"
+        workbook = openpyxl.Workbook()
+        first = workbook.active
+        assert first is not None
+        first.title = "First"
+        workbook.create_sheet("Second")
+        workbook.save(path)
+        workbook.close()
+
+        reopened = backends.open_workbook(str(path), mode="read_write")
+        assert backends.resolve_sheet_names(reopened, "all") == ["First", "Second"]
+        reopened.close()
+
+    def test_matching_selects_sheets_whose_name_matches_the_regex(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "multi.xlsx"
+        workbook = openpyxl.Workbook()
+        first = workbook.active
+        assert first is not None
+        first.title = "A&H North"
+        workbook.create_sheet("A&H South")
+        workbook.create_sheet("Other")
+        workbook.save(path)
+        workbook.close()
+
+        reopened = backends.open_workbook(str(path), mode="read_write")
+        assert backends.resolve_sheet_names(reopened, {"matching": "^A&H"}) == [
+            "A&H North",
+            "A&H South",
+        ]
+        reopened.close()
 
 
 class TestWriteCell:
     def test_writes_a_value(self, tmp_path: Path) -> None:
-        workbook = backends.open_workbook(str(_make_workbook(tmp_path)), mode="read_write")
+        workbook = backends.open_workbook(
+            str(_make_workbook(tmp_path)), mode="read_write"
+        )
         backends.write_cell(workbook, "Summary", "C1", "Status")
         assert workbook["Summary"]["C1"].value == "Status"
         workbook.close()
 
     def test_writes_a_formula_string_as_is(self, tmp_path: Path) -> None:
-        workbook = backends.open_workbook(str(_make_workbook(tmp_path)), mode="read_write")
+        workbook = backends.open_workbook(
+            str(_make_workbook(tmp_path)), mode="read_write"
+        )
         backends.write_cell(workbook, "Summary", "C2", "=SUM(B2:B2)")
         assert workbook["Summary"]["C2"].value == "=SUM(B2:B2)"
         workbook.close()
@@ -91,9 +158,15 @@ class TestSaveWorkbook:
 
 class TestCloseWorkbook:
     def test_close_does_not_raise(self, tmp_path: Path) -> None:
-        workbook = backends.open_workbook(str(_make_workbook(tmp_path)), mode="read_write")
+        workbook = backends.open_workbook(
+            str(_make_workbook(tmp_path)), mode="read_write"
+        )
         backends.close_workbook(workbook)  # should not raise
 
-    def test_open_missing_file_raises_a_clear_file_not_found_error(self, tmp_path: Path) -> None:
+    def test_open_missing_file_raises_a_clear_file_not_found_error(
+        self, tmp_path: Path
+    ) -> None:
         with pytest.raises(FileNotFoundError):
-            backends.open_workbook(str(tmp_path / "does_not_exist.xlsx"), mode="read_write")
+            backends.open_workbook(
+                str(tmp_path / "does_not_exist.xlsx"), mode="read_write"
+            )

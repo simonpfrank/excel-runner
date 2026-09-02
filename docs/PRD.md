@@ -653,7 +653,7 @@ Three things that apply to every row below, not repeated per-row:
 | `close` | file/xlw | workbook | Optional — see §6.3 implicit close. A forgotten close is still handled automatically. |
 | `stop` | none — control flow only, no workbook | reason (optional string) | Halts the run before any later step runs — see §6.9. Not tied to any workbook; `workbook:` isn't a field on this action. |
 | `copy` | file | source: {workbook, sheet, range}, target: {workbook, sheet, range} | `range` optional on `source` — omit for the whole sheet. |
-| `read_range` | file | workbook, sheet (string, or a list for multi-sheet, or `all`), range, as: values\|formulas (optional) | Multi-sheet: an explicit list (`["North", "South"]`) is the real mechanism; `all` is authoring sugar that expands to the full sheet list before execution — one code path underneath either way. |
+| `read_range` | file | workbook, sheet (string, a list for multi-sheet, `all`, or `{ matching: <regex> }`), range, as: values\|formulas (optional) | Multi-sheet: an explicit list (`["North", "South"]`) is the real mechanism; `all` and `{ matching: "<regex>" }` (every sheet whose name matches, `re.search`-style — same convention as `find_row`/`find_headers_row`'s `patterns`) are both authoring sugar that expand to that same explicit list before execution — one code path underneath either way. **Built** (2026-09-01, `resolve_sheet_names` in `backends.py`) — see §8/§10.4/§11 item 5. |
 | `read_metadata` | file (properties/cells) or xlw (textboxes) | workbook, target: properties\|textboxes\|cells, sheet (required if target=cells — clarification found during implementation, missing from the original catalog), cells (list, if target=cells) | Two distinct things live behind one action: (a) workbook/document properties (author, title, custom doc properties — file-backend), (b) the current value of an embedded ActiveX/form control (needs a live Excel session — openpyxl can't see live control state). Capability depends on `target:`, not fixed per-action (§6.1 exception). |
 | `write_cell` | file | workbook, sheet, cell, value | Single-cell write. `value` can be a literal or a step-output reference (§10), resolved by the templating engine — no special encoding needed. |
 | `write_range` | file | workbook, sheet, range, values (2D list) | Writes a computed block of values in one shot — the gap between single-cell `write_cell` and row/table-oriented `write_row`/`write_table`. |
@@ -681,11 +681,12 @@ Three things that apply to every row below, not repeated per-row:
 
 Updated against actual build progress (Specification.md §8/§4 track this in detail):
 
-- **v1, built**: open, save, close, copy, read_range (single-range mode; multi-sheet mode still
-  TBD, see §7), read_metadata (properties/cells sub-cases), write_cell, write_range, write_row
-  (base column-mapping + positional modes), insert_range (whole-row/whole-column only —
-  partial-range returns a structured error, not built), set_column_width, create_sheet,
-  rename_sheet, delete_sheet, find_headers_row, find_row, find_column, find_columns.
+- **v1, built**: open, save, close, copy, read_range (single-sheet and multi-sheet — list,
+  `all`, `{ matching: <regex> }` — see §7), read_metadata (properties/cells sub-cases),
+  write_cell, write_range, write_row (base column-mapping + positional modes), insert_range
+  (whole-row/whole-column only — partial-range returns a structured error, not built),
+  set_column_width, create_sheet, rename_sheet, delete_sheet, find_headers_row, find_row,
+  find_column, find_columns.
 - **v1, but needs a live Excel session rather than file-backend**: read_metadata (textbox-control
   sub-case only — openpyxl can't see live control state). Not built yet — live-Excel phase
   (Specification.md §8 build order item 10).
@@ -770,6 +771,19 @@ carried to §12 as an open item, not silently dropped.
 
 The first three examples are the actual bar for tier-1 validation: name the field, show the
 expected shape, suggest the fix — not just "invalid config" or a raw pydantic traceback.
+
+**Found while building `write_range`/`write_cell` steps whose entire value is a computed
+expression (2026-09-01, e.g. `values: "{{ [[\"Sheet\", \"State\"]] + steps.x.output... }}"`
+building a table from a previous step's output):** tier-1's field-type check needs one
+exemption. A field whose raw text is *entirely* one `{{ ... }}` expression can't be
+type-checked before execution at all — per §10.1's native-type-preservation rule it may
+resolve to any shape (a list, a dict, a number...), not just a string, and that shape depends
+on a step output that doesn't exist yet at validation time. Treating it as "obviously the
+wrong type because it's a raw string" would make every such step fail tier-1 for a value
+that's actually correct once resolved. `core.is_whole_template_expression()` (reusing the
+same whole-expression detector §10.1's templating engine already needs) is checked first in
+`engine._check_param_types`; a match skips the type check for that field entirely, deferring
+to whatever error surfaces at execution time if the resolved value turns out to be wrong.
 
 ## 10. Syntax conventions
 
@@ -862,7 +876,7 @@ never sometimes-bare/sometimes-not. Keys are either fixed (known at design time)
 
 | Action | `output` shape |
 |---|---|
-| `read_range` | `{ values: <2D array, or scalar if a single cell> }` |
+| `read_range` | `{ values: <2D array, or scalar if a single cell> }` for a single sheet name; `{ values: { <sheet name>: <2D array or scalar>, ... } }` for a list/`all`/`matching` sheet spec (one entry per resolved sheet) |
 | `read_metadata` | `{ <requested property or textbox name>: <value>, ... }` (dynamic keys) |
 | `find_headers_row` | `{ row: <int>, headers: { <pattern>: <column letter>, ... } }` |
 | `find_row` | `{ row: <int> }` |
@@ -955,6 +969,14 @@ workbooks:
   action: read_range
   workbook: manip
   sheet: all
+  range: "B2:D20"
+
+# {matching: <regex>} is the same sugar, but for a naming pattern rather than every sheet —
+# re.search-style, unanchored (so "North" alone means "contains", "^North" means "starts with")
+- id: get_north_regions
+  action: read_range
+  workbook: manip
+  sheet: { matching: "^North" }
   range: "B2:D20"
 ```
 
@@ -1321,6 +1343,23 @@ Still open:
   (2026-08-19); deliberately not designed further until real workflows show repeated `if:`
   conditions are an actual recurring pain, not just a theoretical one — possible over-engineering
   if `stop` turns out to be sufficient.
+- **Read a file-backend action via xlwings/COM when the workbook happens to already be open
+  live (backlog idea, not designed — raised 2026-09-01)** — observed cost: `read_range`
+  (and every other `@file_action`) always switches a session to the `file` backend, even if
+  it was already open via COM for an earlier step (e.g. a `recalculate` just before it). For
+  a small workbook that's a negligible reopen; for a large real workbook, closing the live COM
+  session and then having openpyxl fully parse the file in non-read-only mode can cost minutes
+  (observed: ~2m20s for one `read_range` step against a large production workbook, see
+  `docs/Progress_Tracker.md`'s 2026-09-01 session). The idea: if the session is already open
+  via `xlw` and dirty-free, read the requested range straight from the live COM workbook
+  instead of forcing a switch to `file` first. Tricky to design cleanly — `read_range`'s
+  contract (PRD §6.1) is that its *behavior* never depends on which backend happens to be
+  active, only its *action name* does; making backend choice conditional on "is a live COM
+  session already sitting there" is exactly the kind of implicit, state-dependent behavior
+  §6.1 otherwise avoids, and is adjacent to (though not identical to) the already-rejected
+  "give file-backend actions an alternate xlwings implementation" idea above — this one is
+  motivated by real performance, not psychological trust, so it may be worth a fresh look, but
+  not designed or committed to.
 - **xlwings/Excel App instance ownership tagging mechanism (§6.2.1)** — exact way to record
   and recognize which running Excel process(es) belong to a given run, robust enough to
   survive a crash (so a *later* run or a cleanup utility can identify and safely reap an
@@ -1368,8 +1407,8 @@ anything is still pending:
 - ~~Exact xlwings API for recalculation depth~~ — **resolved**: `mode: normal` uses
   `app.calculate()` (cross-platform); `full`/`full_rebuild` require the raw COM object and are
   Windows-only (§7).
-- ~~Multi-sheet `read_range` syntax~~ — **resolved**: explicit list is the mechanism, `all` is
-  sugar over it (§7, §11 item 5).
+- ~~Multi-sheet `read_range` syntax~~ — **resolved and built (2026-09-01)**: explicit list is
+  the mechanism, `all` and `{ matching: <regex> }` are both sugar over it (§7, §11 item 5).
 - ~~`write_range`~~ — **resolved: keep**, gap confirmed real (§7, §8).
 - ~~`write_row`'s header-based/positional convenience modes~~ — **resolved: keep both in v1**
   (§7).

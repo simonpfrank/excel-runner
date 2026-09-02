@@ -20,7 +20,10 @@ class TestListActions:
 
     def test_each_entry_has_a_description(self) -> None:
         specs = {spec.name: spec for spec in list_actions()}
-        assert specs["read_range"].description == "Read a cell or range of cells."
+        assert (
+            specs["read_range"].description
+            == "Read a cell or range of cells, from one sheet or several."
+        )
 
     def test_is_consistent_with_discover_actions(self) -> None:
         """list_actions() should just be discover_actions() wired to the real actions module —

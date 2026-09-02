@@ -253,12 +253,23 @@ Copies a range — or the whole sheet, if `range` is omitted — from one workbo
 
 #### `read_range`
 
-Reads a cell or range. Output: `{{ steps.<id>.output.values }}` — a single value for one cell,
-a 2D list of rows for a range.
+Reads a cell or range, from one sheet or several. Output: `{{ steps.<id>.output.values }}` —
+for a single sheet name, a single value for one cell or a 2D list of rows for a range (same
+as before); for a list/`all`/`matching` sheet spec, a dict keyed by sheet name, one entry per
+resolved sheet.
 
 | Field | Required |
 |---|---|
 | `sheet`, `range` | yes |
+
+`sheet` accepts four forms:
+
+| Form | Meaning |
+|---|---|
+| `"North"` | A single sheet, by exact name. |
+| `["North", "South"]` | An explicit list — multi-sheet capture. |
+| `"all"` | Every sheet in the workbook. |
+| `{ matching: "^A&H" }` | Every sheet whose name matches this regex (`re.search`, same convention as `find_row`/`find_headers_row`'s `patterns`). |
 
 ```yaml
 - id: get_totals
@@ -266,6 +277,15 @@ a 2D list of rows for a range.
   workbook: manip
   sheet: "Outputs"
   range: "A1:D50"
+```
+
+```yaml
+- id: get_ah_status
+  action: read_range
+  workbook: manip
+  sheet: { matching: "^A&H" }
+  range: "O6"
+# .output.values is keyed by sheet name, e.g. {"A&H North": "Pass", "A&H South": "Fail"}
 ```
 
 #### `read_metadata`

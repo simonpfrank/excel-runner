@@ -101,6 +101,35 @@ def read_range(workbook: Workbook, sheet: str, range: str) -> Any:
     return [[cell.value for cell in row] for row in selection]
 
 
+def resolve_sheet_names(
+    workbook: Workbook, sheet: str | list[str] | dict[str, str]
+) -> list[str]:
+    """Resolve a `read_range`-style sheet spec into an explicit list of worksheet names.
+
+    PRD sec 7's `read_range` row: an explicit list is the real multi-sheet mechanism;
+    "all" and `{"matching": ...}` are both authoring sugar that expand to an explicit list
+    before execution — one code path underneath either way.
+
+    Args:
+        workbook: The workbook whose sheets are being selected.
+        sheet: A single sheet name, an explicit list of names, the literal string "all"
+            (every sheet in the workbook), or `{"matching": <regex>}` (every sheet whose name
+            matches the regex, via `re.search` — same convention as `find_row`/
+            `find_headers_row`'s `patterns`).
+
+    Returns:
+        The resolved sheet names, in workbook order for "all"/`matching`.
+    """
+    if isinstance(sheet, list):
+        return sheet
+    if isinstance(sheet, dict):
+        pattern = re.compile(sheet["matching"])
+        return [name for name in workbook.sheetnames if pattern.search(name)]
+    if sheet == "all":
+        return list(workbook.sheetnames)
+    return [sheet]
+
+
 def write_cell(workbook: Workbook, sheet: str, cell: str, value: Any) -> None:
     """Write a value to a single cell.
 
@@ -614,7 +643,9 @@ def com_change_link(book: xw.Book, name: str, new_name: str) -> None:
         name: The link's current source, exactly as returned by `com_link_sources`.
         new_name: The new target path.
     """
-    logger.info('Repointing link "%s" -> "%s" in workbook "%s"', name, new_name, book.name)
+    logger.info(
+        'Repointing link "%s" -> "%s" in workbook "%s"', name, new_name, book.name
+    )
     book.api.ChangeLink(Name=name, NewName=new_name, Type=_XL_LINK_TYPE_EXCEL_LINKS)
 
 

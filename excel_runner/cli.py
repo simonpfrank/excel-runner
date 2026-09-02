@@ -22,7 +22,9 @@ from excel_runner.runner import run_workflow
 
 logger = logging.getLogger(__name__)
 
-_LOG_FORMAT = "%(asctime)s %(levelname)-8s %(module)s %(funcName)s:%(lineno)d %(message)s"
+_LOG_FORMAT = (
+    "%(asctime)s %(levelname)-8s %(module)s %(funcName)s:%(lineno)d %(message)s"
+)
 _LOG_DATE_FORMAT = "%Y-%m-%d %H:%M:%S"
 
 
@@ -116,14 +118,18 @@ def main(argv: list[str] | None = None) -> int:
             "(excel_runner_runs/<yaml_stem>/ is always appended). Defaults to cwd."
         ),
     )
-    parser.add_argument("--logging-level", help="DEBUG,INFO,WARNING,ERROR", default="INFO")
+    parser.add_argument(
+        "--logging-level", help="DEBUG,INFO,WARNING,ERROR", default="INFO"
+    )
     args = parser.parse_args(argv)
     env_overrides = dict(args.env)
 
     configure_logging(args.logging_level)
 
     try:
-        result = run_workflow(args.workflow, env_overrides or None, working_dir=args.working_dir)
+        result = run_workflow(
+            args.workflow, env_overrides or None, working_dir=args.working_dir
+        )
     except ExcelRunnerError as exc:
         logger.error(exc.detail.message)
         return 1

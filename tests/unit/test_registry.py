@@ -43,7 +43,10 @@ class TestDiscoverActions:
         was missing from ActionSpec entirely until this was checked while building list_actions()
         (Spec sec 6.3)."""
         registry = discover_actions(actions)
-        assert registry["read_range"].description == "Read a cell or range of cells."
+        assert (
+            registry["read_range"].description
+            == "Read a cell or range of cells, from one sheet or several."
+        )
 
     def test_description_is_the_first_line_only_not_the_whole_docstring(self) -> None:
         registry = discover_actions(actions)

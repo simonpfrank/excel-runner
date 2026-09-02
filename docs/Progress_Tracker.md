@@ -1,5 +1,143 @@
 # excel_runner — Progress Tracker
 
+## Status legend
+❌ Not Done · 🟡 In Progress · ✅ Done — Results: ✅ Pass · ❌ Fail · ⏭️ N/A
+
+## Quick status (updated 2026-09-01 — see "Last Session" entries below for narrative detail)
+
+| Action / component | Built | Tested | Notes |
+|---|---|---|---|
+| `open`, `save`, `close` | ✅ | ✅ | |
+| `stop` (control-flow) | ✅ | ✅ | |
+| `copy` | ✅ | ✅ | ⚠️ **named/defined-range source (PRD §11 item 4's `copy_named_range` example) is NOT implemented** — `range:` is passed straight to openpyxl's `worksheet[range]`, which raises `ValueError` on anything that isn't A1 notation. No test exercises a real named range. |
+| `read_range` | ✅ | ✅ | Single-sheet, list, `all`, `{matching: regex}` all built (2026-09-01). Same named-range gap as `copy`/`write_cell`/`write_range` — `range:` never checks `workbook.defined_names`. |
+| `write_cell`, `write_range` | ✅ | ✅ | Same named-range gap as above. |
+| `write_row` | 🟡 | ✅ (built parts) | Explicit column-mapping + positional modes done; by-header mode (`values_by_header`/`headers_from`) blocked — needs step-output context. |
+| `insert_range` | 🟡 | ✅ (built parts) | Whole-row/whole-column only; partial-range raises `NotImplementedError` deliberately. |
+| `set_column_width`, `create_sheet`, `rename_sheet`, `delete_sheet` | ✅ | ✅ | |
+| `find_headers_row`, `find_row`, `find_column`, `find_columns` | ✅ | ✅ | |
+| `read_metadata` (properties, cells) | ✅ | ✅ | `textboxes` sub-target explicitly not built (COM-only, deferred). |
+| `recalculate` | ✅ | ✅ | COM-tier, Windows-tested. |
+| `aggregate`, `write_table`, `write_row` by-header mode | ❌ | ❌ | Originally blocked on step-output context not existing as a concept — that's resolved now (`runner.py` threads `steps.<id>.output` through to every field via templating, build order item 7, done since Phase 6). Simply not written yet; no longer technically blocked. |
+| `run_macro`, `refresh_links`, `write_links` | ❌ | ❌ | Not started. |
+| `read_links` | ❌ | ❌ | Blocked on a real Excel-generated external-link fixture. |
+| `read_metadata` (textbox sub-case) | ❌ | ❌ | COM-only, deferred. |
+| `update_summary_table` | ❌ | ❌ | Exact params deliberately deferred, not designed. |
+| `export_pdf` | ❌ | ❌ | Backlog. |
+| Core data model / loading / templating (`core.py`) | ✅ | ✅ | |
+| Action registry / `discover_actions` (`engine.py`) | ✅ | ✅ | |
+| `SessionManager` (lazy-open, `create_if_missing`, backend switching) | ✅ | ✅ | |
+| `ScratchManager` (staging/atomic commit, crash-safety) | ✅ | ✅ | |
+| Tier-1 static validation | ✅ | ✅ | Real-defined-names checking excluded (needs workbook access — PRD §12). Whole-template-expression exemption added 2026-09-01. |
+| Tier-2 step-graph validation | ✅ | ✅ | |
+| `AuditLogger`, `run_workflow` orchestration, public API surface | ✅ | ✅ | |
+| `OwnedInstanceRegistry`, xlwings link-graph primitives (`com_link_sources`, `com_change_link`, `com_update_link`) | ✅ | ✅ | Backend primitives built/tested; not all wired into a dedicated action yet (`com_update_link`). |
+
+## Backlog / deferred (per PRD §8 and §12)
+
+| Item | Status |
+|---|---|
+| `update_summary_table` — exact parameters | Not designed yet, deliberately deferred |
+| `aggregate`, `write_table`, `write_row` by-header mode | No longer technically blocked — `runner.py` has threaded step outputs through since Phase 6 (build order item 7). Just not written yet; deliberately deferred, not designed (PRD §7's own "discuss when we get to it" flag). |
+| `read_links` (+ already-deferred `write_links`) | Blocked on a real Excel-generated fixture (or manual XML/zip surgery) — empirically confirmed openpyxl can't create the relationship itself |
+| `export_pdf` | Backlog |
+| AI-authoring inspection actions (`list_sheets`, `describe_sheet`) | Planned, next phase after core engine works (PRD §9) |
+| Instance-ownership tagging mechanism across crashes (PRD §6.2.1/§12) | Open question |
+| Scratch-directory collision avoidance for concurrent runs (PRD §6.3.1/§12) | Open question |
+| CLI / MCP wrapper | Deferred (PRD §3/§5) |
+| Read a `@file_action` (e.g. `read_range`) via the live COM session when a workbook is already open `xlw`, instead of always switching to `file` first (PRD §12) | Not designed — raised 2026-09-01 after observing a ~2m20s `read_range` step against a large real workbook |
+| **Named/defined-range support for `copy`/`read_range`/`write_cell`/`write_range`'s `range:` field** | **Not implemented at all, despite PRD §6/§11 item 4 documenting it as working.** `workbook[sheet][range]` is plain openpyxl A1-notation indexing; a real named range raises `ValueError`. No test uses a real named range. Found 2026-09-01 while checking a rumour of named-range issues. |
+
+## Last Session (2026-09-02, Windows, continued)
+**Status:** `input/workflow.yaml` now covers all 25 config steps (Parts 1-5) —
+**functionally complete**, pending the user's own real run and one confirmed business
+assumption (step 15).
+**Working on:**
+- Added config steps 12-25 to `workflow.yaml`: diagnostic reads (12-14), the new multi-sheet
+  `{ matching: "^A&H" }` capture (15), building Test Results.xlsx (`create_if_missing`, new
+  `rename_sheet` step from openpyxl's default "Sheet" to "Results", 16), a headered results
+  table (17), and the AXIS Test Suite validation (`find_row`/`find_column`/`read_range`/
+  `write_cell`, 19-24) — all built from existing actions, no new action code needed for the
+  workflow itself.
+- Steps 17 and 23 (previously flagged as needing new actions — "build a headered table",
+  "count matching rows") turned out to need only Jinja templating over a prior step's output,
+  not new engine code: `write_range`'s `values:` field computes
+  `[["Sheet","State"]] + (steps.x.output.values.items() | list | map('list') | list)`, and
+  `write_cell`'s `value:` field computes
+  `steps.y.output.values | map('last') | select('equalto', 'Pass') | list | length`.
+- Getting step 17's `values:` expression past static (tier-1) validation surfaced one real,
+  narrow gap: `_check_param_types` had no way to know a param that's entirely one
+  `{{ ... }}` expression can't be type-checked until execution (it may resolve to any shape,
+  e.g. a previous step's list output). Fixed with a small, TDD'd addition:
+  `core.is_whole_template_expression()` (reuses the existing `_whole_expression` helper) and
+  one exemption line in `engine._check_param_types`. New test:
+  `TestParamTypes::test_a_whole_template_expression_is_exempt_regardless_of_expected_type`.
+  Also fixed a test that had gone stale from the previous session's `read_range` `sheet:`
+  widening (`test_type_name_fallback_for_a_plain_type` was asserting on `sheet: 5`, which now
+  legitimately reports a Union type message instead of a plain-`str` one — switched it to
+  `range: 5`, which is still a plain `str` param).
+- Validated the extended `workflow.yaml` with `core.load` + `engine.validate_static` directly
+  (no CLI dry-run flag exists) — all 15 written steps (steps 1-2/7/9/11/18/19/25 need no
+  explicit step — see the file's own header) pass static/schema/step-graph validation with 5
+  declared workbooks.
+- Spot-checked real input workbooks (read-only, no writes) to sanity-check assumptions:
+  confirmed steps 12-14's C4/C8:D13 cell content in 2025 Historical Analysis v1.xlsx, and
+  steps 20-21's PRE-BAC-01 row (80) and "1 - Pass" column (P) in AXIS - Test Suite.xlsx's
+  Main Suite sheet (header row 7). Could NOT similarly spot-check Premium Risk
+  Back-testing.xlsx's real "A&H"-prefixed sheet names — plain openpyxl `read_only` load of
+  this specific file hung/never returned output within the session (same experience reported
+  in a prior session) and was killed rather than retried a third time; step 15's
+  `{ matching: "^A&H" }` selector remains a documented, unconfirmed assumption as a result.
+- Full suite: 372 passed (up from 371). `ruff check excel_runner/ tests/` clean; `mypy
+  --strict excel_runner/` clean.
+- Updated `input/Instructions.md`'s "Known gaps" section to reflect all of the above (steps
+  1-25 implemented; step 15's assumption spelled out explicitly; step 22's `A2:B500` upper
+  bound documented, same convention as step 5's `A1:AC1000`).
+**Next step:** Ask the user to run `workflow.yaml` for real (or in a sandboxed copy first) —
+not yet run this session, only statically validated. Separately, still open and NOT resolved
+by this work: config step 15's exact "A&H:" sheet-name pattern semantics need the config
+owner's confirmation (business question, not code) — Premium Risk Back-testing.xlsx being too
+slow/large to inspect interactively means this can only be confirmed via a real run's actual
+`capture_ah_status` step output, not by pre-inspecting the file.
+**Notes:** Not yet committed — ask before committing/pushing.
+
+## Last Session (2026-09-02, Windows)
+**Status:** `read_range` multi-sheet support — **complete**. Built the PRD sec 7-specified
+`sheet: list[str]`/`"all"` mechanism (never actually implemented until now) plus a new,
+consistent `{ matching: "<regex>" }` selector, to unblock config step 15's "A&H:"-prefixed
+multi-sheet capture once its exact business semantics are confirmed with the config owner.
+**Working on:**
+- `backends.py`: new `resolve_sheet_names(workbook, sheet)` — resolves a single name, an
+  explicit list, `"all"`, or `{"matching": <regex>}` (via `re.search`, same convention as
+  `find_row`/`find_headers_row`'s `patterns`) into an explicit list of sheet names. Kept
+  `read_range` itself unchanged (single-sheet primitive; direct `.sheetnames` access follows
+  the existing `create_sheet`/`rename_sheet`/`delete_sheet` precedent).
+- `actions.py`: `read_range`'s `sheet` param widened to `str | list[str] | dict[str, str]`. A
+  plain sheet-name string keeps the old output shape (`{"values": <scalar-or-2D-list>}`
+  unchanged); a list/`"all"`/`matching` spec now loops `backends.read_range` per resolved
+  sheet and returns `{"values": {<sheet name>: <value>, ...}}` (PRD sec 10.4's keyed-output
+  rule).
+- Followed TDD throughout: new `TestResolveSheetNames` in `test_backends.py` (4 tests) and 3
+  new multi-sheet tests in `tests/unit/actions/test_read_range.py` (list/`all`/`matching`),
+  backed by a new `multi_sheet_file_session` fixture (three sheets, two sharing an "A&H"
+  prefix — step 15's exact shape) in `tests/unit/actions/conftest.py`. Confirmed red before
+  implementing both layers.
+- Updated the two exact-docstring snapshot tests (`test_list_actions.py`,
+  `test_registry.py`) for `read_range`'s new first-line description.
+- Updated user-facing docs: `README.md`'s `read_range` section (all four `sheet:` forms +
+  examples) and `.github/skills/excel-runner-yaml/SKILL.md`'s `read_range` reference.
+- Full suite: 371 passed (up from 364). `ruff check excel_runner/ tests/` clean; `mypy
+  --strict excel_runner/` clean. `vulture`/`radon` show only pre-existing, unrelated findings
+  (`com_update_link`/`display_alerts`/`AskToUpdateLinks` unused-confidence hits in
+  `backends.py`; `recalculate`'s C-complexity in `actions.py`) — none introduced by this
+  change.
+**Next step:** Not yet committed — ask before committing/pushing. Separately, still open and
+NOT resolved by this work: config step 15's exact "A&H:" sheet-name pattern semantics need the
+config owner's confirmation (business question, not code); steps 12-14/19-22 still need adding
+to `input/workflow.yaml`; step 17/23/24 remain blocked as previously documented.
+**Notes:** `input/workflow.yaml`/`input/Instructions.md` are gitignored and untouched this
+session — this work only adds the generic capability, not step 15 itself.
+
 ## Last Session (2026-09-01, Windows)
 **Status:** Console logging overhaul — **complete**. Also extended `input/workflow.yaml` to
 cover config steps 1-11 and ran a real dry-run of the full workflow end to end (exit code 0).
@@ -900,102 +1038,6 @@ spreadsheet-authoring product, explicitly flagged as likely a different product 
 and a defensive caution to watch for xlwings object references (`Sheet`/`Range`/`Book`) going
 stale if held across calls once the `xlw_`/`com_`-tier actions are actually built and tested —
 not a confirmed issue here, current design already re-resolves per call rather than caching.
-Tracker below stays function/class-granular even though source files are consolidated — see
-Spec §7.
-
-## Status legend
-❌ Not Done · 🟡 In Progress · ✅ Done — Results: ✅ Pass · ❌ Fail · ⏭️ N/A
-
-## Phase 1 — `core.py`: data model, errors, templating (Spec §2)
-
-| Component | Unit Tests | Code | Integration Tests | Unit Results | Integration Results |
-|---|---|---|---|---|---|
-| Data model dataclasses (`WorkbookRef`, `Step`, `Workflow`) — §2.1 | ✅ | ✅ | ⏭️ | ✅ | ⏭️ |
-| Error types (`ErrorDetail`, exception classes) — §2.3 | ✅ | ✅ | ⏭️ | ✅ | ⏭️ |
-| Loading pipeline (`load`) — §2.2 | ✅ | ✅ | ⏭️ | ✅ | ⏭️ |
-| Templating (`resolve_value`, `evaluate_condition`) — §2.2 | ✅ | ✅ | ⏭️ | ✅ | ⏭️ |
-
-## Phase 2 — Registry + first action slice (Spec §5.1, §4)
-
-| Component | Unit Tests | Code | Integration Tests | Unit Results | Integration Results |
-|---|---|---|---|---|---|
-| Action registry (`ActionSpec`, `discover_actions`) — `engine.py` §5.1 | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `open` action — `actions.py` | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `save` action — `actions.py` | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `close` action — `actions.py` | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `read_range` action — `actions.py` | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `write_cell` action — `actions.py` | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `WorkbookSession`/`ActionResult` (moved to `core.py`) | ✅ | ✅ | ⏭️ | ✅ | ⏭️ |
-| File-backend primitives for the 5 actions above — `backends.py` §3 | ✅ | ✅ | ❌ | ✅ | ❌ |
-
-## Phase 3 — Remaining v1 file-backend actions (Spec §3, §4)
-
-| Component | Unit Tests | Code | Integration Tests | Unit Results | Integration Results |
-|---|---|---|---|---|---|
-| File-backend primitives for this batch — `backends.py` §3 | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `copy` action (two-session signature — see notes above) | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `write_range` action | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `write_row` action (base + positional modes) | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `write_row` by-header mode | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `write_table` action | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `insert_range` action (whole-row/column only) | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `insert_range` partial-range support | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `set_column_width` action | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `find_headers_row` action | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `find_row` action | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `find_column` action | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `find_columns` action | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `aggregate` action | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `read_links` action | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `read_metadata` action (properties/cells) | ✅ | ✅ | ❌ | ✅ | ❌ |
-
-## Phase 4 — Execution model (Spec §5.2, §5.3)
-
-| Component | Unit Tests | Code | Integration Tests | Unit Results | Integration Results |
-|---|---|---|---|---|---|
-| `SessionManager` — `engine.py` §5.2 (bidirectional backend switching excluded — needs item 10, PRD §6.2.2) | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `ScratchManager` — `engine.py` §5.3 | ✅ | ✅ | ❌ | ✅ | ❌ |
-| `backends.create_workbook` (supports `create_if_missing`) | ✅ | ✅ | ❌ | ✅ | ❌ |
-
-## Phase 5 — Validation (Spec §5.4)
-
-| Component | Unit Tests | Code | Integration Tests | Unit Results | Integration Results |
-|---|---|---|---|---|---|
-| Tier 1: static schema validation — `engine.py` §5.4 (real-defined-names check excluded, PRD §12) | ✅ | ✅ | ⏭️ | ✅ | ⏭️ |
-| Tier 2: dry-run / step-graph validation — `engine.py` §5.4 | ✅ | ✅ | ❌ | ✅ | ❌ |
-
-## Phase 6 — Runner, audit, public API (Spec §6)
-
-| Component | Unit Tests | Code | Integration Tests | Unit Results | Integration Results |
-|---|---|---|---|---|---|
-| `AuditLogger` — `runner.py` §6.2 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| `run_workflow` orchestration — `runner.py` §6.1 | ⏭️ | ✅ | ✅ | ⏭️ | ✅ |
-| `SessionManager.checkpoint()` — `engine.py` §5.2 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Public API surface (`__init__.py` re-exports, `list_actions()`, `ActionSpec.description`) — `runner.py` §6.3 | ✅ | ✅ | ✅ | ✅ | ✅ |
-| Crash-safety (mid-run interruption) integration test (Spec §7) | ⏭️ | ⏭️ | ✅ | ⏭️ | ✅ |
-| `stop` control-flow action (`actions.py`) + `"stopped"` status + loop early-exit — `runner.py` §6.1, PRD §6.9 | ✅ | ✅ | ✅ | ✅ | ✅ |
-
-## Phase 7 — xlwings / live-Excel (Windows-dependent, later phase per PRD §8)
-
-| Component | Unit Tests | Code | Integration Tests | Unit Results | Integration Results |
-|---|---|---|---|---|---|
-| Remaining `xlw_`/`com_`-tier backend primitives — `backends.py` §3 | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `OwnedInstanceRegistry` — `backends.py` §3.1 | ✅ | ✅ | ⏭️ | ✅ | ⏭️ |
-| `recalculate` action | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `run_macro` action | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `refresh_links` action | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `write_links` action | ❌ | ❌ | ❌ | ❌ | ❌ |
-| `read_metadata` action (textbox sub-case) | ❌ | ❌ | ❌ | ❌ | ❌ |
-
-## Backlog / deferred (per PRD §8 and §12)
-
-| Item | Status |
-|---|---|
-| `update_summary_table` — exact parameters | Not designed yet, deliberately deferred |
-| `aggregate`, `write_table`, `write_row` by-header mode | Need step-output context — blocked on `runner.py` (build order item 7), not just deferred by choice |
-| `read_links` (+ already-deferred `write_links`) | Blocked on a real Excel-generated fixture (or manual XML/zip surgery) — empirically confirmed openpyxl can't create the relationship itself |
-| `export_pdf` | Backlog |
-| AI-authoring inspection actions (`list_sheets`, `describe_sheet`) | Planned, next phase after core engine works (PRD §9) |
-| Instance-ownership tagging mechanism across crashes (PRD §6.2.1/§12) | Open question |
-| Scratch-directory collision avoidance for concurrent runs (PRD §6.3.1/§12) | Open question |
-| CLI / MCP wrapper | Deferred (PRD §3/§5) |
+Tracker stays function/class-granular even though source files are consolidated — see Spec §7.
+See the "Quick status" and "Backlog / deferred" tables at the top of this file for current
+component/action state.

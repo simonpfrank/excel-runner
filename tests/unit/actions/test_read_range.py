@@ -26,3 +26,39 @@ class TestReadRangeAction:
     def test_returns_success_status(self, file_session: WorkbookSession) -> None:
         result = read_range_action(session=file_session, sheet="Summary", range="A1")
         assert result.status == "success"
+
+    def test_an_explicit_list_of_sheets_is_keyed_by_sheet_name(
+        self, multi_sheet_file_session: WorkbookSession
+    ) -> None:
+        result = read_range_action(
+            session=multi_sheet_file_session,
+            sheet=["A&H North", "A&H South"],
+            range="A1",
+        )
+        assert result.output == {
+            "values": {"A&H North": "north-value", "A&H South": "south-value"}
+        }
+
+    def test_all_reads_every_sheet_in_the_workbook(
+        self, multi_sheet_file_session: WorkbookSession
+    ) -> None:
+        result = read_range_action(
+            session=multi_sheet_file_session, sheet="all", range="A1"
+        )
+        assert result.output == {
+            "values": {
+                "A&H North": "north-value",
+                "A&H South": "south-value",
+                "Other": "other-value",
+            }
+        }
+
+    def test_matching_reads_every_sheet_whose_name_matches_the_regex(
+        self, multi_sheet_file_session: WorkbookSession
+    ) -> None:
+        result = read_range_action(
+            session=multi_sheet_file_session, sheet={"matching": "^A&H"}, range="A1"
+        )
+        assert result.output == {
+            "values": {"A&H North": "north-value", "A&H South": "south-value"}
+        }

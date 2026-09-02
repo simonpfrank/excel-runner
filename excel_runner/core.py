@@ -142,6 +142,22 @@ def _whole_expression(text: str) -> str | None:
     return inner.strip()
 
 
+def is_whole_template_expression(text: str) -> bool:
+    """Whether `text` is entirely one ``{{ ... }}`` block.
+
+    Used by static validation (Spec sec 5.4) to recognize a param value whose real type can't
+    be known until execution — it may evaluate to any shape (e.g. a previous step's list/dict
+    output), not just a string, so type-checking it up front would be checking the wrong thing.
+
+    Args:
+        text: The raw (unresolved) param value.
+
+    Returns:
+        True if `text` is entirely one `{{ ... }}` expression.
+    """
+    return _whole_expression(text) is not None
+
+
 def _wrap_template_error(original_text: str, exc: Exception) -> ValidationError:
     stripped = original_text.strip()
     if isinstance(exc, jinja2.exceptions.UndefinedError):

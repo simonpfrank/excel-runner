@@ -136,6 +136,23 @@ steps so anything referenced already ran.
   a plain key lookup here (e.g. `steps.get_totals.output.values` reaches the output dict's
   `"values"` key, not Python's `dict.values` method) — this is a deliberate engine fix, not
   something to work around.
+- A field whose value is *entirely* one `{{ ... }}` expression is exempt from static
+  (pre-run) type checking — its real shape can't be known until execution, since it may
+  depend on a previous step's output. This means a full Jinja expression is a legitimate way
+  to build a value no dedicated action exists for yet, e.g. a headered table from a previous
+  step's dict output, or a count of rows matching a value, both without any custom action:
+  ```yaml
+  # builds [["Sheet", "State"], ["North", "Pass"], ...] from a prior read_range step's
+  # {"values": {"North": "Pass", ...}} output — no "build a table" action needed
+  values: >-
+    {{ [["Sheet", "State"]]
+       + (steps.capture_status.output.values.items() | list | map('list') | list) }}
+
+  # counts how many [sheet, state] rows have state == "Pass" — no "count"/"aggregate"
+  # action needed; `last` is a builtin Jinja filter (last item of each row), not custom
+  value: >-
+    {{ steps.read_table.output.values | map('last') | select('equalto', 'Pass') | list | length }}
+  ```
 - `if:` accepts the same expression either with or without the `{{ }}` wrapper — both of these
   are valid:
   ```yaml
@@ -239,8 +256,13 @@ without `data_only`), never recalculated.
 | Field | Required |
 |---|---|
 | `sheet`, `range` | yes |
-Output: `{"values": ...}` — a single scalar for a single-cell `range`, a 2D list of rows for a
-multi-cell range. Reference as `{{ steps.<id>.output.values }}`.
+`sheet` accepts a single name (`"North"`), an explicit list (`["North", "South"]`) for
+multi-sheet capture, `"all"` (every sheet in the workbook), or `{ matching: "<regex>" }`
+(every sheet whose name matches, `re.search`-style — same convention as
+`find_row`/`find_headers_row`'s `patterns`).
+Output: `{"values": ...}` — for a single sheet name, a single scalar for a single-cell `range`
+or a 2D list of rows for a multi-cell range (unchanged); for a list/`all`/`matching` sheet
+spec, a dict keyed by sheet name instead. Reference as `{{ steps.<id>.output.values }}`.
 
 **`read_metadata`**
 | Field | Required | Notes |

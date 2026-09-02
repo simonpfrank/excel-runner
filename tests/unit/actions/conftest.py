@@ -1,5 +1,6 @@
 """Shared fixtures for action tests: a real openpyxl fixture workbook wrapped in a
-WorkbookSession, exactly what the (not-yet-built) runner will hand to an action function."""
+WorkbookSession, exactly what the (not-yet-built) runner will hand to an action function.
+"""
 
 from collections.abc import Iterator
 from pathlib import Path
@@ -30,7 +31,11 @@ def workbook_path(tmp_path: Path) -> Path:
 def file_session(workbook_path: Path) -> Iterator[WorkbookSession]:
     handle = backends.open_workbook(str(workbook_path), mode="read_write")
     yield WorkbookSession(
-        name="manip", backend="file", handle=handle, path=str(workbook_path), mode="read_write"
+        name="manip",
+        backend="file",
+        handle=handle,
+        path=str(workbook_path),
+        mode="read_write",
     )
 
 
@@ -62,5 +67,41 @@ def richer_workbook_path(tmp_path: Path) -> Path:
 def richer_file_session(richer_workbook_path: Path) -> Iterator[WorkbookSession]:
     handle = backends.open_workbook(str(richer_workbook_path), mode="read_write")
     yield WorkbookSession(
-        name="manip", backend="file", handle=handle, path=str(richer_workbook_path), mode="read_write"
+        name="manip",
+        backend="file",
+        handle=handle,
+        path=str(richer_workbook_path),
+        mode="read_write",
+    )
+
+
+@pytest.fixture
+def multi_sheet_workbook_path(tmp_path: Path) -> Path:
+    """Three sheets, two sharing an "A&H" prefix — the exact shape step 15's multi-sheet
+    capture needs (list/all/matching sheet selection for `read_range`)."""
+    path = tmp_path / "multi_sheet_fixture.xlsx"
+    workbook = openpyxl.Workbook()
+    first = workbook.active
+    assert first is not None
+    first.title = "A&H North"
+    first["A1"] = "north-value"
+    second = workbook.create_sheet("A&H South")
+    second["A1"] = "south-value"
+    third = workbook.create_sheet("Other")
+    third["A1"] = "other-value"
+    workbook.save(path)
+    return path
+
+
+@pytest.fixture
+def multi_sheet_file_session(
+    multi_sheet_workbook_path: Path,
+) -> Iterator[WorkbookSession]:
+    handle = backends.open_workbook(str(multi_sheet_workbook_path), mode="read_write")
+    yield WorkbookSession(
+        name="manip",
+        backend="file",
+        handle=handle,
+        path=str(multi_sheet_workbook_path),
+        mode="read_write",
     )

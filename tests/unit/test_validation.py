@@ -195,20 +195,43 @@ class TestParamTypes:
         assert "list" in exc_info.value.detail.message
 
     def test_type_name_fallback_for_a_plain_type(self) -> None:
-        """read_range's `sheet` is a plain `str` — exercises _type_name's final fallback for
+        """read_range's `range` is a plain `str` — exercises _type_name's final fallback for
         a non-generic, non-Union, non-Literal annotation."""
         workflow = _workflow(
             [
                 Step(
                     id="s1",
                     action="read_range",
-                    params={"workbook": "manip", "sheet": 5, "range": "A1"},
+                    params={"workbook": "manip", "sheet": "S", "range": 5},
                 )
             ]
         )
         with pytest.raises(ValidationError) as exc_info:
             validation.validate_static(workflow, _REGISTRY)
         assert "must be a str" in exc_info.value.detail.message
+
+    def test_a_whole_template_expression_is_exempt_regardless_of_expected_type(
+        self,
+    ) -> None:
+        """A field that is entirely one `{{ ... }}` expression can't be type-checked
+        statically — it may reference an earlier step's output, which doesn't exist until
+        execution (core.load's own docstring). write_range's `values` (list[list[Any]]) is
+        used here since a raw string would otherwise always fail that check."""
+        workflow = _workflow(
+            [
+                Step(
+                    id="s1",
+                    action="write_range",
+                    params={
+                        "workbook": "manip",
+                        "sheet": "S",
+                        "range": "A1",
+                        "values": "{{ [[1, 2]] }}",
+                    },
+                )
+            ]
+        )
+        validation.validate_static(workflow, _REGISTRY)  # should not raise
 
 
 class TestStepReferences:
