@@ -24,4 +24,7 @@ tests/data/agent_completion_check_real/counter.txt
 demos/output/
 /input/
 /output/
+.vscode/
+unify_storage/
+
 

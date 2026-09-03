@@ -661,3 +661,175 @@ class TestCrashSafety:
 
         assert result.status == "success"
         assert openpyxl.load_workbook(real)["Sheet"]["C1"].value == "worked"
+
+
+class TestDumpAction:
+    """The `dump` control-flow action — internal step-output introspection while
+    authoring/debugging."""
+
+    def test_dump_prints_prior_step_output_to_console(
+        self, tmp_path: Path, capsys: pytest.CaptureFixture[str]
+    ) -> None:
+        _make_workbook(tmp_path / "output" / "manip.xlsx")
+        workflow_path = _write_yaml(
+            tmp_path / "workflow.yaml",
+            """
+            env:
+              output_folder: "./output"
+            workbooks:
+              manip:
+                file: "{{ env.output_folder }}/manip.xlsx"
+            steps:
+              - id: get_a1
+                action: read_range
+                workbook: manip
+                sheet: "Sheet"
+                range: "A1"
+              - id: show_it
+                action: dump
+            """,
+        )
+
+        result = run_workflow(
+            workflow_path,
+            env_overrides={"output_folder": str(tmp_path / "output")},
+            working_dir=str(tmp_path),
+        )
+
+        assert result.status == "success"
+        printed = capsys.readouterr().out
+        assert '"get_a1"' in printed
+        assert '"hello"' in printed
+
+    def test_dump_writes_to_file_when_requested(self, tmp_path: Path) -> None:
+        _make_workbook(tmp_path / "output" / "manip.xlsx")
+        dump_path = tmp_path / "wip_dump.json"
+        workflow_path = _write_yaml(
+            tmp_path / "workflow.yaml",
+            f"""
+            env:
+              output_folder: "./output"
+            workbooks:
+              manip:
+                file: "{{{{ env.output_folder }}}}/manip.xlsx"
+            steps:
+              - id: get_a1
+                action: read_range
+                workbook: manip
+                sheet: "Sheet"
+                range: "A1"
+              - id: show_it
+                action: dump
+                to: "file"
+                path: "{dump_path.as_posix()}"
+            """,
+        )
+
+        result = run_workflow(
+            workflow_path,
+            env_overrides={"output_folder": str(tmp_path / "output")},
+            working_dir=str(tmp_path),
+        )
+
+        assert result.status == "success"
+        dumped = json.loads(dump_path.read_text())
+        assert dumped["get_a1"]["output"]["values"] == "hello"
+
+    def test_steps_dump_json_is_always_written_alongside_audit_log(
+        self, tmp_path: Path
+    ) -> None:
+        _make_workbook(tmp_path / "output" / "manip.xlsx")
+        workflow_path = _write_yaml(
+            tmp_path / "workflow.yaml",
+            """
+            env:
+              output_folder: "./output"
+            workbooks:
+              manip:
+                file: "{{ env.output_folder }}/manip.xlsx"
+            steps:
+              - id: get_a1
+                action: read_range
+                workbook: manip
+                sheet: "Sheet"
+                range: "A1"
+            """,
+        )
+
+        result = run_workflow(
+            workflow_path,
+            env_overrides={"output_folder": str(tmp_path / "output")},
+            working_dir=str(tmp_path),
+        )
+
+        assert result.status == "success"
+        steps_dump_path = result.audit_log_path.parent / "steps_dump.json"
+        dumped = json.loads(steps_dump_path.read_text())
+        assert dumped["get_a1"]["output"]["values"] == "hello"
+
+
+class TestCheckExistenceFlag:
+    """Tier-3 existence validation (opt-in via `check_existence=True`) — real file access,
+    read-only, before any session/scratch machinery."""
+
+    def test_missing_sheet_raises_before_any_workbook_is_touched(
+        self, tmp_path: Path
+    ) -> None:
+        real = _make_workbook(tmp_path / "output" / "manip.xlsx")
+        workflow_path = _write_yaml(
+            tmp_path / "workflow.yaml",
+            """
+            env:
+              output_folder: "./output"
+            workbooks:
+              manip:
+                file: "{{ env.output_folder }}/manip.xlsx"
+            steps:
+              - id: get_a1
+                action: read_range
+                workbook: manip
+                sheet: "NoSuchSheet"
+                range: "A1"
+            """,
+        )
+
+        with pytest.raises(ValidationError) as exc_info:
+            run_workflow(
+                workflow_path,
+                env_overrides={"output_folder": str(tmp_path / "output")},
+                working_dir=str(tmp_path),
+                check_existence=True,
+            )
+
+        assert "NoSuchSheet" in exc_info.value.detail.message
+        assert openpyxl.load_workbook(real)["Sheet"]["A1"].value == "hello"
+
+    def test_not_run_by_default(self, tmp_path: Path) -> None:
+        """Without the flag, a missing sheet is only caught when the step actually executes,
+        not upfront — confirms the check is genuinely opt-in. (A missing sheet currently
+        surfaces as a raw KeyError from openpyxl at execution time, not an ActionExecutionError
+        — a pre-existing gap in read_range, unrelated to this feature.)"""
+        _make_workbook(tmp_path / "output" / "manip.xlsx")
+        workflow_path = _write_yaml(
+            tmp_path / "workflow.yaml",
+            """
+            env:
+              output_folder: "./output"
+            workbooks:
+              manip:
+                file: "{{ env.output_folder }}/manip.xlsx"
+            steps:
+              - id: get_a1
+                action: read_range
+                workbook: manip
+                sheet: "NoSuchSheet"
+                range: "A1"
+            """,
+        )
+
+        with pytest.raises(KeyError):
+            run_workflow(
+                workflow_path,
+                env_overrides={"output_folder": str(tmp_path / "output")},
+                working_dir=str(tmp_path),
+            )

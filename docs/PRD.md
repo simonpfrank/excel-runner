@@ -626,16 +626,48 @@ processed, nothing to do") naturally still saves whatever ran before it — no n
 needed, `stop` only needs to end the loop early. See `docs/Specification.md` §6.1 for the
 runner-side mechanics.
 
+### 6.10 Inspecting a run's internal storage — DECIDED (2026-09-03)
+
+A `dump` step prints (or writes) the recorded output of prior steps as formatted JSON — for a
+workflow author who wants to see what a step actually produced (`steps.<id>.output`) while
+authoring or debugging, without resorting to a separate script or reading the JSONL audit log
+by hand. Same shape as `stop` (§6.9): no `workbook:` field, pure control flow, not a backend
+call.
+
+```yaml
+- id: inspect
+  action: dump
+  ids: [get_totals, find_it]   # optional — omit to dump every step recorded so far
+  to: console                  # or "file" (requires path:)
+```
+
+An `ids` entry that doesn't match any recorded step is logged as a warning and silently
+skipped, not raised — `dump` is a debugging aid, not a validation mechanism, so a typo in an
+`ids` entry shouldn't fail the run. `to: "file"` writes to `path:` (required in that mode).
+
+**Every run also always writes `working_dir/steps_dump.json`** (§6.3.4's `working_dir`,
+`docs/Specification.md` §6.1), regardless of whether a `dump` step appears in the workflow at
+all — every step's recorded output, pretty-printed, in one JSON object. A companion to
+`audit.jsonl` (line-oriented, one record per step) for anyone who wants the full picture at a
+glance without a `dump` step or external tooling.
+
 ## 7. Action catalog
 
 **Status: syntax is settled for most actions; a couple are explicitly flagged as still open.**
 
 Three things that apply to every row below, not repeated per-row:
 - **Backend (openpyxl vs. xlwings) is never a user choice** — see §6.1.
-- **`range`/`column` fields accept both A1-style ranges (e.g. `"A1:C10"`) and Excel
-  defined/named ranges (e.g. `"SalesData"`)**, resolved by checking the workbook's defined
-  names first, falling back to A1 notation. Depth of named-range support in openpyxl/xlwings
-  needs verifying in spec phase.
+- **`range`/`column`/`cells` fields accept both A1-style ranges (e.g. `"A1:C10"`) and Excel
+  workbook-level defined/named ranges (e.g. `"SalesData"`)**, resolved at runtime by checking
+  the workbook's real defined names first, falling back to A1 notation (`backends.resolve_range`,
+  built 2026-09-01). A defined name's own destination sheet always wins over any `sheet:` the
+  step passes — a named range already knows which sheet it points at. Only single-area defined
+  names are supported; a multi-area one raises a clear `ActionExecutionError`, not a silent
+  partial read. **Built** for `read_range`, `read_metadata(target: cells)`, and
+  `find_headers_row`'s `search_range`. Not applicable to `find_row`'s `column` (a bare column
+  letter, not a range/cell string) or `find_column`/`find_columns`' `header_row` (a row number) —
+  those params aren't range/cell references in the first place, so named-range resolution has
+  nothing to attach to.
 - **Quoting house style**: quote free-text string values — data the workflow author supplies,
   like sheet names, header patterns, cell values, file paths — because plain words like
   `yes`/`no`/`on`/`off`/`null` get silently parsed as booleans/null by some YAML loaders (YAML
@@ -652,9 +684,10 @@ Three things that apply to every row below, not repeated per-row:
 | `save` | file/xlw | workbook | Optional — see §6.3 implicit save. |
 | `close` | file/xlw | workbook | Optional — see §6.3 implicit close. A forgotten close is still handled automatically. |
 | `stop` | none — control flow only, no workbook | reason (optional string) | Halts the run before any later step runs — see §6.9. Not tied to any workbook; `workbook:` isn't a field on this action. |
-| `copy` | file | source: {workbook, sheet, range}, target: {workbook, sheet, range} | `range` optional on `source` — omit for the whole sheet. |
-| `read_range` | file | workbook, sheet (string, a list for multi-sheet, `all`, or `{ matching: <regex> }`), range, as: values\|formulas (optional) | Multi-sheet: an explicit list (`["North", "South"]`) is the real mechanism; `all` and `{ matching: "<regex>" }` (every sheet whose name matches, `re.search`-style — same convention as `find_row`/`find_headers_row`'s `patterns`) are both authoring sugar that expand to that same explicit list before execution — one code path underneath either way. **Built** (2026-09-01, `resolve_sheet_names` in `backends.py`) — see §8/§10.4/§11 item 5. |
-| `read_metadata` | file (properties/cells) or xlw (textboxes) | workbook, target: properties\|textboxes\|cells, sheet (required if target=cells — clarification found during implementation, missing from the original catalog), cells (list, if target=cells) | Two distinct things live behind one action: (a) workbook/document properties (author, title, custom doc properties — file-backend), (b) the current value of an embedded ActiveX/form control (needs a live Excel session — openpyxl can't see live control state). Capability depends on `target:`, not fixed per-action (§6.1 exception). |
+| `dump` | none — control flow only, no workbook | ids (optional list of step ids), to: console\|file (optional, default console), path (required if to=file) | Prints/writes prior steps' recorded output as JSON, for inspecting a workflow's internal storage — see §6.10. Not tied to any workbook. |
+| `copy` | com | source: {workbook, sheet, range}, target: {workbook, sheet, range} | `range` optional on `source` — omit for the whole sheet. Moved from `file` to `com` (2026-09-02): real Excel `Range.Copy`, via `backends.com_copy_range`, so formulas/formatting come across too, not just values — openpyxl's file-backend `copy_range` (value-only) was a first cut, not a faithful copy. `range`/`source_range`/`target_range` accept workbook-level defined names too. |
+| `read_range` | file | workbook, sheet (string, a list for multi-sheet, `all`, or `{ matching: <regex> }`), range, formula: true\|false (optional, default false) | Multi-sheet: an explicit list (`["North", "South"]`) is the real mechanism; `all` and `{ matching: "<regex>" }` (every sheet whose name matches, `re.search`-style — same convention as `find_row`/`find_headers_row`'s `patterns`) are both authoring sugar that expand to that same explicit list before execution — one code path underneath either way. **Built** (2026-09-01, `resolve_sheet_names` in `backends.py`) — see §8/§10.4/§11 item 5. Param renamed from `as: values|formulas` to `formula: true` (2026-09-02, matches the shipped implementation) — defaults to the cell's computed value (`data_only=True` session default); `formula: true` reads formula text instead, via a one-off reopen (`data_only=False`), never the session's own handle. `range` accepts a workbook-level defined name. |
+| `read_metadata` | file (properties/cells) or xlw (textboxes) | workbook, target: properties\|textboxes\|cells, sheet (required if target=cells — clarification found during implementation, missing from the original catalog), cells (list, if target=cells), formula: true\|false (optional, default false, only meaningful for target=cells) | Two distinct things live behind one action: (a) workbook/document properties (author, title, custom doc properties — file-backend), (b) the current value of an embedded ActiveX/form control (needs a live Excel session — openpyxl can't see live control state). Capability depends on `target:`, not fixed per-action (§6.1 exception). `formula: true` reads formula text instead of each cell's computed value, same one-off reopen as `read_range`'s `formula:` param (2026-09-02). Each entry in `cells` accepts a workbook-level defined name, resolved independently. |
 | `write_cell` | file | workbook, sheet, cell, value | Single-cell write. `value` can be a literal or a step-output reference (§10), resolved by the templating engine — no special encoding needed. |
 | `write_range` | file | workbook, sheet, range, values (2D list) | Writes a computed block of values in one shot — the gap between single-cell `write_cell` and row/table-oriented `write_row`/`write_table`. |
 | `write_row` | file | workbook, sheet, row, values: {column: value, ...} — or values_by_header + headers_from — or start_column + positional values | Three modes: explicit column-letter mapping (base form), by-header-name (using a prior `find_columns` step's output), and positional (an ordered list from a start column, no mapping at all). All three in v1. |
@@ -681,12 +714,15 @@ Three things that apply to every row below, not repeated per-row:
 
 Updated against actual build progress (Specification.md §8/§4 track this in detail):
 
-- **v1, built**: open, save, close, copy, read_range (single-sheet and multi-sheet — list,
+- **v1, built**: open, save, close, read_range (single-sheet and multi-sheet — list,
   `all`, `{ matching: <regex> }` — see §7), read_metadata (properties/cells sub-cases),
   write_cell, write_range, write_row (base column-mapping + positional modes), insert_range
   (whole-row/whole-column only — partial-range returns a structured error, not built),
   set_column_width, create_sheet, rename_sheet, delete_sheet, find_headers_row, find_row,
   find_column, find_columns.
+- **v1, built, but `com` capability (needs a live Excel session, not file-backend)**: `copy`
+  (moved from `file` 2026-09-02 — real Excel `Range.Copy` via `backends.com_copy_range`, so
+  formulas/formatting come across too, not just values).
 - **v1, but needs a live Excel session rather than file-backend**: read_metadata (textbox-control
   sub-case only — openpyxl can't see live control state). Not built yet — live-Excel phase
   (Specification.md §8 build order item 10).
@@ -766,8 +802,19 @@ them." The first three examples are genuinely workbook-access-free (list-shape c
 step-id reference check) and are what tier 1 actually implements. Checking a range against a
 workbook's *real* defined names needs either a third validation tier that opens workbooks
 read-only for checking purposes only (not designed), or gets demoted to a plain runtime error
-when an action actually tries to use the range and openpyxl can't resolve it. Not decided —
-carried to §12 as an open item, not silently dropped.
+when an action actually tries to use the range and openpyxl can't resolve it.
+
+**Resolved 2026-09-03: built as a third, opt-in validation tier**
+(`engine.validate_existence`, `docs/Specification.md` §5.4), rather than either alternative
+sketched above. Opt-in via `--check-existence` / `run_workflow(..., check_existence=True)` —
+opens every referenced workbook read-only via openpyxl, before session/scratch machinery, and
+confirms every sheet and workbook-level defined name a step references by literal name actually
+exists (sheets created/renamed/removed earlier in the same workflow are tracked and counted
+correctly). The fourth example above is now genuinely catchable, when this tier is requested.
+**Deliberately still does not check plain A1 cell/range references** (e.g. `"A1"`, `"A1:D6"`) —
+scoped out on purpose, not an oversight; only sheet names and defined names are checked. Not
+run by default, since it's the first tier that touches real files at all — a workflow author
+who wants the full check opts in explicitly.
 
 The first three examples are the actual bar for tier-1 validation: name the field, show the
 expected shape, suggest the fix — not just "invalid config" or a raw pydantic traceback.
@@ -1368,14 +1415,18 @@ Still open:
   — needs a concrete design.
 - **Scratch-directory collision-avoidance (§6.3.1)** — naming/locking scheme if two runs
   target the same workbook concurrently. Not addressed yet.
-- **§9.1's fourth validation example (checking a range against a workbook's real defined
-  names)** — not implementable in either validation tier as designed (both are explicitly
-  workbook-access-free). Needs either a new tier that opens workbooks read-only for validation
-  only, or demotion to a runtime error. Found during tier-1 validation's implementation
-  (Specification.md §5.4); not decided.
 
 Everything else originally tracked here is resolved. Kept for the record, not because
 anything is still pending:
+
+- ~~§9.1's fourth validation example (checking a range against a workbook's real defined
+  names)~~ — **resolved and built (2026-09-02): demoted to a runtime error**, the option this
+  section flagged as the fallback if a new validation tier wasn't built (it wasn't).
+  `backends.resolve_range` opens the workbook (already open by the time any read action runs)
+  and checks its real `defined_names`; an unresolvable `range` raises a clear
+  `ActionExecutionError` naming the bad string, not a raw openpyxl exception. Built for
+  `read_range`, `read_metadata(target: cells)`, `find_headers_row`'s `search_range`, and
+  `copy`'s `source_range`/`target_range` (via `com_copy_range`).
 
 - ~~Environments/secrets handling~~ — **backlogged.** No env/secrets manager for now; for
   moving between environments, manual zip/move/unzip/clone of folders is acceptable for now.

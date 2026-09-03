@@ -398,10 +398,11 @@ trivially introspectable for `engine.py`'s `discover_actions()` (§5.1).
 **The 5 built actions have a deliberately reduced param surface vs. the full PRD §7 catalog**,
 each documented in its own docstring: `open` omits `update_links` (no effect without a live
 Excel session — xlwings, a later phase) and a `mode` override (depends on read/write inference that
-tier-2 validation, §5.4, doesn't exist yet to override); `read_range` omits `as: formulas`
-(depends on which `data_only` flag the workbook was opened with — a session-level decision, §5.4
-again). These are scope boundaries for this increment, not permanent cuts — they get added back
-once the machinery they depend on exists.
+tier-2 validation, §5.4, doesn't exist yet to override). `read_range` originally omitted its
+formula/value param for the same session-level-`data_only` reason — **resolved and built
+(2026-09-02)**, see the dedicated note below the "15 built so far" paragraph. These are scope
+boundaries for this increment, not permanent cuts — they get added back once the machinery
+they depend on exists.
 
 This is the largest file in the package (an estimated 900–1200 lines across 24 functions) and
 the one touched most often. Two things keep it navigable without adding source files:
@@ -418,6 +419,61 @@ miscount not caught until `list_actions()` (§6.3) asserted the real count direc
 `write_cell`, `write_range`, `write_row` (base + positional modes), `insert_range`
 (whole-row/whole-column only), `set_column_width`, `find_headers_row`, `find_row`,
 `find_column`, `find_columns`. All green, 100% branch coverage.
+
+**`data_only` session default, `formula:` param, and workbook-level named-range support —
+built (2026-09-02).** Found via a real bug report: every file-mode session opened with
+openpyxl's implicit `data_only=False`, so any formula cell's `.value` silently read back as
+the formula text (e.g. `'=A1+A2'`), never its computed value (e.g. `15`) — confirmed via
+exhaustive runtime probing, not assumption; `read_only` has zero effect on this, `data_only` is
+the sole determinant. Fixed by defaulting `backends.open_workbook`'s `data_only` param to
+`True` (values, matching every other action's normal expectation), and adding an optional
+`formula: true` param — **not** the PRD's originally-sketched `as: values|formulas`, renamed
+during implementation for a plainer boolean shape — to `read_range` and
+`read_metadata(target: cells)` only, the two actions that ever need formula text instead. Since
+`data_only` is a load-time decision, not togglable on an already-open handle, `formula: true`
+doesn't reuse the session's own handle: it saves any pending writes first (so the on-disk view
+is current), opens a fresh, throwaway, read-only, `data_only=False` view
+(`open_workbook_for_formula_read`), reads through that, then closes it — the session's own
+handle is never touched. Regression test: write a formula, read without recalculating first,
+assert `None` (openpyxl's own uncalculated-cache behavior) rather than a stale/wrong value.
+
+Alongside this, workbook-level defined/named ranges (PRD §9.1's `range`/`column`/`cells`
+fields accepting `"SalesData"` as well as `"A1:C10"`) went from a documented-but-unbuilt gap to
+real support: `backends.resolve_range(workbook, sheet, range)` checks the workbook's real
+`defined_names` first, falling back to plain A1 notation unchanged if `range` isn't a defined
+name. A defined name's own destination sheet deliberately wins over whatever `sheet:` the step
+passed — a named range already knows which sheet it points at, there's no ambiguity to
+preserve. Only single-area defined names are supported; a defined name resolving to 2+ areas
+raises `ValueError` in `backends.py`, translated by each action into a clear
+`ActionExecutionError` naming the bad range/defined-name string — never a raw openpyxl
+exception leaking through. This is exactly PRD §9.1's fourth validation example, previously
+carried to PRD §12 as unresolved ("needs either a new validation tier or demotion to a runtime
+error") — resolved here as the demotion option, since checking real defined names needs the
+workbook already open, which neither validation tier is. Built for `read_range`,
+`read_metadata(target: cells)` (each entry in `cells` resolved independently), and
+`find_headers_row`'s `search_range`. Not extended to `find_row`'s `column` (a bare column
+letter, not a range/cell string) or `find_column`/`find_columns`' `header_row` (a row number) —
+neither param is structurally a range/cell reference, so named-range resolution has nothing to
+attach to there; not an oversight, a scope boundary.
+
+**`copy` moved from `file` to `com` capability, backed by a new `com_copy_range` — built
+(2026-09-02).** The original file-backend `copy_range` was value-only (`cell.value` per cell,
+written via `write_range`) — deliberately a first cut, but not a faithful "copy": a formula
+cell copied that way silently becomes a hardcoded value in the target, and cell
+formatting/merges are lost entirely, neither of which is what a user typing "copy this range"
+means. `com_copy_range` uses Excel's own `Range.Copy(Destination=...)` via xlwings' `.api`
+escape hatch instead — genuine copy-paste semantics, formulas and formatting both come across.
+Both `session` (source) and `target` must be live, xlwings-backed sessions in the *same*
+shared Excel App instance (Excel's Copy/paste doesn't work across two separately-spawned
+instances) — `runner.py`'s `_dispatch_copy` was updated to pass `capability="com"` to both
+`session_manager.get_or_open()` calls, so `SessionManager`'s already-built bidirectional
+backend-switching (§5.2) puts both sessions on `xlw` before `copy` ever runs, exactly the same
+mechanism every other `com`/`xlw` action already relies on. `source_range`/`target_range`
+accept workbook-level defined names too, resolved the normal xlwings-range way (no separate
+`resolve_range` call needed — `sheet.range(name)` already resolves a defined name natively).
+The file-backend `copy_range` primitive itself is left in `backends.py`, still tested directly,
+as a plain value-copy primitive — not deleted, since it's simple, harmless, and no action calls
+it anymore doesn't make it wrong, just currently unused by the action layer.
 
 **Error-handling policy, established while building this batch**: an action returns
 `ActionResult(status="error", error=ErrorDetail(...))` for an outcome that's a normal,
@@ -463,6 +519,22 @@ pure control flow inside `runner.py`'s loop (§6.1), not a backend call, registe
 `@control_action` decorator (capability `"none"`, a fourth value alongside `"file"`/`"com"`/
 `"depends_on_param"`). It joins `copy` in `_SCHEMA_EXEMPT_ACTIONS` (§5.4) since neither's YAML
 shape is the generic "flat `workbook:` + params" the standard schema check handles.
+
+**`dump` — control-flow action — built 2026-09-03.** **21 actions now** (was 20 with
+`recalculate`'s earlier addition). Same shape as `stop`: no `session`, no `workbook:` field,
+`capability="none"`, joins `_SCHEMA_EXEMPT_ACTIONS`. Its one real wrinkle: it needs the
+in-progress run's accumulated `step_outputs: dict[str, dict[str, Any]]` — data every other
+action never sees — so `_generate_param_schema` (§5.4) excludes `step_outputs` from the
+YAML-facing schema alongside the pre-existing `session` exclusion, and `runner.py`'s `_dispatch`
+special-cases `dump` (alongside its generic `capability == "none"` branch) to pass
+`step_outputs=context["steps"]` in. `ids: list[str] | None` filters which recorded steps are
+included (`None` = all so far); an unknown/typo'd id is logged as a warning and silently
+skipped, not raised — deliberately forgiving, since a debugging/inspection aid failing the run
+over a typo would defeat its own purpose. `to: "console"` (default) prints; `to: "file"` writes
+`json.dumps(..., indent=2, default=str)` to `path:` (required in that mode, parent dirs
+created). Not the only way to see per-step storage: every run also always writes a
+`working_dir/steps_dump.json` (§6.1) with the same data for every step, regardless of whether a
+`dump` step appears in the workflow at all.
 
 ## 5. Engine layer — `engine.py`
 
@@ -766,6 +838,41 @@ This *is* the "plain-English execution plan" PRD §9 promises an agent/user can 
 before a real run — `SessionManager.get_or_open`'s `mode` param (§5.2) is the seam this plugs
 into once `runner.py` exists to wire them together.
 
+**Tier 3 (existence check, opt-in), via `validate_existence(workflow) -> None` — built
+2026-09-03.** Resolves the "correction found while building tier 1" gap above, as its own
+separate, opt-in tier rather than folding it into tier 1 — since it genuinely needs to open
+workbooks (contradicting tier 1's "no workbook access" premise), it's only run when explicitly
+requested (`--check-existence` CLI flag / `run_workflow(..., check_existence=True)`), and always
+runs immediately after `plan()` and before any `SessionManager`/`ScratchManager` involvement.
+
+- **Opens each distinct real workbook file once**, read-only, via `openpyxl.load_workbook(path,
+  read_only=True)` — a small `dict[Path, Any]` cache so a workflow with several logical
+  workbook names pointing at the same physical file (or a `template:` relationship) doesn't
+  reopen it. A workbook whose file doesn't exist yet (fresh `create_if_missing`, no `template:`,
+  or a `template:` whose own file also doesn't exist) is skipped entirely — nothing to check.
+- **Sheet existence is tracked live, in step order** — seeded from each workbook's real
+  `sheetnames`, then walked forward as `create_sheet` (adds), `rename_sheet` (swaps old→new),
+  `delete_sheet` (removes) steps run, so a sheet created earlier in the *same* workflow counts
+  as existing from that point on, not just against the real file's as-loaded state. Every other
+  sheet-referencing action (`read_range`, `read_metadata`, the `find_*` actions, every `write_*`
+  action, `insert_range`, `set_column_width`, `recalculate` when `scope: "sheet"`, plus `copy`'s
+  nested `source.sheet`/`target.sheet`) is checked against the tracked set at that point.
+- **Named-range existence** (`read_range.range`, `read_metadata.cells[*]`,
+  `find_headers_row.search_range`) is checked against the real file's `defined_names` — never
+  tracked, since nothing in the action set can create one. **Deliberately skips plain A1
+  notation** (`^\$?[A-Za-z]{1,3}\$?\d+(:\$?[A-Za-z]{1,3}\$?\d+)?$`) — cell/range references were
+  explicitly out of scope for this tier by design, not an oversight; only sheet names and
+  workbook-level defined names get checked.
+- A `{{ steps.x... }}` template expression can't be known statically (same bypass tier 1's
+  `_check_param_types` already uses), so it's always skipped, same as tier 1.
+- Raises the first `ValidationError` found (with a `difflib.get_close_matches` suggestion, same
+  style as tier 1) and closes every opened workbook in a `finally` block regardless of outcome.
+- Internally dispatches per-step via a handler-lookup table
+  (`_STRUCTURAL_ACTION_HANDLERS: dict[str, Callable]`) mapping `create_sheet`/`rename_sheet`/
+  `delete_sheet` to their own small functions, rather than one large branching function —
+  `radon`'s grade-C ceiling flagged the original monolithic version at grade E during the
+  mandatory quality-gate pass, so it was split by action-type before merging.
+
 ## 6. Runner layer — `runner.py`
 
 The composition root, the audit trail, and the one public contract — grouped because together
@@ -776,6 +883,7 @@ they're "the layer that actually executes a run and is safe for other code to de
 ```python
 def run_workflow(
     path: str | Path, env_overrides: dict | None = None, working_dir: str | Path | None = None,
+    check_existence: bool = False,
 ) -> RunResult:
 ```
 
@@ -786,7 +894,12 @@ hit a line count — see AGENTS.md), wrapped in `try`/`finally` for the crash-sa
 1. `core.load(path, env_overrides)` → `Workflow`.
 2. Tier-1 validation (§5.4) → raises before anything is opened.
 3. Tier-2 validation (§5.4) → `ExecutionPlan`.
-4. **Resolve `working_dir` (PRD §6.3.4 — replaces `tempfile.mkdtemp()`)**:
+4. **Tier-3 existence validation (§5.4), added 2026-09-03 — opt-in, only when
+   `check_existence=True`**: `engine.validate_existence(workflow)` runs immediately after tier-2,
+   still before `working_dir`/`ScratchManager`/`SessionManager` exist — it opens workbooks
+   itself, read-only, independently of the session machinery below, and raises before any of it
+   is set up if a referenced sheet/defined name doesn't exist.
+5. **Resolve `working_dir` (PRD §6.3.4 — replaces `tempfile.mkdtemp()`)**:
    `base = Path(working_dir) if working_dir is not None else Path.cwd()`; `run_dir = base /
    "excel_runner_runs" / Path(path).stem`. `working_dir` is fed by the CLI's `--working-dir`
    flag (§6.4) — **the originally-sketched `working_dir:` YAML field was not built**, kept out
@@ -826,6 +939,12 @@ hit a line count — see AGENTS.md), wrapped in `try`/`finally` for the crash-sa
 8. `finally: session_manager.close_all()` — unconditionally, whether the loop finished, a step
    failed, or an exception propagated. `working_dir`'s contents (scratch copies + `audit.jsonl`)
    are simply left in place either way now — not conditionally cleaned up.
+9. **`steps_dump.json` (added 2026-09-03) — always written**, just before `run_workflow`
+   returns: `run_dir / "steps_dump.json"` gets `json.dumps(step_outputs, indent=2,
+   default=str)` — every step's recorded output, pretty-printed, in one file. Not gated behind
+   any flag or a `dump` step being present in the workflow — a low-cost, always-on companion to
+   `audit.jsonl` (which is line-oriented/one-record-per-step) for a human or tool that wants to
+   see a run's full internal storage at a glance.
 
 
 **`stop` — built (PRD §6.9)**: a step whose `action` is `stop` and whose `if:` is true (or
@@ -931,10 +1050,16 @@ correction). Args: `workflow` (positional path), `--env KEY=VALUE`
 parser.add_argument("--working-dir", default=None, help="Base directory for this run's "
     "working_dir (excel_runner_runs/<yaml_stem>/ is always appended). Defaults to cwd.")
 parser.add_argument("--logging-level", help="DEBUG,INFO,WARNING,ERROR", default="INFO")
+parser.add_argument("--check-existence", action="store_true", help="Also run tier-3 "
+    "existence validation before executing (§5.4) — opens every referenced workbook "
+    "read-only and confirms every sheet/defined name a step references by literal name "
+    "actually exists. Opt-in since it's the first check that touches real files.")
 ```
 
 `--working-dir`'s value is passed straight through as `run_workflow(..., working_dir=...)`
-(§6.1). `--logging-level` calls `logging.getLogger("excel_runner").setLevel(...)` before
+(§6.1). `--check-existence` (added 2026-09-03) maps straight through to
+`run_workflow(..., check_existence=args.check_existence)` — `False` by default, matching the
+library API's own default. `--logging-level` calls `logging.getLogger("excel_runner").setLevel(...)` before
 running the workflow — setting the level on the package's parent logger, not each module's own
 `__name__`-based logger, so it propagates down to every child logger (`excel_runner.runner`,
 etc.) that doesn't set its own explicit level. No handler or formatter configuration (§6.2.1's
@@ -1020,8 +1145,10 @@ time within it.
    creation on one code path) and the `ExceptionGroup`-based crash-safety design in `close_all()`.
 6. `engine.py` §5.4 — both validation tiers. **Done**, except checking a range against a
    workbook's real defined names (PRD §9.1's fourth example) — not implementable in either
-   tier as designed (needs workbook access, both tiers are explicitly workbook-access-free),
-   carried to PRD §12 as an open item.
+   tier as designed (needs workbook access, both tiers are explicitly workbook-access-free).
+   **Resolved 2026-09-02** (item 15 below): demoted to a runtime error instead —
+   `backends.resolve_range` checks real defined names once the workbook is already open,
+   raising a clear `ActionExecutionError` rather than a static-validation check.
 7. `runner.py` §6.1/§6.2 — first end-to-end real run of a multi-step file-backend workflow.
    **Done.** Resolved the deferred `copy` two-session wiring and `workbook`-field-stripping
    translation flagged since item 3/4. Surfaced two real bugs (§6.1/§2.2's notes: the audit
@@ -1086,6 +1213,15 @@ time within it.
     `restore_external_links` for classic cell-reference links; Power Query/data-connection
     support scoped narrowly (plain file-path-parameter sources only) or documented as a named
     limitation.
+15. **Formula-vs-value read bug fix, `formula:` param, named-range support, COM `copy` rewrite
+    — done (2026-09-02)**: see §4's dedicated notes above. `backends.open_workbook`'s
+    `data_only` now defaults `True`; `read_range`/`read_metadata(target: cells)` gained
+    `formula: true`; `backends.resolve_range` added workbook-level defined-name support to
+    `read_range`, `read_metadata(cells)`, and `find_headers_row`; `copy` moved from `file` to
+    `com` capability, backed by a new `com_copy_range` (Excel's own `Range.Copy`), with
+    `runner.py`'s `_dispatch_copy` updated to request `capability="com"` for both sessions.
+    Pure logic + existing live-Excel machinery (`OwnedInstanceRegistry`, `SessionManager`'s
+    already-built backend switching) — no new platform-dependent design needed.
 
 `docs/Progress_Tracker.md` tracks each item above against the project's standard Component /
 Unit Tests / Code / Integration Tests / Results columns, at function/class granularity — not

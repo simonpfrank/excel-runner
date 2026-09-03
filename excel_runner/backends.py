@@ -33,15 +33,27 @@ _WHOLE_COLUMN_RE = re.compile(r"^([A-Za-z]+):([A-Za-z]+)$")
 _WHOLE_ROW_RE = re.compile(r"^(\d+):(\d+)$")
 
 
-def open_workbook(path: str, mode: Literal["read_only", "read_write"]) -> Workbook:
+def open_workbook(
+    path: str, mode: Literal["read_only", "read_write"], data_only: bool = True
+) -> Workbook:
     """Open an existing workbook file.
 
     Creating a workbook that doesn't exist yet is a `workbooks:` registry concern
     (`create_if_missing`), handled by session management once it exists — not this function.
 
+    `data_only` — not `read_only` — is the sole determinant of whether a formula cell's
+    `.value` reads back as the formula text or its cached computed value (confirmed via
+    runtime probing across all `read_only`/`data_only` combinations; `read_only` has no
+    effect on this at all). Defaults to True (values), matching every other action's normal
+    expectation of reading a computed result, not formula source — `read_range` and
+    `read_metadata(target: cells)` are the only two actions that ever need the opposite, via
+    their own `formula: true` param (`open_workbook_for_formula_read`), not this default.
+
     Args:
         path: Path to an existing workbook file.
         mode: "read_only" opens without allowing writes; "read_write" allows them.
+        data_only: True (default) reads formula cells as their cached computed value; False
+            reads the formula text instead.
 
     Returns:
         The opened openpyxl Workbook.
@@ -49,7 +61,26 @@ def open_workbook(path: str, mode: Literal["read_only", "read_write"]) -> Workbo
     Raises:
         FileNotFoundError: If path does not exist.
     """
-    return openpyxl.load_workbook(path, read_only=(mode == "read_only"))
+    return openpyxl.load_workbook(
+        path, read_only=(mode == "read_only"), data_only=data_only
+    )
+
+
+def open_workbook_for_formula_read(path: str) -> Workbook:
+    """Open a fresh, read-only, `data_only=False` view of a workbook file, purely to read
+    formula text for a `formula: true` request — never the session's main handle, which stays
+    on its own `data_only` setting for the rest of the run (data_only is a load-time decision,
+    not something togglable on an already-open handle).
+
+    Args:
+        path: Path to an existing workbook file — the session's current (possibly scratch)
+            path, saved first if the session has unsaved writes.
+
+    Returns:
+        A throwaway openpyxl Workbook, read-only and data_only=False. Caller is responsible
+        for closing it once done reading.
+    """
+    return openpyxl.load_workbook(path, read_only=True, data_only=False)
 
 
 def create_workbook(path: str, template_path: str | None = None) -> None:
@@ -84,18 +115,60 @@ def close_workbook(workbook: Workbook) -> None:
     workbook.close()
 
 
+def resolve_range(workbook: Workbook, sheet: str, range: str) -> tuple[str, str]:
+    """Resolve `range` into plain A1 notation on a specific sheet — either unchanged (already
+    A1), or via a workbook-level defined name (PRD sec 7's named/defined-range support).
+
+    Checking a workbook's *real* defined names can only happen once it's actually open (not a
+    static-validation concern, Spec sec 5.4) — this is that runtime lookup, shared by every
+    read action that accepts a `range`/`cell` field.
+
+    Args:
+        workbook: The workbook to resolve against.
+        sheet: The worksheet `range` is scoped to when it's plain A1 notation. Ignored in
+            favor of the defined name's own sheet when `range` is a defined name instead.
+        range: An A1-style cell/range, or a workbook-level defined name.
+
+    Returns:
+        (resolved_sheet, a1_range).
+
+    Raises:
+        ValueError: If `range` is a defined name that resolves to more than one contiguous
+            area (multi-area named ranges aren't supported) — raised here rather than left to
+            fail confusingly further down in cell indexing.
+    """
+    defined_name = workbook.defined_names.get(range)
+    if defined_name is None:
+        return sheet, range
+    destinations = list(defined_name.destinations)
+    if len(destinations) != 1:
+        raise ValueError(
+            f'Named range "{range}" must resolve to exactly one area '
+            f"(found {len(destinations)})."
+        )
+    dest_sheet, dest_range = destinations[0]
+    return dest_sheet, dest_range.replace("$", "")
+
+
 def read_range(workbook: Workbook, sheet: str, range: str) -> Any:
     """Read a cell or range of cells.
 
     Args:
         workbook: The workbook to read from.
         sheet: Worksheet name.
-        range: An A1-style cell (e.g. "B2") or range (e.g. "A1:D50").
+        range: An A1-style cell (e.g. "B2") or range (e.g. "A1:D50"), or a workbook-level
+            defined name (resolved via `resolve_range`, which wins over `sheet` if the name
+            points at a different sheet).
 
     Returns:
         The cell's value for a single cell, or a 2D list of row values for a range.
+
+    Raises:
+        ValueError: If `range` isn't valid A1 notation and isn't a real defined name either,
+            or is a defined name spanning more than one area.
     """
-    selection = workbook[sheet][range]
+    resolved_sheet, resolved_range = resolve_range(workbook, sheet, range)
+    selection = workbook[resolved_sheet][resolved_range]
     if isinstance(selection, _SingleCell):
         return selection.value
     return [[cell.value for cell in row] for row in selection]
@@ -327,13 +400,18 @@ def find_headers_row(
     Args:
         workbook: The workbook to search.
         sheet: Worksheet name.
-        search_range: An A1-style range to search within.
+        search_range: An A1-style range to search within, or a workbook-level defined name.
         patterns: Regex patterns — every one must match a cell in a row for that row to count.
 
     Returns:
         `(row_number, {pattern: column_letter})` for the first matching row, or None.
+
+    Raises:
+        ValueError: If `search_range` isn't valid A1 notation and isn't a real defined name
+            either, or is a defined name spanning more than one area.
     """
-    selection = workbook[sheet][search_range]
+    resolved_sheet, resolved_range = resolve_range(workbook, sheet, search_range)
+    selection = workbook[resolved_sheet][resolved_range]
     rows = [(selection,)] if isinstance(selection, _SingleCell) else selection
     for row in rows:
         matches: dict[str, str] = {}
@@ -443,13 +521,22 @@ def read_cells(workbook: Workbook, sheet: str, cells: list[str]) -> dict[str, An
     Args:
         workbook: The workbook to read from.
         sheet: Worksheet name.
-        cells: A1-style cell references to read.
+        cells: A1-style cell references to read, or workbook-level defined names — each
+            resolved independently (`resolve_range`), so a defined name pointing at a
+            different sheet than `sheet` still works.
 
     Returns:
-        Mapping of cell reference to its value.
+        Mapping of the original cell reference (as given in `cells`) to its value.
+
+    Raises:
+        ValueError: If a cell reference isn't valid A1 notation and isn't a real defined name
+            either, or is a defined name spanning more than one area.
     """
-    worksheet = workbook[sheet]
-    return {cell: worksheet[cell].value for cell in cells}
+    result: dict[str, Any] = {}
+    for cell in cells:
+        resolved_sheet, resolved_ref = resolve_range(workbook, sheet, cell)
+        result[cell] = workbook[resolved_sheet][resolved_ref].value
+    return result
 
 
 def xlw_open_workbook(
@@ -498,6 +585,52 @@ def xlw_save_workbook(book: xw.Book) -> None:
     """
     logger.info('Saving workbook via Excel COM: "%s"', book.name)
     book.save()
+
+
+# --- Copy (PRD sec 7's `copy` action) -------------------------------------------------------
+#
+# Genuinely COM-only, not just xlwings' portable API: Excel's own Copy/paste is what preserves
+# formulas, formatting, and other cell properties across the copy — the file-backend
+# `copy_range` above is deliberately value-only (openpyxl has no live calculation engine to
+# re-anchor a copied formula's relative references against), which was fine for a first cut
+# but not a faithful "copy" for anything containing formulas or formatting.
+
+
+def com_copy_range(
+    source_book: xw.Book,
+    source_sheet: str,
+    source_range: str | None,
+    target_book: xw.Book,
+    target_sheet: str,
+    target_range: str,
+) -> None:
+    """Copy a range — or, if `source_range` is None, the whole used range of the sheet — from
+    one live workbook to another, via Excel's own Copy, anchored at `target_range`'s top-left
+    cell.
+
+    Args:
+        source_book: The live workbook to copy from.
+        source_sheet: Source worksheet name.
+        source_range: An A1-style range, or None to copy the whole used range of the sheet.
+        target_book: The live workbook to copy into.
+        target_sheet: Target worksheet name.
+        target_range: Where to start pasting — only the top-left cell is used.
+    """
+    source_worksheet = source_book.sheets[source_sheet]
+    source_selection = (
+        source_worksheet.used_range
+        if source_range is None
+        else source_worksheet.range(source_range)
+    )
+    target_anchor = target_book.sheets[target_sheet].range(target_range.split(":")[0])
+    logger.info(
+        'Copying "%s" of "%s" to "%s" of "%s" via Excel COM',
+        source_range or "<used range>",
+        source_book.name,
+        target_range,
+        target_book.name,
+    )
+    source_selection.api.Copy(Destination=target_anchor.api)
 
 
 # --- Recalculation (PRD sec 7's `recalculate` action) --------------------------------------

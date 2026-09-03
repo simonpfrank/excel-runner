@@ -111,10 +111,10 @@ def _dispatch_copy(
     source = resolved_params["source"]
     target = resolved_params["target"]
     source_session = session_manager.get_or_open(
-        source["workbook"], mode=plan.modes[source["workbook"]]
+        source["workbook"], mode=plan.modes[source["workbook"]], capability="com"
     )
     target_session = session_manager.get_or_open(
-        target["workbook"], mode=plan.modes[target["workbook"]]
+        target["workbook"], mode=plan.modes[target["workbook"]], capability="com"
     )
     return actions_module.copy(
         session=source_session,
@@ -142,8 +142,12 @@ def _dispatch(
     logger.debug('Step "%s" (%s): resolved params %r', step.id, step.action, resolved)
     if step.action == "copy":
         return _dispatch_copy(resolved, session_manager, plan)
-    if step.action == "stop":
-        # No session to resolve — stop is pure control flow, no workbook: field (PRD sec 6.9).
+    if registry[step.action].capability == "none":
+        # No session to resolve — control-flow actions (stop, dump) have no workbook: field
+        # (PRD sec 6.9). dump additionally needs the raw step-output storage itself, which
+        # isn't a resolved param of its own step — injected here, not templated.
+        if step.action == "dump":
+            return registry[step.action].fn(step_outputs=context["steps"], **resolved)
         return registry[step.action].fn(**resolved)
     workbook_name = resolved["workbook"]
     session: WorkbookSession = session_manager.get_or_open(
@@ -159,6 +163,7 @@ def run_workflow(
     path: str | Path,
     env_overrides: dict[str, Any] | None = None,
     working_dir: str | Path | None = None,
+    check_existence: bool = False,
 ) -> RunResult:
     """Load, validate, and execute a workflow YAML file end to end.
 
@@ -176,6 +181,10 @@ def run_workflow(
         working_dir: Base directory this run's `working_dir` folder
             (`excel_runner_runs/<yaml_stem>/`) is created under (PRD sec 6.3.4). Defaults to
             the current working directory. Fed by the CLI's `--working-dir` flag (Spec sec 6.4).
+        check_existence: If True, also runs tier-3 existence validation (opt-in, since it's
+            the first tier that opens real files) — confirms every sheet/defined name a step
+            references by literal name actually exists. Fed by the CLI's `--check-existence`
+            flag.
 
     Returns:
         The RunResult, once every step has run (or been skipped) without raising.
@@ -190,6 +199,8 @@ def run_workflow(
     registry = engine.discover_actions(actions_module)
     engine.validate_static(workflow, registry)
     plan = engine.plan(workflow, registry)
+    if check_existence:
+        engine.validate_existence(workflow)
 
     # working_dir is a fixed, predictable path (not a random tempfile.mkdtemp() one) so
     # external tooling can construct it itself from just the yaml's filename, without reading
@@ -297,6 +308,11 @@ def run_workflow(
             session_manager.commit_all()
     finally:
         session_manager.close_all()
+
+    # Always written, no flag needed — the same data as audit.jsonl (one line per step), just
+    # consolidated into one pretty-printed JSON object for a human to eyeball at a glance.
+    steps_dump_path = run_dir / "steps_dump.json"
+    steps_dump_path.write_text(json.dumps(step_outputs, indent=2, default=str))
 
     return RunResult(
         status="error" if any_failed else "success",

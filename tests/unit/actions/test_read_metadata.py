@@ -5,6 +5,7 @@ import pytest
 
 from excel_runner.actions import read_metadata as read_metadata_action
 from excel_runner.core import ACTION_CAPABILITIES, ActionExecutionError, WorkbookSession
+from tests.unit.conftest import requires_excel, requires_working_xlwings_save
 
 
 class TestReadMetadataAction:
@@ -19,7 +20,10 @@ class TestReadMetadataAction:
 
     def test_cells_target(self, richer_file_session: WorkbookSession) -> None:
         result = read_metadata_action(
-            session=richer_file_session, target="cells", sheet="Summary", cells=["A1", "B3"]
+            session=richer_file_session,
+            target="cells",
+            sheet="Summary",
+            cells=["A1", "B3"],
         )
         assert result.status == "success"
         assert result.output == {"A1": "Notes", "B3": 100}
@@ -48,3 +52,53 @@ class TestReadMetadataAction:
                 cells=["A1"],
             )
         assert "textboxes" in exc_info.value.detail.message
+
+
+class TestReadMetadataCellsNamedRange:
+    def test_reads_a_cell_via_a_workbook_defined_name(
+        self, richer_named_range_file_session: WorkbookSession
+    ) -> None:
+        result = read_metadata_action(
+            session=richer_named_range_file_session,
+            target="cells",
+            sheet="Summary",
+            cells=["NotesCell"],
+        )
+        assert result.status == "success"
+        assert result.output == {"NotesCell": "Notes"}
+
+    def test_neither_valid_a1_nor_a_real_defined_name_raises_a_clear_error(
+        self, richer_named_range_file_session: WorkbookSession
+    ) -> None:
+        with pytest.raises(ActionExecutionError) as exc_info:
+            read_metadata_action(
+                session=richer_named_range_file_session,
+                target="cells",
+                sheet="Summary",
+                cells=["NotARealRange"],
+            )
+        assert "NotARealRange" in exc_info.value.detail.message
+
+
+@requires_excel
+@requires_working_xlwings_save
+class TestReadMetadataCellsFormulaParam:
+    def test_defaults_to_the_computed_value_for_a_formula_cell(
+        self, formula_file_session: WorkbookSession
+    ) -> None:
+        result = read_metadata_action(
+            session=formula_file_session, target="cells", sheet="Summary", cells=["B1"]
+        )
+        assert result.output == {"B1": 20}
+
+    def test_formula_true_returns_the_formula_text_instead(
+        self, formula_file_session: WorkbookSession
+    ) -> None:
+        result = read_metadata_action(
+            session=formula_file_session,
+            target="cells",
+            sheet="Summary",
+            cells=["B1"],
+            formula=True,
+        )
+        assert result.output == {"B1": "=A1*2"}

@@ -11,6 +11,9 @@ banners, since there's no file boundary to do it now that actions live in one mo
 (docs/Specification.md sec 4).
 """
 
+import json
+import logging
+from pathlib import Path
 from typing import Any, Literal
 
 from openpyxl.utils import column_index_from_string, get_column_letter
@@ -25,6 +28,8 @@ from excel_runner.core import (
     control_action,
     file_action,
 )
+
+logger = logging.getLogger(__name__)
 
 # --- basic -------------------------------------------------------------------------------
 
@@ -187,10 +192,89 @@ def stop(reason: str | None = None) -> ActionResult:
     )
 
 
+@control_action
+def dump(
+    step_outputs: dict[str, dict[str, Any]],
+    ids: list[str] | None = None,
+    to: Literal["console", "file"] = "console",
+    path: str | None = None,
+) -> ActionResult:
+    """Print (or write) a formatted JSON snapshot of steps' recorded output — the same
+    `steps.<id>.output` data `{{ }}` templating reads from — for seeing a workflow's internal
+    state while authoring/debugging. No `session`/`workbook:` field — pure introspection, no
+    backend call, never mutates a workbook.
+
+    `step_outputs` is injected by the runner (every step's `{"status": ..., "output": ...}` so
+    far, in execution order) — never a YAML field, excluded from this action's param schema
+    the same way `session` is excluded from every other action's.
+
+    Args:
+        step_outputs: Every step's recorded output so far.
+        ids: Step ids to include. Omit to include every step that has run so far. An id with no
+            recorded output (typo, or genuinely hasn't run yet) is logged as a warning and
+            skipped, not raised — a debugging aid shouldn't halt a run over an unknown id.
+        to: "console" (default) prints to stdout; "file" writes to `path` instead.
+        path: Required when `to` is "file" — where to write the JSON.
+
+    Returns:
+        A success result with no meaningful output.
+
+    Raises:
+        ActionExecutionError: If `to` is "file" but `path` wasn't given.
+    """
+    if ids is None:
+        selected = step_outputs
+    else:
+        selected = {}
+        for step_id in ids:
+            if step_id not in step_outputs:
+                logger.warning(
+                    'dump: step id "%s" has no recorded output (typo, or has not run yet) — '
+                    "skipping.",
+                    step_id,
+                )
+                continue
+            selected[step_id] = step_outputs[step_id]
+
+    payload = json.dumps(selected, indent=2, default=str)
+    if to == "file":
+        if path is None:
+            raise ActionExecutionError(
+                ErrorDetail(
+                    message='dump: to: "file" requires a `path:`.',
+                    technical_reason="dump called with to=file but path=None",
+                )
+            )
+        Path(path).parent.mkdir(parents=True, exist_ok=True)
+        Path(path).write_text(payload)
+    else:
+        print(f"--- dump ({len(selected)} step(s)) ---\n{payload}")
+    return ActionResult(status="success", output={})
+
+
 # --- data ----------------------------------------------------------------------------------
 
 
-@file_action(writes=True)
+def _open_for_formula_read(session: WorkbookSession) -> Any:
+    """Open a throwaway `data_only=False` view of the session's current path for a
+    `formula: true` request, saving any pending writes first so the on-disk view is current.
+
+    `data_only` is a load-time decision (backends.open_workbook's docstring) — it cannot be
+    toggled on session.handle itself, hence the one-off reopen rather than reusing it.
+
+    Args:
+        session: The workbook session `formula: true` was requested against.
+
+    Returns:
+        A fresh openpyxl Workbook, read-only and data_only=False. Caller must close it.
+    """
+    if session.dirty:
+        backends.save_workbook(session.handle, session.path)
+        session.dirty = False
+    return backends.open_workbook_for_formula_read(session.path)
+
+
+@com_action(writes=True)
 def copy(
     session: WorkbookSession,
     target: WorkbookSession,
@@ -199,7 +283,8 @@ def copy(
     target_range: str,
     source_range: str | None = None,
 ) -> ActionResult:
-    """Copy a range — or, if `source_range` is omitted, the whole sheet — into another session.
+    """Copy a range — or, if `source_range` is omitted, the whole sheet — into another session,
+    via Excel's own Copy (COM) so formulas and formatting come across too, not just values.
 
     The one action needing two open sessions at once. The (not-yet-built) runner will need
     special-case wiring to resolve both `source.workbook` and `target.workbook` into `session`
@@ -207,17 +292,18 @@ def copy(
     one `session` param, but copy's YAML shape has two nested workbook refs (PRD sec 7/sec 11).
 
     Args:
-        session: The source workbook session.
-        target: The target workbook session.
+        session: The source workbook session (switched to the `xlw` backend first if needed,
+            same as every other `com` capability action — PRD sec 6.2.2).
+        target: The target workbook session (also switched to the `xlw` backend first).
         source_sheet: Source worksheet name.
         target_sheet: Target worksheet name.
         target_range: Where to start writing — only the top-left cell is used.
-        source_range: An A1-style range, or None to copy the whole sheet.
+        source_range: An A1-style range, or None to copy the whole used range of the sheet.
 
     Returns:
         A success result with no meaningful output.
     """
-    backends.copy_range(
+    backends.com_copy_range(
         session.handle,
         source_sheet,
         source_range,
@@ -231,12 +317,17 @@ def copy(
 
 @file_action
 def read_range(
-    session: WorkbookSession, sheet: str | list[str] | dict[str, str], range: str
+    session: WorkbookSession,
+    sheet: str | list[str] | dict[str, str],
+    range: str,
+    formula: bool = False,
 ) -> ActionResult:
     """Read a cell or range of cells, from one sheet or several.
 
-    `as: formulas` is not yet a parameter here — it depends on which `data_only` flag the
-    workbook was opened with, a session-level decision not built until Spec sec 5.4.
+    Defaults to each cell's computed value (the file-backend session opens with
+    `data_only=True`, backends.open_workbook's docstring); pass `formula: true` to read the
+    formula text instead, via a one-off reopen (`_open_for_formula_read`) — the session's main
+    handle is never touched.
 
     Args:
         session: The workbook session to read from.
@@ -244,23 +335,41 @@ def read_range(
             capture), the literal string `"all"` (every sheet in the workbook), or
             `{"matching": <regex>}` (every sheet whose name matches, via `re.search` — same
             convention as `find_row`/`find_headers_row`'s `patterns`). See PRD sec 7.
-        range: An A1-style cell (e.g. "B2") or range (e.g. "A1:D50") — same for every sheet
-            read.
+        range: An A1-style cell (e.g. "B2") or range (e.g. "A1:D50"), or a workbook-level
+            defined name — same for every sheet read.
+        formula: If True, read formula text instead of each cell's computed value.
 
     Returns:
         `{"values": ...}` (PRD sec 10.4's output-shape rule: always a keyed object). For a
         single sheet name, `values` is that sheet's cell value or 2D list, unchanged from
         before this was multi-sheet-aware. For a list/`"all"`/`matching`, `values` is a dict
         keyed by sheet name, one entry per resolved sheet.
+
+    Raises:
+        ActionExecutionError: If `range` is neither valid A1 notation nor a real defined name
+            in the workbook, or is a defined name spanning more than one area.
     """
-    if isinstance(sheet, str) and sheet != "all":
-        values = backends.read_range(session.handle, sheet, range)
-        return ActionResult(status="success", output={"values": values})
-    sheet_names = backends.resolve_sheet_names(session.handle, sheet)
-    values_by_sheet = {
-        name: backends.read_range(session.handle, name, range) for name in sheet_names
-    }
-    return ActionResult(status="success", output={"values": values_by_sheet})
+    workbook = _open_for_formula_read(session) if formula else session.handle
+    try:
+        try:
+            if isinstance(sheet, str) and sheet != "all":
+                values = backends.read_range(workbook, sheet, range)
+                return ActionResult(status="success", output={"values": values})
+            sheet_names = backends.resolve_sheet_names(workbook, sheet)
+            values_by_sheet = {
+                name: backends.read_range(workbook, name, range) for name in sheet_names
+            }
+            return ActionResult(status="success", output={"values": values_by_sheet})
+        except ValueError as exc:
+            raise ActionExecutionError(
+                ErrorDetail(
+                    message=f'read_range: "{range}" is not a valid range or defined name.',
+                    technical_reason=f"{type(exc).__name__}: {exc}",
+                )
+            ) from exc
+    finally:
+        if formula:
+            backends.close_workbook(workbook)
 
 
 @file_action
@@ -269,6 +378,7 @@ def read_metadata(
     target: Literal["properties", "cells"],
     sheet: str | None = None,
     cells: list[str] | None = None,
+    formula: bool = False,
 ) -> ActionResult:
     """Read document properties, or a scattered list of specific cells.
 
@@ -282,14 +392,19 @@ def read_metadata(
         session: The workbook session to read from.
         target: "properties" for document properties, "cells" for a scattered cell list.
         sheet: Worksheet name — required if target is "cells".
-        cells: A1-style cell references to read — required if target is "cells".
+        cells: A1-style cell references to read, or workbook-level defined names — required
+            if target is "cells".
+        formula: If True and target is "cells", read formula text instead of each cell's
+            computed value — same one-off reopen as `read_range`'s `formula:` param.
 
     Returns:
         `{"values": ...}`-style keyed output: document properties by name, or cell reference
         to value, depending on `target`.
 
     Raises:
-        ActionExecutionError: If target is "cells" but `sheet`/`cells` weren't given.
+        ActionExecutionError: If target is "cells" but `sheet`/`cells` weren't given, or if a
+            cell reference is neither valid A1 notation nor a real defined name in the
+            workbook, or is a defined name spanning more than one area.
     """
     if target == "properties":
         return ActionResult(
@@ -314,9 +429,22 @@ def read_metadata(
                 technical_reason="read_metadata called with target=cells but sheet or cells was None",
             )
         )
-    return ActionResult(
-        status="success", output=backends.read_cells(session.handle, sheet, cells)
-    )
+    workbook = _open_for_formula_read(session) if formula else session.handle
+    try:
+        try:
+            return ActionResult(
+                status="success", output=backends.read_cells(workbook, sheet, cells)
+            )
+        except ValueError as exc:
+            raise ActionExecutionError(
+                ErrorDetail(
+                    message=f"read_metadata: one of {cells} is not a valid cell or defined name.",
+                    technical_reason=f"{type(exc).__name__}: {exc}",
+                )
+            ) from exc
+    finally:
+        if formula:
+            backends.close_workbook(workbook)
 
 
 @file_action(writes=True)
@@ -556,14 +684,28 @@ def find_headers_row(
     Args:
         session: The workbook session to search.
         sheet: Worksheet name.
-        search_range: An A1-style range to search within.
+        search_range: An A1-style range to search within, or a workbook-level defined name.
         patterns: Regex patterns — every one must match a cell in a row for that row to count.
 
     Returns:
         `{"row": int, "headers": {pattern: column_letter}}`, or a structured error if no row
         matches every pattern — a normal outcome of a search, not an unexpected failure.
+
+    Raises:
+        ActionExecutionError: If `search_range` is neither valid A1 notation nor a real
+            defined name in the workbook, or is a defined name spanning more than one area.
     """
-    result = backends.find_headers_row(session.handle, sheet, search_range, patterns)
+    try:
+        result = backends.find_headers_row(
+            session.handle, sheet, search_range, patterns
+        )
+    except ValueError as exc:
+        raise ActionExecutionError(
+            ErrorDetail(
+                message=f'find_headers_row: "{search_range}" is not a valid range or defined name.',
+                technical_reason=f"{type(exc).__name__}: {exc}",
+            )
+        ) from exc
     if result is None:
         return ActionResult(
             status="error",

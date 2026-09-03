@@ -11,6 +11,8 @@ import openpyxl
 import pytest
 
 from excel_runner import backends
+from excel_runner.backends import OwnedInstanceRegistry
+from tests.unit.conftest import requires_excel, requires_working_xlwings_save
 
 
 def _make_workbook(tmp_path: Path) -> Path:
@@ -41,6 +43,67 @@ class TestOpenWorkbook:
         workbook.close()
 
 
+def _make_formula_workbook(tmp_path: Path) -> Path:
+    path = tmp_path / "formula_fixture.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.title = "Summary"
+    sheet["A1"] = 10
+    sheet["B1"] = "=A1*2"
+    workbook.save(path)
+    return path
+
+
+class TestOpenWorkbookDataOnlyDefault:
+    """`data_only` — not `read_only` — is the sole determinant of formula-vs-value reads
+    (confirmed via runtime probing). A freshly-written, never-recalculated formula has no
+    cached value at all, so this doesn't need a real Excel instance to prove the default
+    actually flipped to data_only=True: reading returns None (cache absent), not the formula
+    text, which is exactly what data_only=False would have returned instead."""
+
+    def test_defaults_to_data_only_true(self, tmp_path: Path) -> None:
+        path = _make_formula_workbook(tmp_path)
+        workbook = backends.open_workbook(str(path), mode="read_only")
+        assert backends.read_range(workbook, "Summary", "B1") is None
+        workbook.close()
+
+    def test_data_only_false_returns_the_formula_text(self, tmp_path: Path) -> None:
+        path = _make_formula_workbook(tmp_path)
+        workbook = backends.open_workbook(str(path), mode="read_only", data_only=False)
+        assert backends.read_range(workbook, "Summary", "B1") == "=A1*2"
+        workbook.close()
+
+
+@requires_excel
+@requires_working_xlwings_save
+class TestOpenWorkbookForFormulaRead:
+    def test_reads_the_formula_text_even_when_a_real_cached_value_exists(
+        self, tmp_path: Path
+    ) -> None:
+        path = _make_formula_workbook(tmp_path)
+        registry = OwnedInstanceRegistry()
+        app = registry.spawn()
+        try:
+            book = backends.xlw_open_workbook(app, str(path), mode="read_write")
+            backends.com_calculate_workbook(book)
+            backends.com_wait_until_calculation_done(app)
+            backends.xlw_save_workbook(book)
+            backends.xlw_close_workbook(book)
+        finally:
+            registry.close_owned()
+
+        # The default open now returns the real cached value...
+        default_workbook = backends.open_workbook(str(path), mode="read_only")
+        assert backends.read_range(default_workbook, "Summary", "B1") == 20
+        default_workbook.close()
+
+        # ...while the formula-view helper returns the formula text instead.
+        formula_workbook = backends.open_workbook_for_formula_read(str(path))
+        assert backends.read_range(formula_workbook, "Summary", "B1") == "=A1*2"
+        formula_workbook.close()
+
+
 class TestReadRange:
     def test_reads_a_single_cell_as_a_scalar(self, tmp_path: Path) -> None:
         workbook = backends.open_workbook(
@@ -66,6 +129,68 @@ class TestReadRange:
         assert backends.read_range(workbook, "Summary", "A1:B1") == [
             ["Region", "Total"]
         ]
+        workbook.close()
+
+
+def _make_named_range_workbook(tmp_path: Path) -> Path:
+    path = tmp_path / "named_range_fixture.xlsx"
+    workbook = openpyxl.Workbook()
+    sheet = workbook.active
+    assert sheet is not None
+    sheet.title = "Summary"
+    sheet["A1"] = "Region"
+    sheet["B1"] = "Total"
+    sheet["A2"] = "North"
+    sheet["B2"] = 100
+    workbook.defined_names["SalesTotal"] = openpyxl.workbook.defined_name.DefinedName(
+        "SalesTotal", attr_text="Summary!$B$2"
+    )
+    workbook.save(path)
+    return path
+
+
+class TestResolveRange:
+    def test_plain_a1_notation_passes_through_unchanged(self, tmp_path: Path) -> None:
+        workbook = backends.open_workbook(
+            str(_make_workbook(tmp_path)), mode="read_write"
+        )
+        assert backends.resolve_range(workbook, "Summary", "A1:B2") == (
+            "Summary",
+            "A1:B2",
+        )
+        workbook.close()
+
+    def test_resolves_a_defined_name_to_its_own_sheet_and_a1_range(
+        self, tmp_path: Path
+    ) -> None:
+        workbook = backends.open_workbook(
+            str(_make_named_range_workbook(tmp_path)), mode="read_write"
+        )
+        assert backends.resolve_range(workbook, "Summary", "SalesTotal") == (
+            "Summary",
+            "B2",
+        )
+        workbook.close()
+
+    def test_a_defined_names_own_sheet_wins_over_the_passed_sheet(
+        self, tmp_path: Path
+    ) -> None:
+        workbook = backends.open_workbook(
+            str(_make_named_range_workbook(tmp_path)), mode="read_write"
+        )
+        assert backends.resolve_range(workbook, "SomeOtherSheet", "SalesTotal") == (
+            "Summary",
+            "B2",
+        )
+        workbook.close()
+
+
+class TestReadRangeNamedRange:
+    def test_reads_the_value_at_a_defined_name(self, tmp_path: Path) -> None:
+        workbook = backends.open_workbook(
+            str(_make_named_range_workbook(tmp_path)), mode="read_write"
+        )
+        assert backends.read_range(workbook, "Summary", "SalesTotal") == 100
         workbook.close()
 
 

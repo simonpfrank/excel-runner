@@ -1,0 +1,224 @@
+# 08_full_showcase — exercises every registered excel_runner action at least once, in one
+# coherent story: discover a "Products" catalog's structure, pull totals out of it (both as
+# computed values and as formula text), copy the table (formulas intact) into a fresh
+# "report" workbook, add a genuine cross-workbook link back to the catalog, write some new
+# formulas/labels/structure around it, then recalculate catalog + report together (they're
+# genuinely linked) before committing. See demos/08_full_showcase_script.md for the full
+# rationale behind each step's placement.
+#
+# Companion file: demos/08_full_showcase_validate.yaml asserts the numbers this file produces
+# are correct — that file is the "does it actually work" check, this one only builds.
+#
+# Re-running from a clean slate: delete demos/08_full_showcase/catalog.xlsx and
+# demos/08_full_showcase/report.xlsx (the working copies) — `create_if_missing`/`template`
+# below only (re)create them from demos/08_full_showcase/originals/ when they don't already
+# exist; once a run has committed, they stay as-is on the next run, same as every other demo
+# in this folder (e.g. 05/07's `working_copy:`).
+
+env:
+  demo_folder: "./demos/08_full_showcase"
+
+workbooks:
+  catalog_original:
+    file: "{{ env.demo_folder }}/originals/catalog.xlsx"
+  catalog:
+    file: "{{ env.demo_folder }}/catalog.xlsx"
+    create_if_missing: true
+    template: catalog_original
+  report_original:
+    file: "{{ env.demo_folder }}/originals/report.xlsx"
+  report:
+    file: "{{ env.demo_folder }}/report.xlsx"
+    create_if_missing: true
+    template: report_original
+
+steps:
+  # --- discover catalog's structure (no `open` step for catalog — implicit open here) ---
+
+  - id: find_products_headers
+    action: find_headers_row
+    workbook: catalog
+    sheet: "Products"
+    search_range: "A1:D3"
+    patterns: ["Product", "Price", "Quantity", "Total"]
+
+  - id: find_price_column
+    action: find_column
+    workbook: catalog
+    sheet: "Products"
+    header_row: "{{ steps.find_products_headers.output.row }}"
+    pattern: "^Price$"
+
+  - id: find_key_columns
+    action: find_columns
+    workbook: catalog
+    sheet: "Products"
+    header_row: "{{ steps.find_products_headers.output.row }}"
+    patterns: { product: "^Product$", total: "^Total$" }
+
+  - id: find_widget_row
+    action: find_row
+    workbook: catalog
+    sheet: "Products"
+    column: "{{ steps.find_key_columns.output.product }}"
+    search_value: "Widget"
+    header_row: "{{ steps.find_products_headers.output.row }}"
+
+  # --- recalculate catalog before trusting any of its computed values (live Excel) ---
+
+  - id: recalculate_catalog
+    action: recalculate
+    workbook: catalog
+    scope: workbook
+    mode: normal
+
+  - id: read_totals_as_values
+    action: read_range
+    workbook: catalog
+    sheet: "Products"
+    range: "{{ steps.find_key_columns.output.total }}2:{{ steps.find_key_columns.output.total }}6"
+
+  - id: read_totals_as_formulas
+    action: read_range
+    workbook: catalog
+    sheet: "Products"
+    range: "{{ steps.find_key_columns.output.total }}2:{{ steps.find_key_columns.output.total }}6"
+    formula: true
+
+  - id: read_named_grand_total
+    action: read_range
+    workbook: catalog
+    sheet: "Products"
+    range: "GrandTotalName"   # defined name, single cell — read directly, no read_metadata detour
+
+  # --- report opens explicitly (contrast with catalog's implicit open above) ---
+
+  - id: open_report
+    action: open
+    workbook: report
+
+  - id: rename_report_sheet
+    action: rename_sheet
+    workbook: report
+    sheet: "Sheet"
+    new_name: "Summary"
+
+  - id: read_catalog_properties
+    action: read_metadata
+    workbook: catalog
+    target: properties
+
+  - id: delete_scratch_sheet
+    action: delete_sheet
+    workbook: catalog
+    sheet: "Scratch"
+
+  # column A reserved as an annotation column before any real data lands in Summary
+  - id: insert_note_column
+    action: insert_range
+    workbook: report
+    sheet: "Summary"
+    at: "A:A"
+    header: { row: 1, text: "Flag" }
+
+  # --- copy (COM): proves formulas survive the copy, not just their last value ---
+
+  - id: copy_products_to_report
+    action: copy
+    source:
+      workbook: catalog
+      sheet: "Products"
+      range: "A1:D6"
+    target:
+      workbook: report
+      sheet: "Summary"
+      range: "B1"
+
+  - id: write_provenance_label
+    action: write_cell
+    workbook: report
+    sheet: "Summary"
+    cell: "A8"
+    value: "Source: {{ steps.read_catalog_properties.output.title }}"
+
+  # genuine cross-workbook link: a live formula pointing back at catalog.xlsx, not a copied
+  # value. Column F is one past the copied D->E "Total" column (shifted right by the A:A
+  # insert above); row matches find_widget_row's row 1:1, since `copy`'s target anchor (B1)
+  # preserves row numbers unchanged.
+  - id: write_linked_total_cell
+    action: write_cell
+    workbook: report
+    sheet: "Summary"
+    cell: "F{{ steps.find_widget_row.output.row }}"
+    value: "='[catalog.xlsx]Products'!{{ steps.find_key_columns.output.total }}{{ steps.find_widget_row.output.row }}"
+
+  # a brand-new formula over the copied Total column (now column E in report's own layout,
+  # after the flag-column insert — report's layout is ours to know, unlike catalog's, which
+  # is why this one cell is a literal rather than derived from find_key_columns)
+  - id: write_new_grand_total_cell
+    action: write_cell
+    workbook: report
+    sheet: "Summary"
+    cell: "B9"
+    value: "=SUM(E2:E6)"
+
+  - id: write_summary_block
+    action: write_range
+    workbook: report
+    sheet: "Summary"
+    range: "A11"
+    values:
+      - ["Field", "Meaning"]
+      - ["Total", "Price x Quantity"]
+
+  - id: write_summary_row_by_name
+    action: write_row
+    workbook: report
+    sheet: "Summary"
+    row: 14
+    values: { A: "Generated", B: "excel_runner 08_full_showcase demo" }
+
+  - id: write_summary_row_positional
+    action: write_row
+    workbook: report
+    sheet: "Summary"
+    row: 15
+    start_column: "A"
+    values: ["Note", "All figures rebuilt from catalog.xlsx"]
+
+  - id: autofit_summary_columns
+    action: set_column_width
+    workbook: report
+    sheet: "Summary"
+    columns: "A:G"
+    width: "autofit"
+
+  - id: add_archive_sheet
+    action: create_sheet
+    workbook: report
+    name: "Archive"
+
+  - id: rename_archive_sheet
+    action: rename_sheet
+    workbook: report
+    sheet: "Archive"
+    new_name: "Archived"
+
+  # --- final cross-workbook recalculation: catalog has stayed live (xlw-backed) since the
+  # `copy` step above (nothing since has touched it with a file-capability action, so its
+  # Excel window never closed) — `scope: all` here genuinely recalculates catalog AND report
+  # together, which is what makes write_linked_total_cell's external reference correct. ---
+
+  - id: recalculate_everything
+    action: recalculate
+    workbook: report
+    scope: all
+    mode: full_rebuild
+
+  - id: save_report
+    action: save
+    workbook: report
+
+  - id: close_catalog
+    action: close
+    workbook: catalog

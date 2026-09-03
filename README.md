@@ -8,7 +8,7 @@ Design notes live in [`docs/PRD.md`](docs/PRD.md) and [`docs/Specification.md`](
 ## Status
 
 v1 file-backend engine is built and tested: loading, templating, validation, session/scratch
-management, 20 actions, and the orchestration loop (`run_workflow`). A CLI entrypoint is also
+management, 21 actions, and the orchestration loop (`run_workflow`). A CLI entrypoint is also
 available (`python -m excel_runner`, the `excel-runner` console script, or running
 `excel_runner/cli.py` directly) for triggering a run from outside Python. Almost every action
 runs against files directly via openpyxl — no live Excel process involved. The exception is
@@ -18,6 +18,17 @@ still aren't built (see [Not yet available](#not-yet-available)).
 
 ## Changelog
 
+- **2026-09-03**: Added a third, opt-in validation tier — `--check-existence` (CLI) /
+  `run_workflow(..., check_existence=True)` (library) opens every referenced workbook
+  read-only via openpyxl, before any session/scratch machinery, and confirms every sheet and
+  workbook-level defined name a step references by literal name actually exists (plain A1
+  cell/range references like `"A1"` are deliberately never checked). Sheet existence is
+  tracked step by step so a sheet added by an earlier `create_sheet` (or renamed/removed by
+  `rename_sheet`/`delete_sheet`) counts correctly from that point on. Also added the `dump`
+  control action (prints or writes any prior step's recorded output as JSON, for inspecting a
+  workflow's internal per-step storage) and an always-on `working_dir/steps_dump.json` file,
+  written at the end of every run, consolidating every step's output into one pretty-printed
+  JSON object (a friendlier companion to the line-oriented `audit.jsonl`).
 - **2026-08-26**: Added `recalculate` (live-Excel formula recalculation via xlwings/COM).
   `SessionManager` now supports bidirectional file<->xlw backend switching mid-run (closing
   and reopening a workbook's handle in place) instead of raising, and every xlw/com-capability
@@ -225,6 +236,27 @@ before we got here." Reaching `stop` isn't itself a failure: whether the run sav
 only on whether an *earlier* step returned `status: "error"` — "not found → stop" naturally
 discards, but a deliberate early exit on success ("already done, nothing to do") still saves
 whatever ran before it.
+
+#### `dump`
+
+Prints (or writes) the recorded output of prior steps as formatted JSON — for inspecting a
+workflow's internal per-step storage while authoring/debugging a workflow. No `workbook:` field.
+
+| Field | Required | Notes |
+|---|---|---|
+| `ids` | no | list of step ids to include; omit to dump every step recorded so far. An unknown/typo'd id is skipped with a logged warning, not an error |
+| `to` | no | `"console"` (default, prints to stdout) or `"file"` |
+| `path` | only with `to: file` | where to write the JSON; parent directories are created as needed |
+
+```yaml
+- id: show_progress
+  action: dump
+  ids: [get_total, find_it]
+  to: console
+```
+
+Every run also always writes `working_dir/steps_dump.json` — every step's recorded output, in
+one pretty-printed JSON object — regardless of whether a `dump` step is used.
 
 ### Data
 
@@ -565,6 +597,25 @@ links resolve correctly.
 Output: `.output.scope`, `.output.mode`, plus `.output.sheet`/`.output.warning` when `scope` is
 `"sheet"`.
 
+## Validation
+
+A workflow is checked in up to three tiers before/while it runs:
+
+1. **Structural** (always on) — every action exists, no unrecognized or missing-required
+   params, param types match, step-id references resolve in order. No workbook access at all.
+2. **Planning** (always on) — infers whether each workbook needs to be opened read-only or
+   read-write, from which actions touch it. Still no workbook access.
+3. **Existence** (opt-in — `--check-existence` / `check_existence=True`) — opens every
+   referenced workbook read-only via openpyxl and confirms every sheet and workbook-level
+   defined name a step references by literal name actually exists (accounting for sheets
+   created/renamed/removed by earlier steps in the same workflow). Deliberately does not
+   validate plain A1-style cell/range references (e.g. `"A1"`, `"A1:D6"`) — only sheet names
+   and defined names. Opt-in because it's the first tier that touches real files; a workbook
+   that doesn't exist yet (fresh `create_if_missing`, no template) is skipped.
+
+All three raise `ValidationError` (with a close-match suggestion for typos) before any step
+runs — nothing is partially executed because of a bad reference.
+
 ## Not yet available
 
 Flagged clearly rather than silently missing:
@@ -600,7 +651,7 @@ duplicating the action catalog.
 ```bash
 uv pip install -e ".[dev]"    # adds pytest, ruff, mypy, radon, vulture
 source .venv/bin/activate
-python -m pytest tests/unit/ tests/integration/    # 248 tests, 100% branch coverage
+python -m pytest tests/unit/ tests/integration/    # 415 tests, 96% branch coverage
 ruff check .
 mypy excel_runner tests
 radon cc excel_runner --min C

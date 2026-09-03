@@ -1,0 +1,59 @@
+# 08_full_showcase_validate — dogfooded validation for demos/08_full_showcase.yaml. Run this
+# straight after the build workflow: it opens the two workbooks the build produced/touched,
+# reads back specific cells, and uses `stop` + `if:` guards to assert each one matches its
+# independently-known expected value. No bespoke assertion script — excel_runner validating
+# its own output, in YAML, using its own actions.
+#
+# Both workbooks' layouts are fixed by the build workflow (this is the same repo, so the exact
+# cell addresses below are known ground truth, not guessed) — that's why this file uses plain
+# literal cell refs rather than re-running find_* against report.xlsx to rediscover them.
+
+workbooks:
+  catalog:
+    file: "./demos/08_full_showcase/catalog.xlsx"
+  report:
+    file: "./demos/08_full_showcase/report.xlsx"
+
+steps:
+  - id: read_expected_total
+    action: read_range
+    workbook: catalog
+    sheet: "Products"
+    range: "GrandTotalName"
+
+  - id: read_actual_new_total
+    action: read_range
+    workbook: report
+    sheet: "Summary"
+    range: "B9"
+
+  - id: guard_total_mismatch
+    action: stop
+    if: "{{ steps.read_actual_new_total.output.values != steps.read_expected_total.output.values }}"
+    reason: "report's rebuilt grand total (B9) does not match catalog's own GrandTotalName"
+
+  - id: read_expected_widget_total
+    action: read_range
+    workbook: catalog
+    sheet: "Products"
+    range: "D2"   # Widget's Total cell — Widget is the first product row in catalog
+
+  - id: read_actual_linked_cell
+    action: read_range
+    workbook: report
+    sheet: "Summary"
+    range: "F2"   # write_linked_total_cell's cell, for the same (Widget) row
+
+  - id: guard_linked_cell_mismatch
+    action: stop
+    if: "{{ steps.read_actual_linked_cell.output.values != steps.read_expected_widget_total.output.values }}"
+    reason: "report's cross-workbook link (F2) does not match catalog's Widget Total cell"
+
+  # standalone appendix example: read_metadata's `cells` mode resolving a defined name — not
+  # wired into a guard (already proven correct above via read_range), shown once on its own.
+  - id: read_metadata_cells_example
+    action: read_metadata
+    workbook: catalog
+    target: cells
+    sheet: "Products"
+    cells: ["GrandTotalName"]

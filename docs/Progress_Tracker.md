@@ -3,20 +3,20 @@
 ## Status legend
 ❌ Not Done · 🟡 In Progress · ✅ Done — Results: ✅ Pass · ❌ Fail · ⏭️ N/A
 
-## Quick status (updated 2026-09-01 — see "Last Session" entries below for narrative detail)
+## Quick status (updated 2026-09-02 — see "Last Session" entries below for narrative detail)
 
 | Action / component | Built | Tested | Notes |
 |---|---|---|---|
 | `open`, `save`, `close` | ✅ | ✅ | |
-| `stop` (control-flow) | ✅ | ✅ | |
-| `copy` | ✅ | ✅ | ⚠️ **named/defined-range source (PRD §11 item 4's `copy_named_range` example) is NOT implemented** — `range:` is passed straight to openpyxl's `worksheet[range]`, which raises `ValueError` on anything that isn't A1 notation. No test exercises a real named range. |
-| `read_range` | ✅ | ✅ | Single-sheet, list, `all`, `{matching: regex}` all built (2026-09-01). Same named-range gap as `copy`/`write_cell`/`write_range` — `range:` never checks `workbook.defined_names`. |
-| `write_cell`, `write_range` | ✅ | ✅ | Same named-range gap as above. |
+| `stop`, `dump` (control-flow) | ✅ | ✅ | `dump` added 2026-09-03 — prints/writes prior steps' recorded output as JSON (`ids` filter, `to: console|file`); no `workbook:` field, same schema-exemption treatment as `stop`. Every run also always writes `working_dir/steps_dump.json` regardless of whether a `dump` step is used. |
+| `copy` | ✅ | ✅ | **`com` capability now** (moved from `file`, 2026-09-02) — real Excel `Range.Copy` via `backends.com_copy_range`, so formulas/formatting come across too, not just values. `source_range`/`target_range` accept workbook-level defined names (resolved natively by xlwings' `sheet.range(name)`). |
+| `read_range` | ✅ | ✅ | Single-sheet, list, `all`, `{matching: regex}` all built (2026-09-01). `formula: true` param + workbook-level defined-name support for `range:` both built 2026-09-02 (`backends.resolve_range`) — named-range gap closed. |
+| `write_cell`, `write_range` | ✅ | ✅ | Named-range support NOT extended here — `write_*`'s `range`/`cell` is where you're writing *to*, not reading a possibly-named source from; not the same gap. |
 | `write_row` | 🟡 | ✅ (built parts) | Explicit column-mapping + positional modes done; by-header mode (`values_by_header`/`headers_from`) blocked — needs step-output context. |
 | `insert_range` | 🟡 | ✅ (built parts) | Whole-row/whole-column only; partial-range raises `NotImplementedError` deliberately. |
 | `set_column_width`, `create_sheet`, `rename_sheet`, `delete_sheet` | ✅ | ✅ | |
-| `find_headers_row`, `find_row`, `find_column`, `find_columns` | ✅ | ✅ | |
-| `read_metadata` (properties, cells) | ✅ | ✅ | `textboxes` sub-target explicitly not built (COM-only, deferred). |
+| `find_headers_row`, `find_row`, `find_column`, `find_columns` | ✅ | ✅ | `find_headers_row`'s `search_range` gained workbook-level defined-name support (2026-09-02). `find_row`'s `column` (bare column letter) and `find_column`/`find_columns`' `header_row` (row number) aren't range/cell references, so named-range resolution doesn't apply to them — a scope boundary, not a gap. |
+| `read_metadata` (properties, cells) | ✅ | ✅ | `textboxes` sub-target explicitly not built (COM-only, deferred). `cells` sub-target gained `formula: true` + per-cell defined-name resolution (2026-09-02). |
 | `recalculate` | ✅ | ✅ | COM-tier, Windows-tested. |
 | `aggregate`, `write_table`, `write_row` by-header mode | ❌ | ❌ | Originally blocked on step-output context not existing as a concept — that's resolved now (`runner.py` threads `steps.<id>.output` through to every field via templating, build order item 7, done since Phase 6). Simply not written yet; no longer technically blocked. |
 | `run_macro`, `refresh_links`, `write_links` | ❌ | ❌ | Not started. |
@@ -28,8 +28,9 @@
 | Action registry / `discover_actions` (`engine.py`) | ✅ | ✅ | |
 | `SessionManager` (lazy-open, `create_if_missing`, backend switching) | ✅ | ✅ | |
 | `ScratchManager` (staging/atomic commit, crash-safety) | ✅ | ✅ | |
-| Tier-1 static validation | ✅ | ✅ | Real-defined-names checking excluded (needs workbook access — PRD §12). Whole-template-expression exemption added 2026-09-01. |
+| Tier-1 static validation | ✅ | ✅ | Real-defined-names checking excluded by design (needs workbook access) — **resolved as a runtime error instead** (`backends.resolve_range`, 2026-09-02), not a static-validation gap anymore. Whole-template-expression exemption added 2026-09-01. |
 | Tier-2 step-graph validation | ✅ | ✅ | |
+| Tier-3 existence validation (`engine.validate_existence`) | ✅ | ✅ | Added 2026-09-03. Opt-in (`--check-existence` / `check_existence=True`) — opens every referenced workbook read-only via openpyxl and confirms every literally-named sheet/defined name a step references actually exists, tracking `create_sheet`/`rename_sheet`/`delete_sheet` step-by-step. Deliberately skips plain A1 cell/range references and templated values. |
 | `AuditLogger`, `run_workflow` orchestration, public API surface | ✅ | ✅ | |
 | `OwnedInstanceRegistry`, xlwings link-graph primitives (`com_link_sources`, `com_change_link`, `com_update_link`) | ✅ | ✅ | Backend primitives built/tested; not all wired into a dedicated action yet (`com_update_link`). |
 
@@ -46,7 +47,90 @@
 | Scratch-directory collision avoidance for concurrent runs (PRD §6.3.1/§12) | Open question |
 | CLI / MCP wrapper | Deferred (PRD §3/§5) |
 | Read a `@file_action` (e.g. `read_range`) via the live COM session when a workbook is already open `xlw`, instead of always switching to `file` first (PRD §12) | Not designed — raised 2026-09-01 after observing a ~2m20s `read_range` step against a large real workbook |
-| **Named/defined-range support for `copy`/`read_range`/`write_cell`/`write_range`'s `range:` field** | **Not implemented at all, despite PRD §6/§11 item 4 documenting it as working.** `workbook[sheet][range]` is plain openpyxl A1-notation indexing; a real named range raises `ValueError`. No test uses a real named range. Found 2026-09-01 while checking a rumour of named-range issues. |
+| **Named/defined-range support for `copy`/`read_range`/`write_cell`/`write_range`'s `range:` field** | **Resolved 2026-09-02 for the read side** (`backends.resolve_range`, built for `read_range`, `read_metadata(cells)`, `find_headers_row`, and `copy`'s `source_range`/`target_range` via xlwings' native range resolution). `write_cell`/`write_range`'s `range:`/`cell` (write *targets*, not sources) deliberately left as-is — not the same gap. |
+
+## Last Session (2026-09-03, Windows)
+**Status:** Tier-3 opt-in existence validation + `dump` control action + always-on
+`steps_dump.json` — **complete**, all quality gates green.
+**Working on:**
+- New `engine.validate_existence(workflow)`: opens every distinct real workbook file read-only
+  via openpyxl (before any `SessionManager`/`ScratchManager` involvement) and confirms every
+  literally-named sheet and workbook-level defined name a step references actually exists.
+  Sheet existence is tracked live, in step order, as `create_sheet`/`rename_sheet`/
+  `delete_sheet` steps run — so a sheet created earlier in the same workflow counts as existing
+  from that point on. Named-range checks (`read_range.range`, `read_metadata.cells[*]`,
+  `find_headers_row.search_range`) skip plain A1 notation entirely (by design — cell references
+  were explicitly out of scope) and are always checked against the real file's as-loaded
+  `defined_names` (nothing in the action set can create one). Templated values and workbooks
+  whose physical file doesn't exist yet are skipped. Opt-in via `--check-existence` (CLI) /
+  `check_existence=True` (`run_workflow`), since it's the first tier that touches real files.
+- New `dump` control action (`ids` filter with warn-and-skip on unknown ids, `to: console|file`)
+  for inspecting a workflow's internal per-step storage while authoring/debugging. Plus an
+  always-on `working_dir/steps_dump.json`, written at the end of every run regardless of
+  whether a `dump` step is used, consolidating every step's recorded output into one
+  pretty-printed JSON object (companion to the line-oriented `audit.jsonl`).
+- Refactored `_check_step_existence` into smaller per-action-type helpers
+  (`_check_copy_existence`, `_check_create_sheet_existence`, etc., dispatched via a
+  `_STRUCTURAL_ACTION_HANDLERS` lookup) after radon flagged the original monolithic version at
+  grade E — now under the project's grade-C ceiling.
+- Full quality gate run: ruff, mypy --strict, radon (grade C ceiling), vulture (no new findings
+  vs. pre-existing baseline), full suite (415 tests, 96% branch coverage, all modules ≥90%
+  except the thin `__main__.py` CLI entrypoint). Pyright shows pre-existing, project-wide
+  `pytest`/`xlwings`/`jinja2` import-resolution warnings (no `pyrightconfig.json` pointing at
+  `.venv`) — unrelated to this session's changes, not fixed (out of scope).
+
+## Last Session (2026-09-02b, Windows)
+**Status:** Formula-vs-value read bug fully fixed, named-range support built for every read
+action where it structurally applies, and `copy` rewritten onto real Excel COM — **complete**.
+**Working on:**
+- Root cause confirmed via runtime probing: `backends.open_workbook` opened every file-mode
+  session with openpyxl's implicit `data_only=False`, so any formula cell's `.value` silently
+  read back as formula text, never its computed value — `read_only` has no effect on this,
+  `data_only` is the sole determinant.
+- `backends.open_workbook`'s `data_only` param now defaults `True` (values); new
+  `open_workbook_for_formula_read` opens a fresh, throwaway, `data_only=False` view. New
+  `formula: true` param (not the PRD's originally-sketched `as: values|formulas`) added to
+  `read_range` and `read_metadata(target: cells)` — the one-off reopen pattern (save-if-dirty,
+  reopen fresh, read, close) lives in `actions._open_for_formula_read`.
+- Regression test added: write a formula, read without recalculating, assert `None` (openpyxl's
+  own uncalculated-cache behavior), covered in `TestOpenWorkbookDataOnlyDefault`.
+- New `backends.resolve_range(workbook, sheet, range)`: checks the workbook's real
+  `defined_names` first, falls back to unchanged A1 notation. A defined name's own destination
+  sheet wins over the passed `sheet:`. Multi-area defined names raise `ValueError`, translated
+  by every calling action into a clear `ActionExecutionError` naming the bad string. Built for
+  `read_range`, `read_metadata(cells)` (each entry in `cells` resolved independently), and
+  `find_headers_row`'s `search_range`. Deliberately NOT extended to `find_row`'s `column` (a
+  bare column letter) or `find_column`/`find_columns`' `header_row` (a row number) — neither is
+  structurally a range/cell reference.
+- `copy` moved from `@file_action` to `@com_action`, backed by a new `backends.com_copy_range`
+  using Excel's own `Range.Copy(Destination=...)` via xlwings' `.api` — real copy-paste
+  semantics (formulas/formatting come across), not the old value-only `copy_range`. Found and
+  fixed a real runner gap while wiring this up: `runner.py`'s `_dispatch_copy` wasn't passing
+  `capability="com"` to `session_manager.get_or_open()` for either the source or target
+  session, so both stayed on the `file` backend and `com_copy_range` crashed with
+  `AttributeError: 'Workbook' object has no attribute 'sheets'` the moment the existing
+  `tests/integration/test_run_workflow.py::TestCopyAcrossTwoWorkbooks` integration test ran
+  through the real runner — caught by the full suite, not missed. Fixed by passing
+  `capability="com"` on both calls, reusing `SessionManager`'s already-built bidirectional
+  backend-switching, same mechanism every other `com`/`xlw` action already relies on.
+  `tests/unit/actions/test_copy.py` rewritten entirely for the COM path (two live xlwings
+  sessions sharing one spawned Excel App instance — Excel's Copy/paste doesn't work across two
+  separately-spawned instances).
+- Strict TDD throughout: failing tests written first for every change (`data_only` default,
+  `formula:` param, `resolve_range`, `find_headers_row`/`read_metadata(cells)` named-range
+  extensions, `com_copy_range`), confirmed red, then implemented, then confirmed green, then
+  the full suite re-run after each logical unit to catch regressions.
+- Docs updated to match: `docs/PRD.md` (§7 catalog rows for `copy`/`read_range`/`read_metadata`,
+  §8's v1-built split, §12's resolved fourth-validation-example item), `docs/Specification.md`
+  (§4's action-layer writeup, §8 build order items 6/15), this file's quick-status table and
+  named-range backlog entry.
+- Full suite: 391 passed (up from 371, across `data_only`/`formula:`/named-range/`copy`
+  changes combined). `ruff`/`mypy --strict` not yet re-run this session — pending before this
+  fix is considered fully done per the project's mandatory quality-check workflow.
+**Next step:** Run the full mandatory quality suite (ruff, pylint, vulture, pyright,
+mypy --strict, radon, pytest --cov --cov-branch) and address any findings; delete
+`docs/TEMP_PLAN_formula_value_fix.md` once confirmed folded in here and in PRD/Specification.
+**Notes:** Not yet committed — ask before committing/pushing.
 
 ## Last Session (2026-09-02, Windows, continued)
 **Status:** `input/workflow.yaml` now covers all 25 config steps (Parts 1-5) —

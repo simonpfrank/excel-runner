@@ -1,12 +1,10 @@
-"""Unit tests for the `read_range` action (Spec sec 7 catalog).
+"""Unit tests for the `read_range` action (Spec sec 7 catalog)."""
 
-`as: formulas` is deliberately left out of this increment's signature — it depends on which
-data_only flag the workbook was opened with, a session-level decision that doesn't exist until
-static/dry-run validation (Spec sec 5.4) is built.
-"""
+import pytest
 
 from excel_runner.actions import read_range as read_range_action
-from excel_runner.core import ACTION_CAPABILITIES, WorkbookSession
+from excel_runner.core import ACTION_CAPABILITIES, ActionExecutionError, WorkbookSession
+from tests.unit.conftest import requires_excel, requires_working_xlwings_save
 
 
 class TestReadRangeAction:
@@ -62,3 +60,58 @@ class TestReadRangeAction:
         assert result.output == {
             "values": {"A&H North": "north-value", "A&H South": "south-value"}
         }
+
+
+class TestReadRangeNamedRange:
+    def test_reads_via_a_workbook_defined_name(
+        self, named_range_file_session: WorkbookSession
+    ) -> None:
+        result = read_range_action(
+            session=named_range_file_session, sheet="Summary", range="SalesTotal"
+        )
+        assert result.output == {"values": 100}
+
+    def test_the_defined_names_own_sheet_wins_over_the_passed_sheet(
+        self, named_range_file_session: WorkbookSession
+    ) -> None:
+        result = read_range_action(
+            session=named_range_file_session, sheet="DoesNotMatter", range="SalesTotal"
+        )
+        assert result.output == {"values": 100}
+
+    def test_neither_valid_a1_nor_a_real_defined_name_raises_a_clear_error(
+        self, named_range_file_session: WorkbookSession
+    ) -> None:
+        with pytest.raises(ActionExecutionError) as exc_info:
+            read_range_action(
+                session=named_range_file_session, sheet="Summary", range="NotARealRange"
+            )
+        assert "NotARealRange" in exc_info.value.detail.message
+
+
+@requires_excel
+@requires_working_xlwings_save
+class TestReadRangeFormulaParam:
+    def test_defaults_to_the_computed_value_for_a_formula_cell(
+        self, formula_file_session: WorkbookSession
+    ) -> None:
+        result = read_range_action(
+            session=formula_file_session, sheet="Summary", range="B1"
+        )
+        assert result.output == {"values": 20}
+
+    def test_formula_true_returns_the_formula_text_instead(
+        self, formula_file_session: WorkbookSession
+    ) -> None:
+        result = read_range_action(
+            session=formula_file_session, sheet="Summary", range="B1", formula=True
+        )
+        assert result.output == {"values": "=A1*2"}
+
+    def test_formula_false_is_the_same_as_the_default(
+        self, formula_file_session: WorkbookSession
+    ) -> None:
+        result = read_range_action(
+            session=formula_file_session, sheet="Summary", range="B1", formula=False
+        )
+        assert result.output == {"values": 20}

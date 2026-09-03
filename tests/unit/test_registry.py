@@ -31,6 +31,7 @@ class TestDiscoverActions:
             "find_columns",
             "recalculate",
             "stop",
+            "dump",
         }
 
     def test_each_entry_is_an_action_spec(self) -> None:
@@ -78,7 +79,7 @@ class TestParamSchema:
     def test_includes_the_other_parameters(self) -> None:
         registry = discover_actions(actions)
         schema = registry["read_range"].param_schema
-        assert set(schema["properties"]) == {"sheet", "range"}
+        assert set(schema["properties"]) == {"sheet", "range", "formula"}
 
     def test_required_parameters_have_no_default(self) -> None:
         registry = discover_actions(actions)

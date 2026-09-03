@@ -121,6 +121,16 @@ def main(argv: list[str] | None = None) -> int:
     parser.add_argument(
         "--logging-level", help="DEBUG,INFO,WARNING,ERROR", default="INFO"
     )
+    parser.add_argument(
+        "--check-existence",
+        action="store_true",
+        help=(
+            "Also run tier-3 existence validation before executing: opens every referenced "
+            "workbook read-only and confirms every sheet/defined name a step references by "
+            "literal name actually exists. Opt-in since it's the first check that touches "
+            "real files."
+        ),
+    )
     args = parser.parse_args(argv)
     env_overrides = dict(args.env)
 
@@ -128,7 +138,10 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         result = run_workflow(
-            args.workflow, env_overrides or None, working_dir=args.working_dir
+            args.workflow,
+            env_overrides or None,
+            working_dir=args.working_dir,
+            check_existence=args.check_existence,
         )
     except ExcelRunnerError as exc:
         logger.error(exc.detail.message)

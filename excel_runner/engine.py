@@ -18,6 +18,8 @@ from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree
 
+import openpyxl
+
 from excel_runner import backends
 from excel_runner.core import (
     ACTION_CAPABILITIES,
@@ -66,12 +68,13 @@ class ActionSpec:
 
 
 def _generate_param_schema(fn: Callable[..., ActionResult]) -> dict[str, Any]:
-    """Build a param schema from an action function's signature, excluding `session`."""
+    """Build a param schema from an action function's signature, excluding `session`/
+    `step_outputs` — both are injected by the runner, never a real YAML field."""
     signature = inspect.signature(fn)
     properties: dict[str, Any] = {}
     required: list[str] = []
     for param_name, param in signature.parameters.items():
-        if param_name == "session":
+        if param_name in ("session", "step_outputs"):
             continue
         properties[param_name] = {"type": param.annotation}
         if param.default is inspect.Parameter.empty:
@@ -902,6 +905,7 @@ _IMPLICIT_FIELDS = {
 _SCHEMA_EXEMPT_ACTIONS = {
     "copy",
     "stop",
+    "dump",
 }  # copy's raw YAML shape (source/target dicts) doesn't
 # match its Python signature yet — needs the runner's
 # translation layer (Spec sec 4/8 item 7). stop has no
@@ -1240,3 +1244,257 @@ def plan(workflow: Workflow, registry: dict[str, ActionSpec]) -> ExecutionPlan:
             for name in names:
                 modes[name] = "read_write"
     return ExecutionPlan(modes=modes)
+
+
+# --- Validation, tier 3: existence check (opt-in, CLI `--check-existence`) -------------------
+#
+# Unlike tiers 1/2, this one does open workbooks — read-only, via openpyxl, before any
+# session/scratch machinery — to confirm every sheet and named range a step references by
+# literal name actually exists. Opt-in (not run by default) since it's the first tier that
+# touches real files at all. Deliberately does NOT validate plain A1-style cell/range
+# references (e.g. "A1", "A1:D6") — only sheet names and workbook-level defined names.
+
+_A1_RANGE_RE = re.compile(r"^\$?[A-Za-z]{1,3}\$?\d+(:\$?[A-Za-z]{1,3}\$?\d+)?$")
+
+# Actions whose `sheet` param must exist (tracked live as create_sheet/rename_sheet/
+# delete_sheet steps run earlier in the same workflow).
+_SHEET_PARAM_ACTIONS = {
+    "read_range",
+    "read_metadata",
+    "find_headers_row",
+    "find_row",
+    "find_column",
+    "find_columns",
+    "write_cell",
+    "write_range",
+    "write_row",
+    "insert_range",
+    "set_column_width",
+    "rename_sheet",
+    "delete_sheet",
+}
+
+# Actions whose named field(s) must resolve to a real defined name when the value isn't
+# plain A1 notation — nothing in the action set can create a named range, so these are always
+# checked against the real workbook's defined_names, never against workflow-tracked state.
+_RANGE_PARAM_ACTIONS: dict[str, tuple[str, ...]] = {
+    "read_range": ("range",),
+    "read_metadata": ("cells",),
+    "find_headers_row": ("search_range",),
+}
+
+
+def _looks_like_a1(value: str) -> bool:
+    return bool(_A1_RANGE_RE.match(value))
+
+
+def _sheet_candidates(value: Any) -> list[str]:
+    """Extract the literal, checkable sheet name(s) from a `sheet`-shaped param value.
+
+    Handles `read_range`'s multi-sheet forms: a plain string (the common case for every other
+    action too), an explicit list, `"all"` (dynamic, nothing to check), or `{"matching": ...}`
+    (dynamic, nothing to check) \u2014 same convention as `backends.resolve_sheet_names`. A
+    `{{ steps.x... }}` template expression can't be known statically, so it's skipped too.
+    """
+    if isinstance(value, str):
+        if value == "all" or is_whole_template_expression(value):
+            return []
+        return [value]
+    if isinstance(value, list):
+        return [
+            item
+            for item in value
+            if isinstance(item, str) and not is_whole_template_expression(item)
+        ]
+    return []  # dict ("matching") or None \u2014 dynamic/unspecified, nothing to check
+
+
+def _resolve_check_path(name: str, workflow: Workflow) -> Path | None:
+    """The real file to open read-only for `name`'s existence checks, or None if there isn't
+    one yet (a fresh `create_if_missing` workbook with no template \u2014 nothing to check)."""
+    ref = workflow.workbooks[name]
+    direct = Path(ref.file)
+    if direct.exists():
+        return direct
+    if ref.template is not None:
+        template_path = Path(workflow.workbooks[ref.template].file)
+        if template_path.exists():
+            return template_path
+    return None
+
+
+def _sheet_error(
+    step: Step, workbook_name: str, sheet: str, known: set[str]
+) -> ValidationError:
+    suggestion = difflib.get_close_matches(sheet, sorted(known), n=1, cutoff=0.5)
+    message = (
+        f'{_step_label(step)}: sheet "{sheet}" does not exist in workbook "{workbook_name}" '
+        "and is not created by an earlier step."
+    )
+    if suggestion:
+        message += f' Did you mean "{suggestion[0]}"?'
+    return ValidationError(
+        ErrorDetail(
+            message=message, technical_reason=f"unknown sheet {sheet!r}", field="sheet"
+        )
+    )
+
+
+def _range_error(
+    step: Step, workbook_name: str, field: str, value: str
+) -> ValidationError:
+    return ValidationError(
+        ErrorDetail(
+            message=(
+                f'{_step_label(step)}: "{value}" is not a defined name in workbook '
+                f'"{workbook_name}".'
+            ),
+            technical_reason=f"unknown defined name {value!r}",
+            field=field,
+        )
+    )
+
+
+def _check_copy_existence(step: Step, known_sheets: dict[str, set[str]]) -> None:
+    for side in ("source", "target"):
+        ref = step.params.get(side)
+        if not isinstance(ref, dict):
+            continue
+        wb_name: str | None = ref.get("workbook")
+        for sheet in _sheet_candidates(ref.get("sheet")):
+            if wb_name in known_sheets and sheet not in known_sheets[wb_name]:
+                raise _sheet_error(step, wb_name, sheet, known_sheets[wb_name])
+
+
+def _check_create_sheet_existence(
+    step: Step, wb_name: str | None, known_sheets: dict[str, set[str]]
+) -> None:
+    new_name = step.params.get("name")
+    if (
+        wb_name in known_sheets
+        and isinstance(new_name, str)
+        and not is_whole_template_expression(new_name)
+    ):
+        known_sheets[wb_name].add(new_name)
+
+
+def _check_rename_sheet_existence(
+    step: Step, wb_name: str | None, known_sheets: dict[str, set[str]]
+) -> None:
+    old_name = step.params.get("sheet")
+    new_name = step.params.get("new_name")
+    if wb_name in known_sheets and isinstance(old_name, str):
+        if old_name not in known_sheets[wb_name]:
+            raise _sheet_error(step, wb_name, old_name, known_sheets[wb_name])
+        if isinstance(new_name, str) and not is_whole_template_expression(new_name):
+            known_sheets[wb_name].discard(old_name)
+            known_sheets[wb_name].add(new_name)
+
+
+def _check_delete_sheet_existence(
+    step: Step, wb_name: str | None, known_sheets: dict[str, set[str]]
+) -> None:
+    sheet_to_delete = step.params.get("sheet")
+    if wb_name in known_sheets and isinstance(sheet_to_delete, str):
+        if sheet_to_delete not in known_sheets[wb_name]:
+            raise _sheet_error(step, wb_name, sheet_to_delete, known_sheets[wb_name])
+        known_sheets[wb_name].discard(sheet_to_delete)
+
+
+def _check_sheet_field_existence(
+    step: Step, wb_name: str, known_sheets: dict[str, set[str]]
+) -> None:
+    for sheet in _sheet_candidates(step.params.get("sheet")):
+        if sheet not in known_sheets[wb_name]:
+            raise _sheet_error(step, wb_name, sheet, known_sheets[wb_name])
+
+
+def _check_range_field_existence(
+    step: Step, wb_name: str, defined_names: dict[str, set[str]]
+) -> None:
+    for field in _RANGE_PARAM_ACTIONS.get(step.action, ()):
+        value = step.params.get(field)
+        candidates = value if isinstance(value, list) else [value]
+        for candidate in candidates:
+            if not isinstance(candidate, str) or is_whole_template_expression(candidate):
+                continue
+            if _looks_like_a1(candidate):
+                continue
+            if candidate not in defined_names[wb_name]:
+                raise _range_error(step, wb_name, field, candidate)
+
+
+_STRUCTURAL_ACTION_HANDLERS = {
+    "create_sheet": _check_create_sheet_existence,
+    "rename_sheet": _check_rename_sheet_existence,
+    "delete_sheet": _check_delete_sheet_existence,
+}
+
+
+def _check_step_existence(
+    step: Step,
+    known_sheets: dict[str, set[str]],
+    defined_names: dict[str, set[str]],
+) -> None:
+    if step.action == "copy":
+        _check_copy_existence(step, known_sheets)
+        return
+
+    wb_name = step.params.get("workbook")
+
+    handler = _STRUCTURAL_ACTION_HANDLERS.get(step.action)
+    if handler is not None:
+        handler(step, wb_name, known_sheets)
+        return
+
+    if wb_name not in known_sheets:
+        return  # workbook not checkable (doesn't exist yet) or undeclared (tier 2 already caught)
+
+    if step.action in _SHEET_PARAM_ACTIONS:
+        _check_sheet_field_existence(step, wb_name, known_sheets)
+
+    if step.action == "recalculate" and step.params.get("scope") == "sheet":
+        _check_sheet_field_existence(step, wb_name, known_sheets)
+
+    _check_range_field_existence(step, wb_name, defined_names)
+
+
+def validate_existence(workflow: Workflow) -> None:
+    """Tier-3 validation (opt-in): confirms every sheet and workbook-level defined name a step
+    references by literal name actually exists in the real workbook \u2014 read-only, via openpyxl,
+    before any `SessionManager`/`ScratchManager` involvement.
+
+    Only literal, non-templated string references are checked; a `{{ steps.x... }}` expression
+    can't be known until execution (same bypass tier 1's `_check_param_types` uses). Plain
+    A1-style cell/range references (e.g. "A1", "A1:D6") are never checked \u2014 only sheet names
+    and defined names. A sheet created earlier in the same workflow by `create_sheet` (or
+    renamed/removed by `rename_sheet`/`delete_sheet`) is tracked step by step, in order, so
+    it counts as existing/not-existing from that point on, not just at the real file's
+    as-loaded state.
+
+    Args:
+        workflow: The parsed workflow to validate.
+
+    Raises:
+        ValidationError: On the first missing sheet or missing defined name found.
+    """
+    opened: dict[Path, Any] = {}
+    known_sheets: dict[str, set[str]] = {}
+    defined_names: dict[str, set[str]] = {}
+
+    try:
+        for name in workflow.workbooks:
+            path = _resolve_check_path(name, workflow)
+            if path is None:
+                continue
+            if path not in opened:
+                opened[path] = openpyxl.load_workbook(path, read_only=True)
+            wb = opened[path]
+            known_sheets[name] = set(wb.sheetnames)
+            defined_names[name] = set(wb.defined_names.keys())
+
+        for step in workflow.steps:
+            _check_step_existence(step, known_sheets, defined_names)
+    finally:
+        for wb in opened.values():
+            wb.close()
