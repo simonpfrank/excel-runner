@@ -528,9 +528,13 @@ class TestAuditLog:
             working_dir=str(tmp_path),
         )
 
-        lines = result.audit_log_path.read_text().splitlines()
-        assert len(lines) == 2
-        assert [json.loads(line)["step_id"] for line in lines] == ["s1", "s2"]
+        records = [json.loads(line) for line in result.audit_log_path.read_text().splitlines()]
+        # The log also carries run-level events (workbook_opened, backend_switched — Spec
+        # sec 6.2, docs/backend_eligibility_build_plan.md W8), so step records are selected by
+        # key rather than by counting lines.
+        step_records = [record for record in records if "step_id" in record]
+        assert len(step_records) == 2
+        assert [record["step_id"] for record in step_records] == ["s1", "s2"]
 
 
 class TestCrashSafety:

@@ -14,16 +14,31 @@ steps:
   # create_sheet/rename_sheet/delete_sheet: the sheet-management actions this workflow exists
   # to demonstrate. A blank create_if_missing workbook only ever gets openpyxl's default
   # "Sheet" — there was previously no action to rename or add to it at all.
+  #
+  # This workflow is a *generator*, and its outputs are committed to the repo, so it has to be
+  # re-runnable against workbooks it has already generated (and against ones later demos have
+  # since written to). The two structural steps below are the only non-idempotent ones —
+  # renaming "Sheet" fails once it's already "Data", and creating "Summary" errors once it
+  # exists — so both are guarded by an `if:` on the probe step's sheet list. Every other step
+  # is a write that simply overwrites, which is idempotent already.
+  - id: probe_sample_sheets
+    action: read_range
+    workbook: sample
+    sheet: "all"
+    range: "A1"
+
   - id: rename_default_sheet
     action: rename_sheet
     workbook: sample
     sheet: "Sheet"
     new_name: "Data"
+    if: "{{ 'Sheet' in steps.probe_sample_sheets.output.values }}"
 
   - id: add_summary_sheet
     action: create_sheet
     workbook: sample
     name: "Summary"
+    if: "{{ 'Summary' not in steps.probe_sample_sheets.output.values }}"
 
   - id: write_headers
     action: write_row

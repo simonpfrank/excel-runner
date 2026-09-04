@@ -64,7 +64,7 @@ def save(session: WorkbookSession) -> ActionResult:
     Returns:
         A success result with no meaningful output.
     """
-    backends.save_workbook(session.handle, session.path)
+    backends.save_open_workbook(session.handle, session.backend, session.path)
     return ActionResult(status="success", output={})
 
 
@@ -78,7 +78,7 @@ def close(session: WorkbookSession) -> ActionResult:
     Returns:
         A success result with no meaningful output.
     """
-    backends.close_workbook(session.handle)
+    backends.close_open_workbook(session.handle, session.backend)
     return ActionResult(status="success", output={})
 
 
@@ -262,6 +262,11 @@ def _open_for_formula_read(session: WorkbookSession) -> Any:
     `data_only` is a load-time decision (backends.open_workbook's docstring) — it cannot be
     toggled on session.handle itself, hence the one-off reopen rather than reusing it.
 
+    The pending-write save goes through whichever backend currently holds the session: a
+    workbook promoted to `xlw` for its external links must be saved by Excel, never by openpyxl
+    (docs/backend_eligibility_build_plan.md). The reopen itself is read-only openpyxl, which
+    never writes, so it is safe on any workbook.
+
     Args:
         session: The workbook session `formula: true` was requested against.
 
@@ -269,7 +274,7 @@ def _open_for_formula_read(session: WorkbookSession) -> Any:
         A fresh openpyxl Workbook, read-only and data_only=False. Caller must close it.
     """
     if session.dirty:
-        backends.save_workbook(session.handle, session.path)
+        backends.save_open_workbook(session.handle, session.backend, session.path)
         session.dirty = False
     return backends.open_workbook_for_formula_read(session.path)
 
@@ -350,14 +355,18 @@ def read_range(
             in the workbook, or is a defined name spanning more than one area.
     """
     workbook = _open_for_formula_read(session) if formula else session.handle
+    # A `formula: true` read always goes through a throwaway openpyxl handle, so it uses the
+    # file primitives regardless of which backend the session itself is on.
+    primitives = backends.primitives("file" if formula else session.backend)
     try:
         try:
             if isinstance(sheet, str) and sheet != "all":
-                values = backends.read_range(workbook, sheet, range)
+                values = primitives.read_range(workbook, sheet, range)
                 return ActionResult(status="success", output={"values": values})
-            sheet_names = backends.resolve_sheet_names(workbook, sheet)
+            sheet_names = primitives.resolve_sheet_names(workbook, sheet)
             values_by_sheet = {
-                name: backends.read_range(workbook, name, range) for name in sheet_names
+                name: primitives.read_range(workbook, name, range)
+                for name in sheet_names
             }
             return ActionResult(status="success", output={"values": values_by_sheet})
         except ValueError as exc:
@@ -408,7 +417,8 @@ def read_metadata(
     """
     if target == "properties":
         return ActionResult(
-            status="success", output=backends.read_properties(session.handle)
+            status="success",
+            output=backends.primitives(session.backend).read_properties(session.handle),
         )
     if target != "cells":
         # Python doesn't enforce type hints at runtime, and this function is directly
@@ -430,10 +440,11 @@ def read_metadata(
             )
         )
     workbook = _open_for_formula_read(session) if formula else session.handle
+    primitives = backends.primitives("file" if formula else session.backend)
     try:
         try:
             return ActionResult(
-                status="success", output=backends.read_cells(workbook, sheet, cells)
+                status="success", output=primitives.read_cells(workbook, sheet, cells)
             )
         except ValueError as exc:
             raise ActionExecutionError(
@@ -462,7 +473,7 @@ def write_cell(
     Returns:
         A success result with no meaningful output.
     """
-    backends.write_cell(session.handle, sheet, cell, value)
+    backends.primitives(session.backend).write_cell(session.handle, sheet, cell, value)
     session.dirty = True
     return ActionResult(status="success", output={})
 
@@ -482,7 +493,7 @@ def write_range(
     Returns:
         A success result with no meaningful output.
     """
-    backends.write_range(session.handle, sheet, range, values)
+    backends.primitives(session.backend).write_range(session.handle, sheet, range, values)
     session.dirty = True
     return ActionResult(status="success", output={})
 
@@ -515,9 +526,10 @@ def write_row(
     Raises:
         ActionExecutionError: If `values` is a list but `start_column` wasn't given.
     """
+    write = backends.primitives(session.backend).write_cell
     if isinstance(values, dict):
         for column, value in values.items():
-            backends.write_cell(session.handle, sheet, f"{column}{row}", value)
+            write(session.handle, sheet, f"{column}{row}", value)
     else:
         if start_column is None:
             raise ActionExecutionError(
@@ -529,7 +541,7 @@ def write_row(
         start_idx = column_index_from_string(start_column)
         for offset, value in enumerate(values):
             column = get_column_letter(start_idx + offset)
-            backends.write_cell(session.handle, sheet, f"{column}{row}", value)
+            write(session.handle, sheet, f"{column}{row}", value)
     session.dirty = True
     return ActionResult(status="success", output={})
 
@@ -562,7 +574,9 @@ def insert_range(
         A success result, or a structured error if `at` is a partial range.
     """
     try:
-        backends.insert_range(session.handle, sheet, at, direction, header)
+        backends.primitives(session.backend).insert_range(
+            session.handle, sheet, at, direction, header
+        )
     except NotImplementedError as exc:
         return ActionResult(
             status="error",
@@ -593,7 +607,9 @@ def set_column_width(
     Returns:
         A success result with no meaningful output.
     """
-    backends.set_column_width(session.handle, sheet, columns, width)
+    backends.primitives(session.backend).set_column_width(
+        session.handle, sheet, columns, width
+    )
     session.dirty = True
     return ActionResult(status="success", output={})
 
@@ -615,7 +631,7 @@ def create_sheet(
         an unexpected failure, consistent with the find_*/insert_range error pattern above.
     """
     try:
-        backends.create_sheet(session.handle, name, index)
+        backends.primitives(session.backend).create_sheet(session.handle, name, index)
     except ValueError as exc:
         return ActionResult(
             status="error",
@@ -640,7 +656,7 @@ def rename_sheet(session: WorkbookSession, sheet: str, new_name: str) -> ActionR
     Returns:
         A success result with no meaningful output.
     """
-    backends.rename_sheet(session.handle, sheet, new_name)
+    backends.primitives(session.backend).rename_sheet(session.handle, sheet, new_name)
     session.dirty = True
     return ActionResult(status="success", output={})
 
@@ -659,7 +675,7 @@ def delete_sheet(session: WorkbookSession, sheet: str) -> ActionResult:
         a workflow author to react to, not an unexpected failure.
     """
     try:
-        backends.delete_sheet(session.handle, sheet)
+        backends.primitives(session.backend).delete_sheet(session.handle, sheet)
     except ValueError as exc:
         return ActionResult(
             status="error",
@@ -696,7 +712,7 @@ def find_headers_row(
             defined name in the workbook, or is a defined name spanning more than one area.
     """
     try:
-        result = backends.find_headers_row(
+        result = backends.primitives(session.backend).find_headers_row(
             session.handle, sheet, search_range, patterns
         )
     except ValueError as exc:
@@ -739,7 +755,9 @@ def find_row(
     Returns:
         `{"row": int}`, or a structured error if not found.
     """
-    row = backends.find_row(session.handle, sheet, column, search_value, header_row)
+    row = backends.primitives(session.backend).find_row(
+        session.handle, sheet, column, search_value, header_row
+    )
     if row is None:
         return ActionResult(
             status="error",
@@ -767,7 +785,9 @@ def find_column(
     Returns:
         `{"column": str}`, or a structured error if not found.
     """
-    column = backends.find_column(session.handle, sheet, header_row, pattern)
+    column = backends.primitives(session.backend).find_column(
+        session.handle, sheet, header_row, pattern
+    )
     if column is None:
         return ActionResult(
             status="error",
@@ -796,5 +816,7 @@ def find_columns(
         Logical name to column letter, for every pattern that matched. Names whose pattern
         didn't match anything are simply absent — not an error at this level (PRD sec 10.4).
     """
-    result = backends.find_columns(session.handle, sheet, header_row, patterns)
+    result = backends.primitives(session.backend).find_columns(
+        session.handle, sheet, header_row, patterns
+    )
     return ActionResult(status="success", output=result)

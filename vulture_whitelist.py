@@ -95,3 +95,15 @@ backends.com_wait_until_calculation_done
 # the assignment as an "unused attribute" since nothing in our own code ever *reads* `.title`
 # back. Referencing it here marks it used.
 Worksheet.title
+
+# The three `Protocol`s typing the primitives that take optional arguments
+# (docs/backend_eligibility_build_plan.md W6). Their `__call__` bodies are `...` and are never
+# executed — a Protocol exists purely so the type checker can verify that both twins accept
+# the same arguments under the same names — so vulture sees three unused functions.
+backends._CreateSheet.__call__
+backends._InsertRange.__call__
+backends._FindRow.__call__
+
+# xlwings' own writable property, assigned by `backends.xlw_set_column_width` and never read
+# back by our code — same situation as `Worksheet.title` above.
+backends.xw.Range.column_width

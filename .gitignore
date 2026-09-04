@@ -22,6 +22,14 @@ docs/research/
 /excel_runner_runs/
 tests/data/agent_completion_check_real/counter.txt
 demos/output/
+# Generated demo workbooks: 00_generate_demo_workbooks.yaml builds sample/historical, and
+# 08's working copies are create_if_missing+template copies of demos/08_full_showcase/
+# originals/. Only the originals/ fixtures are tracked.
+demos/sample.xlsx
+demos/historical.xlsx
+demos/08_full_showcase/catalog.xlsx
+demos/08_full_showcase/report.xlsx
+demos/08_full_showcase/linked_workbook/linked.xlsx
 /input/
 /output/
 .vscode/

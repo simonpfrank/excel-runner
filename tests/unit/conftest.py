@@ -1,8 +1,10 @@
 """Shared fixtures/markers for unit tests (Spec sec 7)."""
 
 import sys
+import zipfile
 from pathlib import Path
 
+import openpyxl
 import pytest
 
 
@@ -29,3 +31,45 @@ requires_working_xlwings_save = pytest.mark.skipif(
         "actually run on is restricted, per PRD sec 4/sec 12's macOS-now/Windows-later plan."
     ),
 )
+
+_EXTERNAL_LINK_RELS = (
+    '<?xml version="1.0" encoding="UTF-8" standalone="yes"?>'
+    '<Relationships xmlns="http://schemas.openxmlformats.org/package/2006/relationships">'
+    '<Relationship Id="rId1" Type="http://schemas.openxmlformats.org/officeDocument/2006/'
+    'relationships/externalLinkPath" Target="{target}" TargetMode="External"/>'
+    "</Relationships>"
+)
+
+
+def plain_workbook(path: Path) -> Path:
+    """A minimal, real .xlsx with no external links — the "nothing special about it" control
+    case, and a valid zip wherever a test needs one."""
+    path.parent.mkdir(parents=True, exist_ok=True)
+    openpyxl.Workbook().save(path)
+    return path
+
+
+def workbook_with_external_link(path: Path, target: str = "target.xlsx") -> Path:
+    """A real .xlsx carrying one outbound external-link relationship, built by rewriting the
+    zip openpyxl produces — the same on-disk shape `scan_external_link_targets` reads.
+
+    Lives here rather than in one test module because save-blocker inspection, session
+    promotion and link-layout validation all need the same fixture and must all be reading
+    the same on-disk shape. Excel is only needed to *author* a link, not to *carry* one, so
+    every test built on this runs everywhere.
+
+    Args:
+        path: Where to write the workbook.
+        target: The link target to record, exactly as it would appear in the rels XML —
+            a bare filename, a `../`-style relative path, or an absolute/UNC path.
+    """
+    source = plain_workbook(path.with_name("_source_" + path.name))
+    with zipfile.ZipFile(source) as src, zipfile.ZipFile(path, "w") as dst:
+        for item in src.infolist():
+            dst.writestr(item, src.read(item.filename))
+        dst.writestr(
+            "xl/externalLinks/_rels/externalLink1.xml.rels",
+            _EXTERNAL_LINK_RELS.format(target=target),
+        )
+    source.unlink()
+    return path

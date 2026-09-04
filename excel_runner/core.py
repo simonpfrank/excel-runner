@@ -10,7 +10,8 @@ module docstring correction recorded in docs/PRD.md sec 10.1 and docs/Specificat
 
 import re
 from collections.abc import Callable
-from dataclasses import dataclass
+from dataclasses import dataclass, field
+from enum import Enum
 from pathlib import Path
 from typing import Any, Literal, ParamSpec, overload
 
@@ -341,6 +342,28 @@ class ActionResult:
     error: ErrorDetail | None = None
 
 
+class SaveBlocker(Enum):
+    """A named reason openpyxl must not be the thing that writes a given workbook back to disk
+    (docs/backend_eligibility_build_plan.md sec 1.1).
+
+    Always used as a *set* of these, never a boolean and never a link-specific flag: the set is
+    designed to grow, and a workbook with a non-empty set is handled by Excel for anything that
+    leads to a save. Members are added only when empirically verified.
+
+    `OUTBOUND_EXTERNAL_LINKS` is the one member that exists today, and it was measured, not
+    assumed: an openpyxl load-and-save with *zero* edits produced a file Excel refused to open
+    at all, while a no-links control file survived the identical round-trip
+    (docs/link_gaps_andaction_plan.md). "Outbound" means *this* workbook references others;
+    inbound links (others referencing this one) are irrelevant, since saving this file doesn't
+    touch their link records.
+
+    Detection lives in `engine.inspect_save_blockers` — the enum lives here so `WorkbookSession`
+    can carry it without core.py depending on engine.py.
+    """
+
+    OUTBOUND_EXTERNAL_LINKS = "outbound_external_links"
+
+
 @dataclass
 class WorkbookSession:
     """A workbook currently open for the duration of a run. Deliberately not frozen — this
@@ -358,6 +381,12 @@ class WorkbookSession:
         scratch_path: Set once the scratch-copy execution model is built. None means work
             happens directly against `path`.
         dirty: Whether a write has happened since the last save.
+        save_blockers: Why openpyxl must not save this workbook, as inspected when the session
+            was opened (`engine.inspect_save_blockers`). Empty is the normal case. Non-empty
+            promotes the session to the `xlw` backend on its first write, and keeps it there
+            for the rest of the run — a later demotion back to `file` would let the *next*
+            write save through openpyxl and destroy the workbook
+            (docs/backend_eligibility_build_plan.md sec 1.2/1.3).
     """
 
     name: str
@@ -367,6 +396,7 @@ class WorkbookSession:
     mode: Literal["read_only", "read_write"]
     scratch_path: Path | None = None
     dirty: bool = False
+    save_blockers: frozenset[SaveBlocker] = field(default_factory=frozenset)
 
 
 # --- Action capability tagging ------------------------------------------------------------

@@ -17,7 +17,9 @@ import logging
 import re
 import shutil
 import time
-from typing import Any, Literal
+from collections.abc import Callable
+from dataclasses import dataclass
+from typing import Any, Literal, Protocol
 
 import openpyxl
 import xlwings as xw
@@ -392,6 +394,79 @@ def copy_range(
     write_range(target_workbook, target_sheet, target_range, values)
 
 
+# --- Lookup matching, shared by both backends ---------------------------------------------
+#
+# The four find_* primitives are pure matching logic over cell *values* — nothing in them is
+# openpyxl- or xlwings-specific once the values and the block's top-left position are in hand.
+# So the matching lives here once, and each backend's twin only does the part that genuinely
+# differs: getting the values out. Four duplicated matchers across two backends is exactly the
+# divergence this arrangement exists to prevent (docs/backend_eligibility_build_plan.md W5).
+
+
+def _match_headers_row(
+    values: list[list[Any]], start_row: int, start_column: int, patterns: list[str]
+) -> tuple[int, dict[str, str]] | None:
+    """Find the first row of `values` in which every pattern matches some cell.
+
+    Args:
+        values: A 2D block of cell values, row-major.
+        start_row: The worksheet row number `values[0]` came from (1-based).
+        start_column: The worksheet column number `values[*][0]` came from (1-based).
+        patterns: Regex patterns — every one must match a cell in a row for it to count.
+
+    Returns:
+        `(row_number, {pattern: column_letter})` for the first matching row, or None.
+    """
+    for row_offset, row_values in enumerate(values):
+        matches: dict[str, str] = {}
+        for pattern in patterns:
+            for column_offset, value in enumerate(row_values):
+                if value is not None and re.search(pattern, str(value)):
+                    matches[pattern] = get_column_letter(start_column + column_offset)
+                    break
+        if len(matches) == len(patterns):
+            return start_row + row_offset, matches
+    return None
+
+
+def _match_header_column(
+    header_values: list[Any], start_column: int, pattern: str
+) -> str | None:
+    """Find the column letter of the first value in `header_values` matching `pattern`.
+
+    Args:
+        header_values: One row of cell values, left to right.
+        start_column: The worksheet column number `header_values[0]` came from (1-based).
+        pattern: A regex matched against each value's string form.
+
+    Returns:
+        The matching column letter, or None.
+    """
+    for offset, value in enumerate(header_values):
+        if value is not None and re.search(pattern, str(value)):
+            return get_column_letter(start_column + offset)
+    return None
+
+
+def _match_value_row(
+    column_values: list[Any], start_row: int, search_value: Any
+) -> int | None:
+    """Find the row number of the first value in `column_values` equal to `search_value`.
+
+    Args:
+        column_values: One column of cell values, top to bottom.
+        start_row: The worksheet row number `column_values[0]` came from (1-based).
+        search_value: The value to match, by equality.
+
+    Returns:
+        The matching row number, or None.
+    """
+    for offset, value in enumerate(column_values):
+        if value == search_value:
+            return start_row + offset
+    return None
+
+
 def find_headers_row(
     workbook: Workbook, sheet: str, search_range: str, patterns: list[str]
 ) -> tuple[int, dict[str, str]] | None:
@@ -413,16 +488,9 @@ def find_headers_row(
     resolved_sheet, resolved_range = resolve_range(workbook, sheet, search_range)
     selection = workbook[resolved_sheet][resolved_range]
     rows = [(selection,)] if isinstance(selection, _SingleCell) else selection
-    for row in rows:
-        matches: dict[str, str] = {}
-        for pattern in patterns:
-            for cell in row:
-                if cell.value is not None and re.search(pattern, str(cell.value)):
-                    matches[pattern] = get_column_letter(cell.column)
-                    break
-        if len(matches) == len(patterns):
-            return row[0].row, matches
-    return None
+    anchor = rows[0][0]
+    values = [[cell.value for cell in row] for row in rows]
+    return _match_headers_row(values, anchor.row, anchor.column, patterns)
 
 
 def find_row(
@@ -447,12 +515,13 @@ def find_row(
     worksheet = workbook[sheet]
     col_idx = column_index_from_string(column)
     start_row = (header_row or 0) + 1
-    for (cell,) in worksheet.iter_rows(
-        min_row=start_row, min_col=col_idx, max_col=col_idx
-    ):
-        if cell.value == search_value:
-            return cell.row
-    return None
+    values = [
+        cell.value
+        for (cell,) in worksheet.iter_rows(
+            min_row=start_row, min_col=col_idx, max_col=col_idx
+        )
+    ]
+    return _match_value_row(values, start_row, search_value)
 
 
 def find_column(
@@ -469,10 +538,12 @@ def find_column(
     Returns:
         The matching column letter, or None if not found.
     """
-    for cell in workbook[sheet][header_row]:
-        if cell.value is not None and re.search(pattern, str(cell.value)):
-            return get_column_letter(cell.column)
-    return None
+    row = workbook[sheet][header_row]
+    if not row:
+        return None
+    # `ws[row_number]` always yields the row from column A onward, so the anchor is column 1.
+    # `Cell.column` is Optional only in openpyxl's stubs, never in a cell obtained this way.
+    return _match_header_column([cell.value for cell in row], row[0].column or 1, pattern)
 
 
 def find_columns(
@@ -585,6 +656,422 @@ def xlw_save_workbook(book: xw.Book) -> None:
     """
     logger.info('Saving workbook via Excel COM: "%s"', book.name)
     book.save()
+
+
+def save_open_workbook(
+    handle: Any, backend: Literal["file", "xlw"], path: str
+) -> None:
+    """Save an open workbook through whichever backend currently holds it.
+
+    One place, rather than the same two-branch `if` repeated at every save site — a session's
+    backend can change mid-run (PRD sec 6.2.2), so every caller needs the branch and none of
+    them should own a private copy of it.
+
+    Args:
+        handle: The live backend object — an openpyxl Workbook or an xlwings Book.
+        backend: Which backend `handle` belongs to.
+        path: Destination path, used by the file backend only (an xlwings Book saves in place,
+            to the path it was opened at).
+    """
+    if backend == "file":
+        save_workbook(handle, path)
+    else:
+        xlw_save_workbook(handle)
+
+
+def close_open_workbook(handle: Any, backend: Literal["file", "xlw"]) -> None:
+    """Close an open workbook through whichever backend currently holds it.
+
+    Args:
+        handle: The live backend object — an openpyxl Workbook or an xlwings Book.
+        backend: Which backend `handle` belongs to.
+    """
+    if backend == "file":
+        close_workbook(handle)
+    else:
+        xlw_close_workbook(handle)
+
+
+# --- xlwings twins of the file-backend primitives (Spec sec 4.0 rule 3) --------------------
+#
+# Every primitive below mirrors its unprefixed openpyxl twin's signature, return shape and
+# errors exactly, so an action can call either one interchangeably (see `primitives()` at the
+# end of this module). They exist because a workbook with save blockers is promoted to the xlw
+# backend and never demoted (docs/backend_eligibility_build_plan.md sec 1.3) — without a twin,
+# a promoted workbook would dead-end with no way to do anything but open and close it.
+#
+# All `xlw_`, deliberately none `com_`: `range.value`, `sheets.add()`, `sheet.name`,
+# `sheet.delete()`, `range.column_width` and `range.insert()` are all portable xlwings calls,
+# so writing to a link-bearing workbook works on macOS too. Only the link *operations*
+# (LinkSources/ChangeLink/UpdateLink, further down) are Windows-only.
+
+
+def xlw_resolve_range(book: xw.Book, sheet: str, range: str) -> tuple[str, str]:
+    """xlwings twin of `resolve_range` — resolve `range` into plain A1 notation on a sheet.
+
+    Args:
+        book: The live workbook to resolve against.
+        sheet: The worksheet `range` is scoped to when it's plain A1 notation.
+        range: An A1-style cell/range, or a workbook-level defined name.
+
+    Returns:
+        (resolved_sheet, a1_range).
+
+    Raises:
+        ValueError: If `range` is a defined name resolving to more than one contiguous area,
+            same as the file-backend twin.
+    """
+    for defined_name in book.names:
+        if defined_name.name != range:
+            continue
+        if "," in defined_name.refers_to:
+            raise ValueError(
+                f'Named range "{range}" must resolve to exactly one area '
+                f"(refers to {defined_name.refers_to})."
+            )
+        target = defined_name.refers_to_range
+        return target.sheet.name, target.address.replace("$", "")
+    return sheet, range
+
+
+def xlw_read_range(book: xw.Book, sheet: str, range: str) -> Any:
+    """xlwings twin of `read_range` — read a cell or range of cells.
+
+    Returns a bare value for a single-cell reference and a 2D row-major list for anything with
+    a ":" in it, matching the file-backend twin. xlwings' own default would flatten a
+    single-row or single-column range to a 1D list, so `ndim=2` is forced explicitly.
+
+    Args:
+        book: The live workbook to read from.
+        sheet: Worksheet name.
+        range: An A1-style cell or range, or a workbook-level defined name.
+
+    Returns:
+        The cell's value for a single cell, or a 2D list of row values for a range.
+
+    Raises:
+        ValueError: If `range` is a defined name spanning more than one area.
+    """
+    resolved_sheet, resolved_range = xlw_resolve_range(book, sheet, range)
+    target = book.sheets[resolved_sheet].range(resolved_range)
+    if ":" in resolved_range:
+        return target.options(ndim=2).value
+    return target.value
+
+
+def xlw_resolve_sheet_names(
+    book: xw.Book, sheet: str | list[str] | dict[str, str]
+) -> list[str]:
+    """xlwings twin of `resolve_sheet_names`.
+
+    Args:
+        book: The live workbook whose sheets are being selected.
+        sheet: A single name, an explicit list, `"all"`, or `{"matching": <regex>}`.
+
+    Returns:
+        The resolved sheet names, in workbook order for `"all"`/`matching`.
+    """
+    if isinstance(sheet, list):
+        return sheet
+    names = [worksheet.name for worksheet in book.sheets]
+    if isinstance(sheet, dict):
+        pattern = re.compile(sheet["matching"])
+        return [name for name in names if pattern.search(name)]
+    if sheet == "all":
+        return names
+    return [sheet]
+
+
+def xlw_read_cells(book: xw.Book, sheet: str, cells: list[str]) -> dict[str, Any]:
+    """xlwings twin of `read_cells` — read a scattered list of specific cells.
+
+    Args:
+        book: The live workbook to read from.
+        sheet: Worksheet name.
+        cells: A1-style cell references or workbook-level defined names.
+
+    Returns:
+        Mapping of the original cell reference to its value.
+
+    Raises:
+        ValueError: If a reference is a defined name spanning more than one area.
+    """
+    result: dict[str, Any] = {}
+    for cell in cells:
+        resolved_sheet, resolved_ref = xlw_resolve_range(book, sheet, cell)
+        result[cell] = book.sheets[resolved_sheet].range(resolved_ref).value
+    return result
+
+
+def xlw_read_properties(book: xw.Book) -> dict[str, Any]:
+    """xlwings twin of `read_properties` — read a live workbook's document properties.
+
+    Document properties are the one twinned primitive with no portable xlwings surface at all
+    (`BuiltinDocumentProperties` is raw COM, i.e. Windows-only). Rather than make this a `com_`
+    function and lose macOS, the workbook is saved through Excel and the properties are then
+    read from the saved file with openpyxl in **read-only** mode. openpyxl never writes here,
+    so the one rule this whole build exists to protect — openpyxl must never *save* a
+    link-bearing workbook — is not touched.
+
+    Args:
+        book: The live workbook to read from.
+
+    Returns:
+        Mapping of property name to value, identical in shape to the file-backend twin.
+    """
+    xlw_save_workbook(book)
+    workbook = openpyxl.load_workbook(book.fullname, read_only=True)
+    try:
+        return read_properties(workbook)
+    finally:
+        workbook.close()
+
+
+def xlw_write_cell(book: xw.Book, sheet: str, cell: str, value: Any) -> None:
+    """xlwings twin of `write_cell` — write a value to a single cell.
+
+    A string starting with "=" is stored as a formula, same as the file-backend twin (Excel's
+    own behaviour on assignment, not special-cased here).
+
+    Args:
+        book: The live workbook to write to.
+        sheet: Worksheet name.
+        cell: An A1-style cell reference.
+        value: The value to write.
+    """
+    book.sheets[sheet].range(cell).value = value
+
+
+def xlw_write_range(
+    book: xw.Book, sheet: str, range: str, values: list[list[Any]]
+) -> None:
+    """xlwings twin of `write_range` — write a 2D block anchored at `range`'s top-left cell.
+
+    Args:
+        book: The live workbook to write to.
+        sheet: Worksheet name.
+        range: An A1-style cell or range — only the top-left cell is used as the anchor.
+        values: A 2D list of row values to write.
+    """
+    book.sheets[sheet].range(range.split(":")[0]).value = values
+
+
+def xlw_set_column_width(
+    book: xw.Book, sheet: str, columns: str, width: float | Literal["autofit"]
+) -> None:
+    """xlwings twin of `set_column_width`.
+
+    `"autofit"` here is Excel's *real* autofit, not the file backend's longest-value
+    approximation — so the resulting width is legitimately different between the two backends.
+    That difference is a feature of having a live Excel, not a divergence to paper over.
+
+    Args:
+        book: The live workbook to modify.
+        sheet: Worksheet name.
+        columns: A single column letter (e.g. "B") or range (e.g. "A:C").
+        width: An explicit width, or "autofit".
+    """
+    start_letter, _, end_letter = columns.partition(":")
+    end_letter = end_letter or start_letter
+    target = book.sheets[sheet].range(f"{start_letter}1:{end_letter}1")
+    if width == "autofit":
+        target.columns.autofit()
+    else:
+        target.column_width = width
+
+
+def xlw_create_sheet(book: xw.Book, name: str, index: int | None = None) -> None:
+    """xlwings twin of `create_sheet` — add a new, empty worksheet.
+
+    Args:
+        book: The live workbook to modify.
+        name: Name for the new sheet.
+        index: Position to insert at (0-based). Appended at the end if omitted, or if it is
+            past the last sheet — matching openpyxl's own tolerance.
+
+    Raises:
+        ValueError: If a sheet named `name` already exists.
+    """
+    existing = [worksheet.name for worksheet in book.sheets]
+    if name in existing:
+        raise ValueError(f'A sheet named "{name}" already exists.')
+    if index is None or index >= len(existing):
+        book.sheets.add(name, after=book.sheets[len(existing) - 1])
+    else:
+        book.sheets.add(name, before=book.sheets[index])
+
+
+def xlw_rename_sheet(book: xw.Book, sheet: str, new_name: str) -> None:
+    """xlwings twin of `rename_sheet`.
+
+    Args:
+        book: The live workbook to modify.
+        sheet: Current worksheet name.
+        new_name: New name for the worksheet.
+    """
+    book.sheets[sheet].name = new_name
+
+
+def xlw_delete_sheet(book: xw.Book, sheet: str) -> None:
+    """xlwings twin of `delete_sheet`.
+
+    Args:
+        book: The live workbook to modify.
+        sheet: Name of the worksheet to remove.
+
+    Raises:
+        ValueError: If `sheet` is the workbook's only remaining sheet — same guard, and same
+            message, as the file-backend twin.
+    """
+    if len(book.sheets) == 1:
+        raise ValueError(
+            f'Cannot delete "{sheet}" — it is the only sheet left in the workbook.'
+        )
+    book.sheets[sheet].delete()
+
+
+def xlw_insert_range(
+    book: xw.Book,
+    sheet: str,
+    at: str,
+    direction: Literal["rows", "columns"] | None = None,
+    header: dict[str, Any] | None = None,
+) -> None:
+    """xlwings twin of `insert_range` — insert a whole row or whole column.
+
+    Args:
+        book: The live workbook to modify.
+        sheet: Worksheet name.
+        at: A whole-column reference (e.g. "C:C") or whole-row reference (e.g. "5:5").
+        direction: Unused — the direction is unambiguous from `at` itself. Accepted so a
+            partial-range call still reaches the clear error below, same as the twin.
+        header: `{"row": int, "text": str}` — only meaningful for a column insert.
+
+    Raises:
+        NotImplementedError: If `at` is a partial range — same message as the file-backend
+            twin, so `actions.insert_range` reports it identically on either backend.
+    """
+    del direction
+    worksheet = book.sheets[sheet]
+    column_match = _WHOLE_COLUMN_RE.match(at)
+    row_match = _WHOLE_ROW_RE.match(at)
+    if column_match:
+        letter = column_match.group(1)
+        worksheet.range(f"{letter}:{letter}").insert(shift="right")
+        if header:
+            worksheet.range(
+                (header["row"], column_index_from_string(letter))
+            ).value = header["text"]
+    elif row_match:
+        number = row_match.group(1)
+        worksheet.range(f"{number}:{number}").insert(shift="down")
+    else:
+        raise NotImplementedError(
+            f'insert_range: partial range "{at}" is not supported yet — only whole-row '
+            '("5:5") or whole-column ("C:C") ranges are built.'
+        )
+
+
+def xlw_find_headers_row(
+    book: xw.Book, sheet: str, search_range: str, patterns: list[str]
+) -> tuple[int, dict[str, str]] | None:
+    """xlwings twin of `find_headers_row`. Matching itself is shared (`_match_headers_row`).
+
+    Args:
+        book: The live workbook to search.
+        sheet: Worksheet name.
+        search_range: An A1-style range, or a workbook-level defined name.
+        patterns: Regex patterns — every one must match a cell in a row for it to count.
+
+    Returns:
+        `(row_number, {pattern: column_letter})` for the first matching row, or None.
+
+    Raises:
+        ValueError: If `search_range` is a defined name spanning more than one area.
+    """
+    resolved_sheet, resolved_range = xlw_resolve_range(book, sheet, search_range)
+    target = book.sheets[resolved_sheet].range(resolved_range)
+    values = target.options(ndim=2).value
+    return _match_headers_row(values, target.row, target.column, patterns)
+
+
+def xlw_find_row(
+    book: xw.Book,
+    sheet: str,
+    column: str,
+    search_value: Any,
+    header_row: int | None = None,
+) -> int | None:
+    """xlwings twin of `find_row`. Matching itself is shared (`_match_value_row`).
+
+    Args:
+        book: The live workbook to search.
+        sheet: Worksheet name.
+        column: A column letter.
+        search_value: The value to match, by equality.
+        header_row: If given, search starts on the row after it.
+
+    Returns:
+        The matching row number, or None if not found.
+    """
+    worksheet = book.sheets[sheet]
+    column_index = column_index_from_string(column)
+    start_row = (header_row or 0) + 1
+    last_row = worksheet.used_range.last_cell.row
+    if last_row < start_row:
+        return None
+    values = (
+        worksheet.range((start_row, column_index), (last_row, column_index))
+        .options(ndim=1)
+        .value
+    )
+    return _match_value_row(values, start_row, search_value)
+
+
+def xlw_find_column(
+    book: xw.Book, sheet: str, header_row: int, pattern: str
+) -> str | None:
+    """xlwings twin of `find_column`. Matching itself is shared (`_match_header_column`).
+
+    Args:
+        book: The live workbook to search.
+        sheet: Worksheet name.
+        header_row: The row number containing headers.
+        pattern: A regex matched against each header cell's value.
+
+    Returns:
+        The matching column letter, or None if not found.
+    """
+    worksheet = book.sheets[sheet]
+    last_column = worksheet.used_range.last_cell.column
+    values = (
+        worksheet.range((header_row, 1), (header_row, last_column))
+        .options(ndim=1)
+        .value
+    )
+    return _match_header_column(values, 1, pattern)
+
+
+def xlw_find_columns(
+    book: xw.Book, sheet: str, header_row: int, patterns: dict[str, str]
+) -> dict[str, str]:
+    """xlwings twin of `find_columns` — several named columns by header pattern in one call.
+
+    Args:
+        book: The live workbook to search.
+        sheet: Worksheet name.
+        header_row: The row number containing headers.
+        patterns: Logical name to regex pattern.
+
+    Returns:
+        Logical name to column letter, for every pattern that matched.
+    """
+    result: dict[str, str] = {}
+    for name, pattern in patterns.items():
+        column = xlw_find_column(book, sheet, header_row, pattern)
+        if column is not None:
+            result[name] = column
+    return result
 
 
 # --- Copy (PRD sec 7's `copy` action) -------------------------------------------------------
@@ -794,6 +1281,141 @@ def com_update_link(book: xw.Book, name: str) -> None:
     """
     logger.debug('Updating link "%s" in workbook "%s" from disk', name, book.name)
     book.api.UpdateLink(Name=name, Type=_XL_LINK_TYPE_EXCEL_LINKS)
+
+
+# --- Twin selection (docs/backend_eligibility_build_plan.md W6) ---------------------------
+#
+# Spec sec 4 used to say backend choice "is fixed once, by the capability tag, not decided
+# per-call". That is no longer true for rule-3 actions: a workbook openpyxl must not save is
+# promoted to `xlw` mid-run and stays there, so the same action can legitimately need either
+# twin on different runs of the same YAML.
+#
+# One table, consulted uniformly by all seventeen of those actions, rather than a hand-written
+# `if session.backend == ...` scattered through actions.py — seventeen copies of the same
+# branch would rot the first time a twin is added or renamed, and nothing would catch it.
+
+
+class _CreateSheet(Protocol):
+    """Call signature shared by `create_sheet` and `xlw_create_sheet`."""
+
+    def __call__(self, workbook: Any, /, name: str, index: int | None = None) -> None: ...
+
+
+class _InsertRange(Protocol):
+    """Call signature shared by `insert_range` and `xlw_insert_range`."""
+
+    def __call__(
+        self,
+        workbook: Any,
+        /,
+        sheet: str,
+        at: str,
+        direction: Literal["rows", "columns"] | None = None,
+        header: dict[str, Any] | None = None,
+    ) -> None: ...
+
+
+class _FindRow(Protocol):
+    """Call signature shared by `find_row` and `xlw_find_row`."""
+
+    def __call__(
+        self,
+        workbook: Any,
+        /,
+        sheet: str,
+        column: str,
+        search_value: Any,
+        header_row: int | None = None,
+    ) -> int | None: ...
+
+
+@dataclass(frozen=True)
+class BackendPrimitives:
+    """One backend's implementation of every twinned primitive (Spec sec 4.0 rule 3).
+
+    Each field holds the function for that backend. Both instances below are built from the
+    same field list, so a primitive added to one backend and forgotten on the other is a
+    construction error at import time, not a mystery at run time.
+
+    Most fields are plain `Callable`s. The three whose primitives take optional arguments get
+    a `Protocol` instead, because `Callable` cannot express a default — and typing them as
+    `Callable[..., X]` to dodge that would throw away exactly the check this table exists to
+    provide: that the two twins really do accept the same arguments under the same names. The
+    workbook handle is positional-only in each protocol, since the twins legitimately differ
+    there (`workbook: Workbook` vs `book: xw.Book`).
+    """
+
+    resolve_range: Callable[[Any, str, str], tuple[str, str]]
+    resolve_sheet_names: Callable[[Any, str | list[str] | dict[str, str]], list[str]]
+    read_range: Callable[[Any, str, str], Any]
+    read_cells: Callable[[Any, str, list[str]], dict[str, Any]]
+    read_properties: Callable[[Any], dict[str, Any]]
+    write_cell: Callable[[Any, str, str, Any], None]
+    write_range: Callable[[Any, str, str, list[list[Any]]], None]
+    set_column_width: Callable[[Any, str, str, float | Literal["autofit"]], None]
+    create_sheet: _CreateSheet
+    rename_sheet: Callable[[Any, str, str], None]
+    delete_sheet: Callable[[Any, str], None]
+    insert_range: _InsertRange
+    find_headers_row: Callable[
+        [Any, str, str, list[str]], tuple[int, dict[str, str]] | None
+    ]
+    find_row: _FindRow
+    find_column: Callable[[Any, str, int, str], str | None]
+    find_columns: Callable[[Any, str, int, dict[str, str]], dict[str, str]]
+
+
+_FILE_PRIMITIVES = BackendPrimitives(
+    resolve_range=resolve_range,
+    resolve_sheet_names=resolve_sheet_names,
+    read_range=read_range,
+    read_cells=read_cells,
+    read_properties=read_properties,
+    write_cell=write_cell,
+    write_range=write_range,
+    set_column_width=set_column_width,
+    create_sheet=create_sheet,
+    rename_sheet=rename_sheet,
+    delete_sheet=delete_sheet,
+    insert_range=insert_range,
+    find_headers_row=find_headers_row,
+    find_row=find_row,
+    find_column=find_column,
+    find_columns=find_columns,
+)
+
+_XLW_PRIMITIVES = BackendPrimitives(
+    resolve_range=xlw_resolve_range,
+    resolve_sheet_names=xlw_resolve_sheet_names,
+    read_range=xlw_read_range,
+    read_cells=xlw_read_cells,
+    read_properties=xlw_read_properties,
+    write_cell=xlw_write_cell,
+    write_range=xlw_write_range,
+    set_column_width=xlw_set_column_width,
+    create_sheet=xlw_create_sheet,
+    rename_sheet=xlw_rename_sheet,
+    delete_sheet=xlw_delete_sheet,
+    insert_range=xlw_insert_range,
+    find_headers_row=xlw_find_headers_row,
+    find_row=xlw_find_row,
+    find_column=xlw_find_column,
+    find_columns=xlw_find_columns,
+)
+
+_PRIMITIVES_BY_BACKEND = {"file": _FILE_PRIMITIVES, "xlw": _XLW_PRIMITIVES}
+
+
+def primitives(backend: Literal["file", "xlw"]) -> BackendPrimitives:
+    """The set of twinned primitives matching a session's current backend.
+
+    Args:
+        backend: `WorkbookSession.backend`.
+
+    Returns:
+        The `BackendPrimitives` an action should call through for that session.
+    """
+    return _PRIMITIVES_BY_BACKEND[backend]
 
 
 # --- xlwings — owned-instance tracking (PRD sec 6.2.1, Spec sec 3.1) ----------------------

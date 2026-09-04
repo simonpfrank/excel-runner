@@ -27,6 +27,7 @@ from excel_runner.core import (
     ActionExecutionError,
     ActionResult,
     ErrorDetail,
+    SaveBlocker,
     Step,
     ValidationError,
     WorkbookRef,
@@ -196,8 +197,40 @@ def scan_external_link_targets(path: Path) -> list[str]:
     return targets
 
 
+def inspect_save_blockers(path: Path) -> frozenset[SaveBlocker]:
+    """Inspect a real workbook file and return every save blocker it carries.
+
+    A plain zipfile/XML read via `scan_external_link_targets` — no Excel, no COM, safe to call
+    during planning and cheap enough to call on every session open.
+
+    Args:
+        path: Real path of the workbook to inspect. A path that doesn't exist, isn't a file,
+            or isn't a readable OOXML package yields an empty set: openpyxl can't open such a
+            file at all, so it can never reach a save, and inspection must not be the thing
+            that raises on it.
+
+    Returns:
+        The blockers found. Empty means the file backend is safe to save this workbook.
+    """
+    try:
+        targets = scan_external_link_targets(path)
+    except (OSError, zipfile.BadZipFile, ElementTree.ParseError) as exc:
+        logger.debug("Save-blocker inspection skipped for %s: %s", path, exc)
+        return frozenset()
+    if targets:
+        logger.info(
+            "Workbook %s carries %d outbound external link(s) — openpyxl must not save it",
+            path,
+            len(targets),
+        )
+        return frozenset({SaveBlocker.OUTBOUND_EXTERNAL_LINKS})
+    return frozenset()
+
+
 def discover_write_intent_link_graph(
-    workbook_paths: dict[str, Path], write_intent: set[str]
+    workbook_paths: dict[str, Path],
+    write_intent: set[str],
+    scan_paths: dict[str, Path] | None = None,
 ) -> dict[str, set[str]]:
     """Build the R4 `link_targets` graph `compute_link_commit_order()` consumes, by scanning
     every write-intent workbook's real, on-disk file for `"absolute"`-classified external
@@ -213,6 +246,11 @@ def discover_write_intent_link_graph(
         workbook_paths: Every declared workbook's logical name to its real, on-disk path.
         write_intent: Logical names of workbooks that will be modified this run (`plan()`'s
             `"read_write"` workbooks).
+        scan_paths: Fallback file to scan for a workbook whose own real file doesn't exist
+            yet — its `template:`'s real path (`inspection_paths()`), since a
+            `create_if_missing` workbook inherits every external link its template carries.
+            Without this, a template-backed workbook's links are invisible on its *first*
+            run, which is exactly the run that creates it.
 
     Returns:
         Logical name -> set of other write-intent workbook names it R4-links to. Every name in
@@ -225,11 +263,16 @@ def discover_write_intent_link_graph(
     graph: dict[str, set[str]] = {name: set() for name in write_intent}
     for name in write_intent:
         path = workbook_paths.get(name)
-        if path is None or not path.exists():
+        if path is None:
             continue
-        for target in scan_external_link_targets(path):
+        scan_path = path if path.exists() else (scan_paths or {}).get(name)
+        if scan_path is None or not scan_path.exists():
+            continue
+        for target in scan_external_link_targets(scan_path):
             if classify_link_target(target) != "absolute":
                 continue
+            # Resolved against `path`, never `scan_path`: a relative target in a template is
+            # relative to where the *new* workbook will live, not to the template itself.
             resolved_target = resolve_link_target(target, path)
             for other_name, other_path in resolved_paths.items():
                 if other_name != name and other_path == resolved_target:
@@ -237,6 +280,34 @@ def discover_write_intent_link_graph(
                         graph[name].add(other_name)
                     break
     return graph
+
+
+def inspection_paths(workbooks: dict[str, WorkbookRef]) -> dict[str, Path]:
+    """For every declared workbook, the real file to inspect on its behalf before the run
+    touches anything — its own file, or its `template:`'s file when it doesn't exist yet.
+
+    A `create_if_missing` workbook is created by copying its template verbatim
+    (`backends.create_workbook`), so the template's external links, sheets and defined names
+    are exactly what the new workbook will have. Shared by tier-3 existence validation and R4
+    link discovery, so both see the same "what will actually be there" view.
+
+    Args:
+        workbooks: The workflow's `workbooks:` registry.
+
+    Returns:
+        Logical name -> real path to inspect. A workbook with no file and no usable template
+        is simply absent — there is nothing to inspect for it.
+    """
+    resolved: dict[str, Path] = {}
+    for name, ref in workbooks.items():
+        direct = Path(ref.file)
+        if direct.exists():
+            resolved[name] = direct
+        elif ref.template is not None and ref.template in workbooks:
+            template_path = Path(workbooks[ref.template].file)
+            if template_path.exists():
+                resolved[name] = template_path
+    return resolved
 
 
 def compute_link_commit_order(link_targets: dict[str, set[str]]) -> list[str]:
@@ -366,6 +437,11 @@ class ScratchManager:
                 self._originals_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(real_path, self._originals_dir / real_path.name)
         else:
+            # A previous run of this same workflow may have left a working copy here — the
+            # run directory is keyed by workflow name and never cleaned. Without this unlink
+            # the caller's `if not scratch_path.exists()` create-check sees the stale file and
+            # silently adopts it, so deleting the real file has no effect on the next run.
+            working_path.unlink(missing_ok=True)
             logger.debug(
                 'Workbook "%s" has no real file yet — created on first write', name
             )
@@ -510,16 +586,10 @@ class ScratchManager:
 # --- Session management (Spec sec 5.2) ----------------------------------------------------
 
 
-def _needed_backend(
+def _capability_backend(
     capability: Literal["file", "xlw", "com", "depends_on_param", "none"],
 ) -> Literal["file", "xlw"]:
-    """Which `WorkbookSession.backend` a given action capability needs (PRD sec 6.2.2).
-
-    `"com"` needs an `xlw`-backed session too — the action itself reaches deeper via xlwings'
-    `.api`, so `SessionManager` never needs a distinct backend state for it. `"depends_on_param"`
-    (`read_metadata`'s own runtime resolution, Spec sec 5.1) and `"none"` (control actions, PRD
-    sec 6.9 — never call `get_or_open` at all, no `workbook:` field) can't be mapped to a
-    concrete backend here.
+    """The backend a capability tag asks for on its own, before save blockers are considered.
 
     Raises:
         ActionExecutionError: For `"depends_on_param"` or `"none"` — not yet resolvable, or
@@ -537,6 +607,55 @@ def _needed_backend(
             ),
         )
     )
+
+
+def _needed_backend(
+    capability: Literal["file", "xlw", "com", "depends_on_param", "none"],
+    blockers: frozenset[SaveBlocker] = frozenset(),
+    writes: bool = False,
+    mode: Literal["read_only", "read_write"] = "read_write",
+    current_backend: Literal["file", "xlw"] | None = None,
+) -> Literal["file", "xlw"]:
+    """Which `WorkbookSession.backend` a given dispatch needs (PRD sec 6.2.2;
+    docs/backend_eligibility_build_plan.md sec 1.2/1.3/1.4).
+
+    Capability alone is no longer enough. A workbook with save blockers must be handled by
+    Excel for anything that leads to a save, so a `"file"`-capability action resolves to `xlw`
+    when all of these hold:
+
+    * the workbook has at least one save blocker, and
+    * the session is `read_write` (a `read_only` session is never saved, so it can never be
+      corrupted — and `file` is the faster path), and
+    * either this action writes (**promotion happens on first write, not at open** — PRD
+      principle 1: only pay for a live Excel session where the work genuinely requires it),
+      or the session is already on `xlw` (**promotion is sticky** — demoting would let the
+      *next* file-backend write save through openpyxl and destroy the workbook).
+
+    `"com"` needs an `xlw`-backed session too — the action itself reaches deeper via xlwings'
+    `.api`, so `SessionManager` never needs a distinct backend state for it.
+
+    Args:
+        capability: The dispatching action's capability tag (Spec sec 5.1).
+        blockers: The workbook's save blockers (`inspect_save_blockers`).
+        writes: Whether the dispatching action mutates the workbook (`ActionSpec.writes`).
+        mode: The session's read/write mode.
+        current_backend: The backend the session is already on, or None if it isn't open yet.
+
+    Returns:
+        The backend this dispatch must run on.
+
+    Raises:
+        ActionExecutionError: For `"depends_on_param"` or `"none"` — not yet resolvable, or
+            never actually reachable from here.
+    """
+    base = _capability_backend(capability)
+    if base == "xlw":
+        return "xlw"
+    if not blockers or mode == "read_only":
+        return "file"
+    if writes or current_backend == "xlw":
+        return "xlw"
+    return "file"
 
 
 class SessionManager:
@@ -575,6 +694,7 @@ class SessionManager:
         scratch: ScratchManager,
         link_targets: dict[str, set[str]] | None = None,
         commit_order: list[str] | None = None,
+        audit: Callable[[str, dict[str, Any]], None] | None = None,
     ) -> None:
         self._workbooks = workbooks
         self._scratch = scratch
@@ -588,6 +708,12 @@ class SessionManager:
                 self._link_sources.setdefault(target, set()).add(source)
         self._commit_order = commit_order
         self._wired_r4_links: set[tuple[str, str]] = set()
+        self._audit = audit
+
+    def _record(self, event: str, detail: dict[str, Any]) -> None:
+        """Emit one run-level audit event, if this run has an audit sink wired up."""
+        if self._audit is not None:
+            self._audit(event, detail)
 
     def _shared_app(self) -> Any:
         """Return the run's one shared, lazily-spawned Excel instance, spawning it on first
@@ -601,6 +727,7 @@ class SessionManager:
         name: str,
         mode: Literal["read_only", "read_write"] = "read_write",
         capability: Literal["file", "xlw", "com", "depends_on_param", "none"] = "file",
+        writes: bool = False,
     ) -> WorkbookSession:
         """Return the session for `name`, opening it on first reference.
 
@@ -612,22 +739,30 @@ class SessionManager:
             name: The workbook's logical name, matching a key in the `workbooks:` registry.
             mode: Ignored if a session for `name` is already open — the mode it was first
                 opened with sticks for the rest of the run.
-            capability: The dispatching action's capability (Spec sec 5.1) — determines which
-                backend (`_needed_backend`, PRD sec 6.2.2) this session must be on. Every
-                session opens on the file backend today (bidirectional switching isn't built
-                yet), so this only matters for detecting a mismatch, not yet for resolving one.
+            capability: The dispatching action's capability (Spec sec 5.1) — one of the three
+                inputs to `_needed_backend`, alongside the workbook's save blockers and
+                whether the action writes.
+            writes: Whether the dispatching action mutates the workbook (`ActionSpec.writes`).
+                This is what triggers promotion-on-first-write for a workbook openpyxl must
+                not save (docs/backend_eligibility_build_plan.md sec 1.2).
 
         Returns:
             The (possibly newly-opened, possibly just-switched) WorkbookSession, on the
-            backend `capability` needs.
+            backend this dispatch needs.
 
         Raises:
             ActionExecutionError: If `name` isn't in the registry, or its file doesn't exist
                 and `create_if_missing` isn't set.
         """
-        needed = _needed_backend(capability)
         if name in self._sessions:
             session = self._sessions[name]
+            needed = _needed_backend(
+                capability,
+                session.save_blockers,
+                writes,
+                session.mode,
+                session.backend,
+            )
             if session.backend != needed:
                 self._switch_backend(session, needed)
             return session
@@ -639,12 +774,7 @@ class SessionManager:
                     technical_reason=f"SessionManager.get_or_open: unknown workbook name {name!r}",
                 )
             )
-        ref = self._workbooks[name]
-        session = (
-            self._open_read_write(name, ref, needed)
-            if mode == "read_write"
-            else self._open_read_only(name, ref, needed)
-        )
+        session = self._open(name, self._workbooks[name], mode, capability, writes)
         self._sessions[name] = session
         self._wire_r4_links_touching(name)
         return session
@@ -659,39 +789,90 @@ class SessionManager:
             return backends.open_workbook(str(scratch_path), mode=mode)
         return backends.xlw_open_workbook(self._shared_app(), str(scratch_path), mode)
 
-    def _open_read_write(
-        self, name: str, ref: WorkbookRef, backend: Literal["file", "xlw"] = "file"
+    def _open(
+        self,
+        name: str,
+        ref: WorkbookRef,
+        mode: Literal["read_only", "read_write"],
+        capability: Literal["file", "xlw", "com", "depends_on_param", "none"] = "file",
+        writes: bool = False,
     ) -> WorkbookSession:
+        """Stage, create-if-needed, inspect, then open one workbook on the backend this first
+        dispatch needs.
+
+        Blockers are inspected on the *scratch* copy rather than the real file, deliberately:
+        by that point a `create_if_missing` workbook has already been materialised from its
+        `template:`, so a template's inherited external links are seen on the very first run
+        (docs/backend_eligibility_build_plan.md W2) through the same code path as an existing
+        workbook's own links — no second, separate detection route to keep in step.
+
+        Args:
+            name: The workbook's logical name.
+            ref: Its registry entry.
+            mode: Read/write mode for the session.
+            capability: The dispatching action's capability tag.
+            writes: Whether the dispatching action mutates the workbook.
+        """
         real_path = Path(ref.file)
-        scratch_path = self._scratch.stage(name, real_path)
+        scratch_path = self._scratch.stage(name, real_path, writes=(mode == "read_write"))
         if not scratch_path.exists():
             self._create(ref, scratch_path)
-        handle = self._open_handle(scratch_path, "read_write", backend)
+        blockers = inspect_save_blockers(scratch_path)
+        backend = _needed_backend(capability, blockers, writes, mode)
+        self._record(
+            "workbook_opened",
+            {
+                "workbook": name,
+                "mode": mode,
+                "backend": backend,
+                "save_blockers": sorted(blocker.value for blocker in blockers),
+            },
+        )
+        handle = self._open_handle(scratch_path, mode, backend)
         return WorkbookSession(
             name=name,
             backend=backend,
             handle=handle,
             path=str(scratch_path),
-            mode="read_write",
+            mode=mode,
             scratch_path=scratch_path,
+            save_blockers=blockers,
         )
 
-    def _open_read_only(
-        self, name: str, ref: WorkbookRef, backend: Literal["file", "xlw"] = "file"
-    ) -> WorkbookSession:
-        real_path = Path(ref.file)
-        scratch_path = self._scratch.stage(name, real_path, writes=False)
-        if not scratch_path.exists():
-            self._create(ref, scratch_path)
-        handle = self._open_handle(scratch_path, "read_only", backend)
-        return WorkbookSession(
-            name=name,
-            backend=backend,
-            handle=handle,
-            path=str(scratch_path),
-            mode="read_only",
-            scratch_path=scratch_path,
-        )
+    def _save_session(self, session: WorkbookSession) -> None:
+        """Save one open session through whichever backend currently holds it, refusing to let
+        openpyxl write a workbook it would destroy (docs/backend_eligibility_build_plan.md W4).
+
+        The refusal is a real guard, not a formality: promotion-on-first-write means a
+        blocker-bearing session is already on `xlw` before anything makes it dirty, so this
+        state is not reachable through normal dispatch. If some future path does reach it,
+        silently saving would produce a workbook Excel cannot open at all — far worse than
+        stopping here.
+
+        Raises:
+            ActionExecutionError: If a dirty, blocker-bearing session is still on the `file`
+                backend.
+        """
+        if session.backend == "file" and session.save_blockers:
+            raise ActionExecutionError(
+                ErrorDetail(
+                    message=(
+                        f'Workbook "{session.name}" has unsaved changes on the openpyxl '
+                        "backend, but openpyxl cannot save it without destroying its external "
+                        "links. Refusing to write it."
+                    ),
+                    technical_reason=(
+                        f"_save_session: backend=file, dirty=True, "
+                        f"save_blockers={sorted(b.value for b in session.save_blockers)!r}"
+                    ),
+                    suggestion=(
+                        "This is an internal routing fault — the session should have been "
+                        "promoted to the Excel backend before its first write."
+                    ),
+                )
+            )
+        backends.save_open_workbook(session.handle, session.backend, session.path)
+        session.dirty = False
 
     def _switch_backend(
         self, session: WorkbookSession, needed: Literal["file", "xlw"]
@@ -703,29 +884,56 @@ class SessionManager:
         Windows file-lock race (the new backend opening the same scratch path before the old
         one has actually released it).
 
+        An `xlw` -> `file` demotion is refused outright for a read-write session with save
+        blockers (docs/backend_eligibility_build_plan.md sec 1.3). The demotion itself is
+        harmless — it saves through Excel first, so the file on disk is correct — but the
+        *next* file-backend write would then save through openpyxl and destroy the workbook.
+        Raising is deliberate: silently ignoring the request would hide a routing fault.
+
         Args:
             session: The session to switch — mutated in place (`WorkbookSession` is
                 deliberately not frozen).
             needed: The backend to switch to.
+
+        Raises:
+            ActionExecutionError: On a refused demotion, or if the session is dirty on the
+                `file` backend with save blockers (`_save_session`).
         """
         if session.backend == needed:
             return
+        if needed == "file" and session.save_blockers and session.mode == "read_write":
+            raise ActionExecutionError(
+                ErrorDetail(
+                    message=(
+                        f'Workbook "{session.name}" cannot be moved back to the openpyxl '
+                        "backend: it has external links that openpyxl would destroy on the "
+                        "next save."
+                    ),
+                    technical_reason=(
+                        "_switch_backend: refused xlw -> file demotion, save_blockers="
+                        f"{sorted(b.value for b in session.save_blockers)!r}"
+                    ),
+                )
+            )
         logger.info(
             'Switching workbook "%s" backend: %s -> %s',
             session.name,
             session.backend,
             needed,
         )
+        if session.save_blockers:
+            self._record(
+                "backend_switched",
+                {
+                    "workbook": session.name,
+                    "from": session.backend,
+                    "to": needed,
+                    "save_blockers": sorted(b.value for b in session.save_blockers),
+                },
+            )
         if session.dirty:
-            if session.backend == "file":
-                backends.save_workbook(session.handle, session.path)
-            else:
-                backends.xlw_save_workbook(session.handle)
-            session.dirty = False
-        if session.backend == "file":
-            backends.close_workbook(session.handle)
-        else:
-            backends.xlw_close_workbook(session.handle)
+            self._save_session(session)
+        backends.close_open_workbook(session.handle, session.backend)
         session.handle = self._open_handle(Path(session.path), session.mode, needed)
         session.backend = needed
 
@@ -832,11 +1040,7 @@ class SessionManager:
     def _save_dirty_staged_sessions(self) -> None:
         for session in self._sessions.values():
             if session.scratch_path is not None and session.dirty:
-                if session.backend == "file":
-                    backends.save_workbook(session.handle, session.path)
-                else:
-                    backends.xlw_save_workbook(session.handle)
-                session.dirty = False
+                self._save_session(session)
 
     def checkpoint(self) -> None:
         """Persist every dirty staged session's in-memory state to its scratch file.
@@ -881,10 +1085,7 @@ class SessionManager:
         errors: list[Exception] = []
         for session in self._sessions.values():
             try:
-                if session.backend == "file":
-                    backends.close_workbook(session.handle)
-                else:
-                    backends.xlw_close_workbook(session.handle)
+                backends.close_open_workbook(session.handle, session.backend)
             except Exception as exc:  # noqa: BLE001 - intentional, see docstring
                 errors.append(exc)
         try:
@@ -1316,19 +1517,48 @@ def _sheet_candidates(value: Any) -> list[str]:
     return []  # dict ("matching") or None \u2014 dynamic/unspecified, nothing to check
 
 
-def _resolve_check_path(name: str, workflow: Workflow) -> Path | None:
-    """The real file to open read-only for `name`'s existence checks, or None if there isn't
-    one yet (a fresh `create_if_missing` workbook with no template \u2014 nothing to check).
+def _check_supported_link_layout(name: str, path: Path) -> None:
+    """Refuse a workbook carrying a relative-subpath (R2) external link, before anything real
+    is touched (docs/backend_eligibility_build_plan.md W7).
+
+    The scratch execution model is deliberately flat \u2014 `scratch/working/<basename>` \u2014 so a
+    link into a subfolder (`data/prices.xlsx`, `../shared/rates.xlsx`) resolves to nothing once
+    the linking workbook is staged. Excel then silently blanks or freezes the dependent cells
+    instead of failing, which is worse than refusing the job (PRD sec 6.3's design principle 3:
+    fail before touching a real workbook, with an error a human or an agent can act on).
+
+    Args:
+        name: The workbook's logical name, for the error message.
+        path: The real file inspected on its behalf (`inspection_paths`).
+
+    Raises:
+        ValidationError: If any external link in `path` classifies as `relative_subpath`.
     """
-    ref = workflow.workbooks[name]
-    direct = Path(ref.file)
-    if direct.exists():
-        return direct
-    if ref.template is not None:
-        template_path = Path(workflow.workbooks[ref.template].file)
-        if template_path.exists():
-            return template_path
-    return None
+    try:
+        targets = scan_external_link_targets(path)
+    except (OSError, zipfile.BadZipFile, ElementTree.ParseError):
+        return  # not a readable OOXML package \u2014 load_workbook above already reported it
+    unsupported = [
+        target for target in targets if classify_link_target(target) == "relative_subpath"
+    ]
+    if not unsupported:
+        return
+    raise ValidationError(
+        ErrorDetail(
+            message=(
+                f'Workbook "{name}" has an external link to "{unsupported[0]}", a path into '
+                "another folder. Links like that cannot survive this tool's flat scratch "
+                "layout, so the run is refused rather than silently breaking the link."
+            ),
+            technical_reason=(
+                f"relative_subpath external link target(s) {unsupported!r} in {path}"
+            ),
+            suggestion=(
+                "Move the linked workbook next to this one and repoint the link at a bare "
+                "filename, or repoint it at a full absolute path."
+            ),
+        )
+    )
 
 
 def _sheet_error(
@@ -1493,15 +1723,13 @@ def validate_existence(workflow: Workflow) -> None:
     defined_names: dict[str, set[str]] = {}
 
     try:
-        for name in workflow.workbooks:
-            path = _resolve_check_path(name, workflow)
-            if path is None:
-                continue
+        for name, path in inspection_paths(workflow.workbooks).items():
             if path not in opened:
                 opened[path] = openpyxl.load_workbook(path, read_only=True)
             wb = opened[path]
             known_sheets[name] = set(wb.sheetnames)
             defined_names[name] = set(wb.defined_names.keys())
+            _check_supported_link_layout(name, path)
 
         for step in workflow.steps:
             _check_step_existence(step, known_sheets, defined_names)

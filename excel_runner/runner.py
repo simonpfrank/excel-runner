@@ -96,6 +96,23 @@ class AuditLogger:
         with self._path.open("a") as handle:
             handle.write(json.dumps(record, default=str) + "\n")
 
+    def record_event(self, event: str, detail: dict[str, Any]) -> None:
+        """Append one run-level (not step-level) event to the audit log.
+
+        Distinguished from a step record by carrying an `"event"` key instead of a `"step_id"`
+        one, so a reader can tell them apart without positional assumptions. This is how a
+        surprisingly slow run becomes explainable after the fact: a workbook that Excel had to
+        handle because openpyxl could not safely save it (PRD sec 6.2.2;
+        docs/backend_eligibility_build_plan.md W8) shows up here with the reason attached.
+
+        Args:
+            event: The event name, e.g. `"workbook_opened"` or `"backend_switched"`.
+            detail: Event-specific fields, merged into the record.
+        """
+        record = {"event": event, "at": str(datetime.now()), **detail}
+        with self._path.open("a") as handle:
+            handle.write(json.dumps(record, default=str) + "\n")
+
 
 def _dispatch_copy(
     resolved_params: dict[str, Any],
@@ -111,10 +128,16 @@ def _dispatch_copy(
     source = resolved_params["source"]
     target = resolved_params["target"]
     source_session = session_manager.get_or_open(
-        source["workbook"], mode=plan.modes[source["workbook"]], capability="com"
+        source["workbook"],
+        mode=plan.modes[source["workbook"]],
+        capability="com",
+        writes=True,
     )
     target_session = session_manager.get_or_open(
-        target["workbook"], mode=plan.modes[target["workbook"]], capability="com"
+        target["workbook"],
+        mode=plan.modes[target["workbook"]],
+        capability="com",
+        writes=True,
     )
     return actions_module.copy(
         session=source_session,
@@ -154,6 +177,7 @@ def _dispatch(
         workbook_name,
         mode=plan.modes[workbook_name],
         capability=registry[step.action].capability,
+        writes=registry[step.action].writes,
     )
     kwargs = {key: value for key, value in resolved.items() if key != "workbook"}
     return registry[step.action].fn(session=session, **kwargs)
@@ -215,17 +239,21 @@ def run_workflow(
     # and a cyclical/chained R4 link (R6/R7) must raise before any workbook is ever touched.
     workbook_paths = {name: Path(ref.file) for name, ref in workflow.workbooks.items()}
     write_intent = {name for name, mode in plan.modes.items() if mode == "read_write"}
-    link_targets = engine.discover_write_intent_link_graph(workbook_paths, write_intent)
+    link_targets = engine.discover_write_intent_link_graph(
+        workbook_paths, write_intent, engine.inspection_paths(workflow.workbooks)
+    )
     commit_order = engine.compute_link_commit_order(link_targets)
+
+    audit_log_path = run_dir / "audit.jsonl"
+    audit = AuditLogger(audit_log_path)
 
     session_manager = engine.SessionManager(
         workflow.workbooks,
         scratch,
         link_targets=link_targets,
         commit_order=commit_order,
+        audit=audit.record_event,
     )
-    audit_log_path = run_dir / "audit.jsonl"
-    audit = AuditLogger(audit_log_path)
 
     step_outputs: dict[str, dict[str, Any]] = {}
     step_results: list[StepResult] = []

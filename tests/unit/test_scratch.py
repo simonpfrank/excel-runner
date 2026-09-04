@@ -58,6 +58,23 @@ class TestStage:
         assert not working_path.exists()
         assert working_path.parent == tmp_path / "working" / "scratch" / "working"
 
+    def test_discards_a_previous_runs_working_copy_when_there_is_no_real_file(
+        self, tmp_path: Path
+    ) -> None:
+        """The run directory is keyed by workflow name and never cleaned, so a failed run can
+        leave a working copy behind. A later run of a create_if_missing workbook must not
+        adopt it — otherwise deleting the real file has no effect on the next run."""
+        real = tmp_path / "real" / "new.xlsx"
+        manager = ScratchManager(tmp_path / "working")
+        stale = _write_file(
+            tmp_path / "working" / "scratch" / "working" / "new.xlsx", "stale"
+        )
+
+        working_path = manager.stage("new", real)
+
+        assert working_path == stale
+        assert not working_path.exists()
+
     def test_write_intent_workbook_gets_an_originals_backup(
         self, tmp_path: Path
     ) -> None:

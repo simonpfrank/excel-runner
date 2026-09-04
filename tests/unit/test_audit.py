@@ -83,3 +83,64 @@ class TestAuditLogger:
         logger.record_step(step, StepResult(step_id="s1", status="success", output={}), "t0", "t1")
 
         assert log_path.exists()
+
+
+class TestRecordEvent:
+    """Run-level events (docs/backend_eligibility_build_plan.md W8). Backend routing is
+    deliberately invisible in the workflow YAML, so the audit log is the only place a user can
+    find out *why* a run needed Excel and was therefore slow.
+    """
+
+    def test_writes_a_record_carrying_the_event_name_and_its_detail(
+        self, tmp_path: Path
+    ) -> None:
+        log_path = tmp_path / "audit.jsonl"
+        logger = AuditLogger(log_path)
+
+        logger.record_event(
+            "workbook_opened",
+            {
+                "workbook": "manip",
+                "backend": "xlw",
+                "save_blockers": ["outbound_external_links"],
+            },
+        )
+
+        record = json.loads(log_path.read_text().splitlines()[0])
+        assert record["event"] == "workbook_opened"
+        assert record["workbook"] == "manip"
+        assert record["backend"] == "xlw"
+        assert record["save_blockers"] == ["outbound_external_links"]
+        assert record["at"]
+
+    def test_an_event_is_distinguishable_from_a_step_record(self, tmp_path: Path) -> None:
+        """A reader tells them apart by key, not by position — events interleave with steps."""
+        log_path = tmp_path / "audit.jsonl"
+        logger = AuditLogger(log_path)
+
+        logger.record_event("workbook_opened", {"workbook": "manip"})
+        logger.record_step(
+            Step(id="s1", action="open", params={"workbook": "manip"}),
+            StepResult(step_id="s1", status="success", output={}),
+            "t0",
+            "t1",
+        )
+
+        event, step = (json.loads(line) for line in log_path.read_text().splitlines())
+        assert "event" in event and "step_id" not in event
+        assert "step_id" in step and "event" not in step
+
+    def test_events_append_alongside_steps_rather_than_overwriting(
+        self, tmp_path: Path
+    ) -> None:
+        log_path = tmp_path / "audit.jsonl"
+        logger = AuditLogger(log_path)
+
+        logger.record_event("workbook_opened", {"workbook": "a"})
+        logger.record_event("backend_switched", {"workbook": "a", "to": "xlw"})
+
+        lines = log_path.read_text().splitlines()
+        assert [json.loads(line)["event"] for line in lines] == [
+            "workbook_opened",
+            "backend_switched",
+        ]

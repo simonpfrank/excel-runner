@@ -16,9 +16,18 @@ import openpyxl
 import pytest
 
 from excel_runner import backends, engine
-from excel_runner.core import ActionExecutionError, WorkbookRef, WorkbookSession
+from excel_runner.core import (
+    ActionExecutionError,
+    SaveBlocker,
+    WorkbookRef,
+    WorkbookSession,
+)
 from excel_runner.engine import ScratchManager, SessionManager
-from tests.unit.conftest import requires_excel, requires_working_xlwings_save
+from tests.unit.conftest import (
+    requires_excel,
+    requires_working_xlwings_save,
+    workbook_with_external_link,
+)
 
 
 def _write_workbook(path: Path, cell_value: str = "original") -> Path:
@@ -167,6 +176,194 @@ class TestNeededBackend:
             engine._needed_backend("none")
 
 
+class TestNeededBackendWithSaveBlockers:
+    """The eligibility rule proper (docs/backend_eligibility_build_plan.md sec 1.2/1.3): a
+    file-capability action stops being file-eligible once the workbook has a save blocker and
+    the dispatch could lead to a save.
+    """
+
+    _BLOCKED = frozenset({SaveBlocker.OUTBOUND_EXTERNAL_LINKS})
+
+    def test_blockers_alone_do_not_promote_a_read(self) -> None:
+        """PRD principle 1 — promotion happens on first *write*, not at open. A read costs
+        nothing openpyxl can get wrong, so it stays on the fast path."""
+        assert engine._needed_backend("file", self._BLOCKED, writes=False) == "file"
+
+    def test_a_write_to_a_blocked_workbook_promotes_to_xlw(self) -> None:
+        assert engine._needed_backend("file", self._BLOCKED, writes=True) == "xlw"
+
+    def test_promotion_is_sticky_across_a_later_read(self) -> None:
+        """Demoting after a write would let the *next* file-backend write save through
+        openpyxl and destroy the links."""
+        assert (
+            engine._needed_backend(
+                "file", self._BLOCKED, writes=False, current_backend="xlw"
+            )
+            == "xlw"
+        )
+
+    def test_read_only_sessions_are_never_promoted(self) -> None:
+        """A read_only session is never saved, so it can never be corrupted — and file is the
+        faster path."""
+        assert (
+            engine._needed_backend(
+                "file", self._BLOCKED, writes=True, mode="read_only"
+            )
+            == "file"
+        )
+
+    def test_a_write_to_an_unblocked_workbook_stays_on_file(self) -> None:
+        assert engine._needed_backend("file", frozenset(), writes=True) == "file"
+
+    def test_xlw_capability_ignores_blockers_entirely(self) -> None:
+        """It was already going to Excel; blockers change nothing about that."""
+        assert engine._needed_backend("xlw", frozenset(), writes=False) == "xlw"
+
+
+class TestSessionSaveBlockers:
+    """Blockers are inspected once, at open, and carried on the session
+    (docs/backend_eligibility_build_plan.md W3)."""
+
+    def test_an_unblocked_workbook_opens_with_no_blockers(self, tmp_path: Path) -> None:
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+
+        session = manager.get_or_open("manip")
+
+        assert session.save_blockers == frozenset()
+        assert session.backend == "file"
+
+    def test_a_blocked_workbook_carries_its_blockers_but_opens_on_file_for_a_read(
+        self, tmp_path: Path
+    ) -> None:
+        real = workbook_with_external_link(tmp_path / "real" / "linking.xlsx")
+        workbooks = {"linking": WorkbookRef(name="linking", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+
+        session = manager.get_or_open("linking", capability="file", writes=False)
+
+        assert session.save_blockers == frozenset(
+            {SaveBlocker.OUTBOUND_EXTERNAL_LINKS}
+        )
+        assert session.backend == "file"
+
+    def test_blockers_are_read_from_the_template_for_a_workbook_created_this_run(
+        self, tmp_path: Path
+    ) -> None:
+        """Inspection happens on the scratch copy, *after* create-from-template — so a
+        template's inherited links are seen on the very first run (plan W2)."""
+        template = workbook_with_external_link(tmp_path / "real" / "template.xlsx")
+        workbooks = {
+            "template": WorkbookRef(name="template", file=str(template)),
+            "report": WorkbookRef(
+                name="report",
+                file=str(tmp_path / "real" / "report.xlsx"),
+                create_if_missing=True,
+                template="template",
+            ),
+        }
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+
+        session = manager.get_or_open("report")
+
+        assert session.save_blockers == frozenset(
+            {SaveBlocker.OUTBOUND_EXTERNAL_LINKS}
+        )
+
+
+class TestSaveSessionGuard:
+    """openpyxl must never be the thing that writes a blocker-bearing workbook back to disk
+    (docs/backend_eligibility_build_plan.md W4). Verified empirically: a zero-edit
+    load-and-save of a link-bearing workbook produced a file Excel refused to open at all.
+    """
+
+    def test_saving_a_blocked_session_on_the_file_backend_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        real = workbook_with_external_link(tmp_path / "real" / "linking.xlsx")
+        workbooks = {"linking": WorkbookRef(name="linking", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+        session = manager.get_or_open("linking", capability="file", writes=False)
+
+        with pytest.raises(ActionExecutionError) as excinfo:
+            manager._save_session(session)
+
+        assert "openpyxl cannot save it" in excinfo.value.detail.message
+
+    def test_saving_an_unblocked_session_on_the_file_backend_works_normally(
+        self, tmp_path: Path
+    ) -> None:
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+        session = manager.get_or_open("manip")
+        session.handle["Sheet"]["A1"] = "changed"
+        session.dirty = True
+
+        manager._save_session(session)
+
+        assert session.dirty is False
+        assert openpyxl.load_workbook(session.path)["Sheet"]["A1"].value == "changed"
+
+
+class TestAuditEvents:
+    """Routing is invisible in the YAML by design, so the audit log has to explain it
+    (docs/backend_eligibility_build_plan.md W8)."""
+
+    def test_opening_a_workbook_records_its_backend_and_blockers(
+        self, tmp_path: Path
+    ) -> None:
+        real = workbook_with_external_link(tmp_path / "real" / "linking.xlsx")
+        workbooks = {"linking": WorkbookRef(name="linking", file=str(real))}
+        events: list[tuple[str, dict[str, object]]] = []
+        manager = SessionManager(
+            workbooks,
+            ScratchManager(tmp_path / "working"),
+            audit=lambda event, detail: events.append((event, detail)),
+        )
+
+        manager.get_or_open("linking")
+
+        assert events == [
+            (
+                "workbook_opened",
+                {
+                    "workbook": "linking",
+                    "mode": "read_write",
+                    "backend": "file",
+                    "save_blockers": ["outbound_external_links"],
+                },
+            )
+        ]
+
+    def test_an_unblocked_workbook_records_an_empty_blocker_list(
+        self, tmp_path: Path
+    ) -> None:
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        events: list[tuple[str, dict[str, object]]] = []
+        manager = SessionManager(
+            workbooks,
+            ScratchManager(tmp_path / "working"),
+            audit=lambda event, detail: events.append((event, detail)),
+        )
+
+        manager.get_or_open("manip")
+
+        assert events[0][1]["save_blockers"] == []
+
+    def test_a_manager_with_no_audit_sink_simply_does_not_record(
+        self, tmp_path: Path
+    ) -> None:
+        """The sink is optional — SessionManager is usable standalone, as its own tests do."""
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+
+        manager.get_or_open("manip")  # must not raise
+
+
 class TestCapabilityBackendMatch:
     def test_matching_capability_returns_the_session_normally(
         self, tmp_path: Path
@@ -307,6 +504,75 @@ class TestBackendSwitching:
         manager.get_or_open("manip", capability="file")
 
         manager.close_all()  # should not raise, nothing xlw-related was ever spawned
+
+
+@requires_excel
+class TestPromotionOfBlockedWorkbooks:
+    """End-to-end promotion through get_or_open, against a real Excel instance
+    (docs/backend_eligibility_build_plan.md W3). This is the whole point of the build: a
+    workbook with outbound external links gets handled by Excel from its first write onward,
+    without the workflow author asking for it.
+    """
+
+    def test_first_write_promotes_a_blocked_session_to_xlw(self, tmp_path: Path) -> None:
+        real = workbook_with_external_link(tmp_path / "real" / "linking.xlsx")
+        workbooks = {"linking": WorkbookRef(name="linking", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+
+        try:
+            session = manager.get_or_open("linking", capability="file", writes=False)
+            assert session.backend == "file"
+
+            promoted = manager.get_or_open("linking", capability="file", writes=True)
+            assert promoted is session
+            assert promoted.backend == "xlw"
+        finally:
+            manager.close_all()
+
+    def test_promotion_survives_a_later_read(self, tmp_path: Path) -> None:
+        real = workbook_with_external_link(tmp_path / "real" / "linking.xlsx")
+        workbooks = {"linking": WorkbookRef(name="linking", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+
+        try:
+            manager.get_or_open("linking", capability="file", writes=True)
+            session = manager.get_or_open("linking", capability="file", writes=False)
+            assert session.backend == "xlw"
+        finally:
+            manager.close_all()
+
+    def test_demoting_a_blocked_read_write_session_back_to_file_is_refused(
+        self, tmp_path: Path
+    ) -> None:
+        real = workbook_with_external_link(tmp_path / "real" / "linking.xlsx")
+        workbooks = {"linking": WorkbookRef(name="linking", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+
+        try:
+            session = manager.get_or_open("linking", capability="xlw")
+            with pytest.raises(ActionExecutionError) as excinfo:
+                manager._switch_backend(session, "file")
+            assert "cannot be moved back to the openpyxl backend" in (
+                excinfo.value.detail.message
+            )
+        finally:
+            manager.close_all()
+
+    def test_a_blocked_read_only_session_may_still_be_demoted(
+        self, tmp_path: Path
+    ) -> None:
+        """Nothing ever saves a read_only session, so the links cannot be harmed — and file is
+        the faster backend to sit on once Excel is no longer required."""
+        real = workbook_with_external_link(tmp_path / "real" / "linking.xlsx")
+        workbooks = {"linking": WorkbookRef(name="linking", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+
+        try:
+            session = manager.get_or_open("linking", mode="read_only", capability="xlw")
+            manager._switch_backend(session, "file")
+            assert session.backend == "file"
+        finally:
+            manager.close_all()
 
         assert manager._owned_instances.pids == ()
 
