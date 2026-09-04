@@ -31,6 +31,12 @@ workbooks:
     file: "{{ env.demo_folder }}/report.xlsx"
     create_if_missing: true
     template: report_original
+  linked_original:
+    file: "{{ env.demo_folder }}/linked_workbook/originals/linked.xlsx"
+  linked_workbook:
+    file: "{{ env.demo_folder }}/linked_workbook/linked.xlsx"
+    create_if_missing: true
+    template: linked_original
 
 steps:
   # --- discover catalog's structure (no `open` step for catalog — implicit open here) ---
@@ -90,6 +96,37 @@ steps:
     workbook: catalog
     sheet: "Products"
     range: "GrandTotalName"   # defined name, single cell — read directly, no read_metadata detour
+
+  # a genuinely 2D capture (5 rows x 4 columns, header row included) — shows up in
+  # steps_dump.json as a nested list, and write_summary_block below indexes into it by
+  # [row][col] to pull the Widget row's product name back out, proving it's real structured
+  # data, not just a flat list.
+  - id: read_products_table
+    action: read_range
+    workbook: catalog
+    sheet: "Products"
+    range: "A1:D6"
+
+  # --- a genuine R4 (absolute-path) external link, opened before any recalculate happens ---
+  # linked_workbook/originals/linked.xlsx already has a real Excel-authored external link to
+  # catalog.xlsx (built by generate_linked_workbook_fixture.py — see that file for why it's
+  # not a plain checked-in template like every other originals/*.xlsx here). Opening it now,
+  # while catalog is already staged, is what triggers engine.SessionManager's staging-time
+  # link rewire (_wire_r4_links_touching): its link gets repointed from catalog's real path
+  # to catalog's *scratch* copy, so anything that reads it below sees this run's in-progress
+  # catalog data, not catalog.xlsx's last-committed state.
+  - id: open_linked_workbook
+    action: open
+    workbook: linked_workbook
+
+  # a write action is what makes linked_workbook write-intent (engine.plan's static scan) —
+  # without this, discover_write_intent_link_graph would never scan its file for links at all.
+  - id: write_linked_workbook_label
+    action: write_cell
+    workbook: linked_workbook
+    sheet: "Sheet1"
+    cell: "B1"
+    value: "Linked via a genuine R4 external link to catalog.xlsx"
 
   # --- report opens explicitly (contrast with catalog's implicit open above) ---
 
@@ -170,6 +207,7 @@ steps:
     values:
       - ["Field", "Meaning"]
       - ["Total", "Price x Quantity"]
+      - ["Widget row (2D capture)", "{{ steps.read_products_table.output.values[steps.find_widget_row.output.row - 1][0] }}"]
 
   - id: write_summary_row_by_name
     action: write_row
@@ -214,6 +252,15 @@ steps:
     workbook: report
     scope: all
     mode: full_rebuild
+
+  # confirms the R4 rewire took hold: linked_workbook's external-link formula (A1) still
+  # reads correctly after `scope: all`'s full rebuild, against catalog's *scratch* GrandTotal
+  # — read_named_grand_total (above) is the known-good value this should match.
+  - id: read_linked_workbook_value
+    action: read_range
+    workbook: linked_workbook
+    sheet: "Sheet1"
+    range: "A1"
 
   - id: save_report
     action: save

@@ -262,7 +262,7 @@ one pretty-printed JSON object — regardless of whether a `dump` step is used.
 
 #### `copy`
 
-Copies a range — or the whole sheet, if `range` is omitted — from one workbook into another.
+Copies a range — or the whole sheet, if `range` is omitted — from one workbook into another. This loads Excel so it is the same as copy and paste.
 
 | Field | Required | Notes |
 |---|---|---|

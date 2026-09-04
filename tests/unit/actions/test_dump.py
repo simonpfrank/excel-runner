@@ -24,7 +24,9 @@ class TestDumpAction:
         assert result.status == "success"
         assert result.output == {}
 
-    def test_prints_every_step_by_default(self, capsys: pytest.CaptureFixture[str]) -> None:
+    def test_prints_every_step_by_default(
+        self, capsys: pytest.CaptureFixture[str]
+    ) -> None:
         dump_action(step_outputs=_STEP_OUTPUTS)
         printed = capsys.readouterr().out
         assert '"a"' in printed

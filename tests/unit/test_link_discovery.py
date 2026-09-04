@@ -34,6 +34,16 @@ class TestClassifyLinkTarget:
     def test_file_uri_is_absolute(self) -> None:
         assert classify_link_target("file:///C:/data/target.xlsx") == "absolute"
 
+    def test_driveless_rooted_path_is_absolute(self) -> None:
+        # What real Excel actually writes for a genuine external link to a file on the *same
+        # drive* as the linking workbook — drive letter omitted, but still a real absolute
+        # link (R3/R4), not same-folder/relative — confirmed via a real Excel-authored fixture
+        # (TestScanExternalLinkTargets.test_finds_a_same_drive_absolute_link_target below).
+        assert (
+            classify_link_target("/Dev/projects/excel-runner/demos/target.xlsx")
+            == "absolute"
+        )
+
 
 class TestResolveLinkTarget:
     def test_same_folder_target_resolves_against_linking_workbooks_folder(
@@ -114,6 +124,47 @@ class TestScanExternalLinkTargets:
             targets = scan_external_link_targets(tmp_path / "linking.xlsx")
 
             assert targets == ["other/target2.xlsx"]
+        finally:
+            registry.close_owned()
+
+    def test_finds_a_same_drive_absolute_link_target(self, tmp_path: Path) -> None:
+        # Typing the absolute path directly (rather than same-folder + ChangeLink) is
+        # deliberate: Excel silently re-normalizes a ChangeLink'd target back to same-folder
+        # when both files happen to sit in the same folder at ChangeLink time.
+        (tmp_path / "linking_dir").mkdir()
+        registry = OwnedInstanceRegistry()
+        app = registry.spawn()
+        try:
+            target = app.books.add()
+            target.sheets[0].range("A1").value = 9
+            target.save(str(tmp_path / "target.xlsx"))
+            target.close()
+
+            linking = app.books.add()
+            linking.sheets[0].range(
+                "A1"
+            ).formula = f"='{tmp_path}\\[target.xlsx]Sheet1'!A1*2"
+            linking.save(str(tmp_path / "linking_dir" / "linking.xlsx"))
+            linking.close()
+
+            targets = scan_external_link_targets(
+                tmp_path / "linking_dir" / "linking.xlsx"
+            )
+
+            # Excel writes two Target relationships for one same-drive absolute link: a
+            # relative fallback (ignored — classifies as relative_subpath, R2) and the real
+            # drive-omitted-rooted absolute one (R3/R4) that discover_write_intent_link_graph
+            # actually keys off of.
+            absolute_targets = [
+                t for t in targets if classify_link_target(t) == "absolute"
+            ]
+            assert len(absolute_targets) == 1
+            assert (
+                resolve_link_target(
+                    absolute_targets[0], tmp_path / "linking_dir" / "linking.xlsx"
+                )
+                == (tmp_path / "target.xlsx").resolve()
+            )
         finally:
             registry.close_owned()
 

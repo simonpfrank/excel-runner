@@ -115,6 +115,7 @@ def _first_line(docstring: str) -> str:
 
 
 _UNC_OR_DRIVE_ABSOLUTE = re.compile(r"^([a-zA-Z]:[\\/]|\\\\|//)")
+_DRIVELESS_ROOTED = re.compile(r"^/(?!/)")
 
 
 def classify_link_target(
@@ -129,12 +130,18 @@ def classify_link_target(
     Returns:
         `"same_folder"` (R1 — a bare filename, no path separator at all), `"relative_subpath"`
         (R2, backlog/unsupported — relative but not same-folder, e.g. `"other/x.xlsx"` or
-        `"../x.xlsx"`), or `"absolute"` (R3/R4 — a drive-letter path, a UNC path, or a
-        `file://` URI).
+        `"../x.xlsx"`), or `"absolute"` (R3/R4 — a drive-letter path, a UNC path, a `file://`
+        URI, or a drive-omitted rooted path like `"/Users/x/target.xlsx"` — what real Excel
+        actually writes for a link to a file on the *same drive* as the linking workbook,
+        confirmed via a real Excel-authored fixture; `resolve_link_target`'s existing
+        parent-join fallback already resolves this form correctly, re-rooted onto the linking
+        workbook's own drive).
     """
     if target.startswith("file://"):
         return "absolute"
     if _UNC_OR_DRIVE_ABSOLUTE.match(target):
+        return "absolute"
+    if _DRIVELESS_ROOTED.match(target):
         return "absolute"
     if "/" in target or "\\" in target:
         return "relative_subpath"
@@ -1311,7 +1318,8 @@ def _sheet_candidates(value: Any) -> list[str]:
 
 def _resolve_check_path(name: str, workflow: Workflow) -> Path | None:
     """The real file to open read-only for `name`'s existence checks, or None if there isn't
-    one yet (a fresh `create_if_missing` workbook with no template \u2014 nothing to check)."""
+    one yet (a fresh `create_if_missing` workbook with no template \u2014 nothing to check).
+    """
     ref = workflow.workbooks[name]
     direct = Path(ref.file)
     if direct.exists():
@@ -1416,7 +1424,9 @@ def _check_range_field_existence(
         value = step.params.get(field)
         candidates = value if isinstance(value, list) else [value]
         for candidate in candidates:
-            if not isinstance(candidate, str) or is_whole_template_expression(candidate):
+            if not isinstance(candidate, str) or is_whole_template_expression(
+                candidate
+            ):
                 continue
             if _looks_like_a1(candidate):
                 continue

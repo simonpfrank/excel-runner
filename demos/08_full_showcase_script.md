@@ -77,6 +77,14 @@ both workbooks' formulas together, including one that depends on the other.
   read directly — no `read_metadata` detour needed for a single-cell named range)
   - This becomes the "known-good expected total" the validate workflow checks the rebuilt
     total against later.
+- **`read_products_table`** — `read_range`, `range: "A1:D6"` (the whole table, header row
+  included — 5 rows x 4 columns)
+  - A genuinely 2D capture: `output.values` in `steps_dump.json` is a nested list
+    (`values[row][col]`), not a flat list — `read_totals_as_values` above only ever reads a
+    single column, so it doesn't show this shape. `write_summary_block` (below) indexes into
+    it directly (`values[find_widget_row.output.row - 1][0]`) to pull the Widget row's product
+    name back out, demonstrating `{{ }}`'s Jinja2 list-indexing/arithmetic against a captured
+    2D step output, not just its scalar/1D outputs.
 - **`recalculate_catalog`** — `recalculate`, `workbook: catalog`, `scope: workbook`
   - Makes sure `catalog`'s formulas (including `GrandTotalName`) are fresh before anything
     reads from or copies it.
@@ -106,8 +114,11 @@ both workbooks' formulas together, including one that depends on the other.
   - A brand-new formula written after the copy, proving the copied formulas and a fresh
     formula recalculate together correctly later.
 - **`write_summary_block`** — `write_range` on `report`/"Summary", a small two-column legend
-  (plain values, e.g. `[["Field", "Meaning"], ["Total", "Price × Quantity"]]`)
-  - The plain multi-cell `write_range` example.
+  (plain values, e.g. `[["Field", "Meaning"], ["Total", "Price × Quantity"]]`), plus a third
+  row whose value is `{{ steps.read_products_table.output.values[steps.find_widget_row.output.row - 1][0] }}`
+  - The plain multi-cell `write_range` example, extended to also show a 2D step output being
+    indexed by `[row][col]` from inside a template expression — see `read_products_table`
+    above.
 - **`write_summary_row_by_name`** — `write_row`, dict mode, a "Generated" label row
   - Dict-mode `write_row` example.
 - **`write_summary_row_positional`** — `write_row`, list mode with `start_column`

@@ -13,9 +13,7 @@ from excel_runner import engine as validation
 from excel_runner.core import Step, ValidationError, WorkbookRef, Workflow
 
 
-def _workflow(
-    steps: list[Step], workbooks: dict[str, WorkbookRef]
-) -> Workflow:
+def _workflow(steps: list[Step], workbooks: dict[str, WorkbookRef]) -> Workflow:
     return Workflow(env={}, workbooks=workbooks, steps=tuple(steps))
 
 
@@ -28,9 +26,7 @@ def workbook_path(tmp_path: Path) -> Path:
     sheet.title = "Products"
     sheet["A1"] = "Header"
     workbook.defined_names.add(
-        openpyxl.workbook.defined_name.DefinedName(
-            "MyRange", attr_text="Products!$A$1"
-        )
+        openpyxl.workbook.defined_name.DefinedName("MyRange", attr_text="Products!$A$1")
     )
     workbook.save(path)
     return path
@@ -88,7 +84,11 @@ class TestSheetExistence:
                 Step(
                     id="s1",
                     action="read_range",
-                    params={"workbook": "wb", "sheet": "Products", "range": "NoSuchName"},
+                    params={
+                        "workbook": "wb",
+                        "sheet": "Products",
+                        "range": "NoSuchName",
+                    },
                 )
             ],
             {"wb": WorkbookRef(name="wb", file=str(workbook_path))},
@@ -110,7 +110,9 @@ class TestSheetExistence:
         )
         validation.validate_existence(workflow)  # should not raise
 
-    def test_create_sheet_satisfies_a_later_reference(self, workbook_path: Path) -> None:
+    def test_create_sheet_satisfies_a_later_reference(
+        self, workbook_path: Path
+    ) -> None:
         workflow = _workflow(
             [
                 Step(
@@ -191,7 +193,9 @@ class TestSheetExistence:
             ],
             {"wb": WorkbookRef(name="wb", file=str(workbook_path))},
         )
-        validation.validate_existence(workflow)  # should not raise — can't know statically
+        validation.validate_existence(
+            workflow
+        )  # should not raise — can't know statically
 
     def test_nonexistent_workbook_file_is_skipped_entirely(self) -> None:
         workflow = _workflow(
@@ -208,9 +212,13 @@ class TestSheetExistence:
                 )
             },
         )
-        validation.validate_existence(workflow)  # should not raise — nothing to check yet
+        validation.validate_existence(
+            workflow
+        )  # should not raise — nothing to check yet
 
-    def test_copy_checks_both_source_and_target_sheets(self, workbook_path: Path) -> None:
+    def test_copy_checks_both_source_and_target_sheets(
+        self, workbook_path: Path
+    ) -> None:
         workflow = _workflow(
             [
                 Step(

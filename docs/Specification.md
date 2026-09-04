@@ -395,6 +395,38 @@ dict the decorators populate) rather than by stamping an attribute onto the func
 keeps mypy --strict clean (no dynamic-attribute `type: ignore` noise) and keeps registration
 trivially introspectable for `engine.py`'s `discover_actions()` (§5.1).
 
+### 4.0 Backend eligibility — which implementations an action must have — **rule, not yet implemented**
+
+A capability tag says which backend an action *needs*. It does not say which backends it must
+*work on*. Conflating the two is what left nine write actions (`save`, `write_cell`,
+`write_range`, `write_row`, `insert_range`, `set_column_width`, `create_sheet`, `rename_sheet`,
+`delete_sheet`) with an openpyxl implementation only.
+
+Governing constraint (evidence: `docs/link_gaps_andaction_plan.md`): openpyxl cannot safely save
+every workbook. Where it can't, the workbook is promoted to `xlw` and **stays** there for the
+rest of the run (§5.2). So any action that can be applied to a promoted workbook must have an
+`xlw` implementation, or the run dead-ends.
+
+**Apply this procedure whenever an action is added or changed:**
+
+1. No `workbook:` param → `none`. No backend implementations.
+2. Always needs Excel's engine (recalc, macros, live link refresh) → `xlw` only, no file twin.
+3. Otherwise → **`file` and `xlw` twins, both mandatory.**
+4. Any part with no portable xlwings call → `com` for that part. Windows-only; the macOS
+   behaviour must be stated in the docstring.
+
+For rule-3 actions the file twin runs when the session is `read_only` (a read-only session is
+never saved, so it cannot be corrupted, and openpyxl is faster) or when the workbook's blocker
+set is empty (§5.2). Otherwise the xlw twin runs.
+
+This qualifies the paragraph above: backend choice is still never the *author's* decision, but
+for rule-3 actions it is no longer fixed once by the capability tag — it resolves per-call from
+the session's current backend.
+
+Two implementations of one action name must agree forever, and only one of them is testable
+without Excel. Cover them with **contract tests** — a single test body parameterised over both
+backends — not two separate test files.
+
 **The 5 built actions have a deliberately reduced param surface vs. the full PRD §7 catalog**,
 each documented in its own docstring: `open` omits `update_links` (no effect without a live
 Excel session — xlwings, a later phase) and a `mode` override (depends on read/write inference that
@@ -666,6 +698,38 @@ will hold one registry per run, spawning its single shared App lazily on the fir
 request, not one App per workbook. `close_all()` (below) will need to additionally call
 `self._xlw_registry.close_owned()` once this exists. Needs a live Excel instance to build and
 verify for real — paused per the user's request (2026-08-20), see `docs/Progress_Tracker.md`.
+
+> **Stale as of 2026-09-04**: `_switch_backend` *is* built (`engine.py`, save-if-dirty → close
+> → reopen, both directions). The two paragraphs above predate it and need rewriting.
+
+#### 5.2.1 Save blockers and sticky promotion — **rule, not yet implemented**
+
+openpyxl cannot safely save every workbook. Inspection therefore answers *"what stops openpyxl
+saving this file safely?"* and returns a **set of named blockers**, never a boolean:
+
+- **Empty set** → the `file` backend is used as normal.
+- **Non-empty** → the session is promoted to `xlw` on its first write, and **stays on `xlw` for
+  the rest of the run**. `_switch_backend` must refuse an `xlw` → `file` demotion for such a
+  session: the demotion itself is harmless, but the next file-backend write would corrupt the
+  workbook. This is what forces the twin requirement in §4.0.
+
+Promoting on the *first write* rather than at open keeps PRD §1's "only pay for a live Excel
+session where the work genuinely requires it" — and the workbook is provably clean at that
+moment, so the openpyxl save inside `_switch_backend` cannot fire on this path.
+
+A `read_only` session is never saved and so is never promoted, whatever its blockers.
+
+**Blockers are added only when empirically verified.** One member today: outbound external
+links (evidence: `docs/link_gaps_andaction_plan.md`). openpyxl damaging charts is an untested
+rumour and is deliberately *not* a member — the set is designed to be extended, not
+pre-populated with guesses.
+
+The blocker set goes in the run's audit record, so a run that was slower than expected can be
+explained.
+
+Detection must inspect the `template:` when the target file does not exist yet, or a
+template-borne blocker is missed on the workbook's first run.
+
 
 **`create_if_missing`/`template` resolution lives in `SessionManager._create()`**, called from
 both the read-write and read-only open paths when the target file doesn't exist yet. `template`
