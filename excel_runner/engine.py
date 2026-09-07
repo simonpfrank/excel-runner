@@ -1073,6 +1073,29 @@ class SessionManager:
             order=self._commit_order, before_commit=self._revert_r4_links_before_commit
         )
 
+    def forget_session(self, name: str) -> None:
+        """Stop tracking `name`'s session, without touching its handle.
+
+        Call this once something else has already closed the handle — currently only the
+        `close` action (Spec sec 6.9 — every other action leaves closing to `close_all()` at
+        end of run). Without this, `close_all()` still iterates every session it has ever
+        opened and tries to close each one again: against the file backend that second close
+        is a harmless no-op (`openpyxl.Workbook.close()` tolerates it), but against a live
+        Excel (`xlw`) session the underlying COM object is already disconnected, and the
+        second close raises `pywintypes.com_error` — wrapped by `backends._excel_operation`
+        into an `ActionExecutionError`, which `close_all()` collects into an `ExceptionGroup`
+        and re-raises, aborting the run even though every real step already succeeded.
+
+        Also drops any `_wired_r4_links` entries mentioning `name`: if a workbook by this name
+        is opened again later in the same run, its R4 link wiring must be redone against the
+        new session, not skipped as "already wired" against a session that no longer exists.
+
+        Args:
+            name: The workbook's logical name, as tracked by `get_or_open`.
+        """
+        self._sessions.pop(name, None)
+        self._wired_r4_links = {pair for pair in self._wired_r4_links if name not in pair}
+
     def close_all(self) -> None:
         """Close every open session, then quit the shared owned Excel instance (if one was ever
         spawned), attempting all of it even if some steps fail.

@@ -687,6 +687,74 @@ class TestCloseAll:
         assert closed_b is True
 
 
+class TestForgetSession:
+    """Something else (the `close` action, via `runner._dispatch`) has already closed the
+    handle; `forget_session` must stop `close_all()` from trying again. A second close is
+    harmless against the file backend, but fatal against a live Excel (xlw) session — this is
+    what actually matters and what the fake handle below reproduces without needing Excel."""
+
+    def test_a_forgotten_session_is_not_closed_again_by_close_all(
+        self, tmp_path: Path
+    ) -> None:
+        class _ExplodesOnSecondClose:
+            def __init__(self) -> None:
+                self.closed = False
+
+            def close(self) -> None:
+                if self.closed:
+                    raise RuntimeError("second close — simulated disconnected COM object")
+                self.closed = True
+
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+        manager._sessions["manip"] = WorkbookSession(
+            name="manip",
+            backend="file",
+            handle=_ExplodesOnSecondClose(),
+            path=str(real),
+            mode="read_write",
+        )
+        manager._sessions["manip"].handle.close()  # simulates the close action's own call
+
+        manager.forget_session("manip")
+
+        manager.close_all()  # must not raise, and must not re-close the handle
+
+    def test_forgetting_an_unknown_name_does_not_raise(self, tmp_path: Path) -> None:
+        manager = SessionManager({}, ScratchManager(tmp_path / "working"))
+
+        manager.forget_session("never_opened")  # must not raise
+
+    def test_forgetting_drops_wired_r4_link_state_for_that_name(
+        self, tmp_path: Path
+    ) -> None:
+        """So a workbook opened again later under the same name gets its R4 link wiring
+        redone against the new session, rather than being skipped as "already wired" against
+        a session that no longer exists."""
+        manager = SessionManager({}, ScratchManager(tmp_path / "working"))
+        manager._wired_r4_links.add(("linking", "target"))
+        manager._wired_r4_links.add(("other_source", "other_target"))
+
+        manager.forget_session("linking")
+
+        assert ("linking", "target") not in manager._wired_r4_links
+        assert ("other_source", "other_target") in manager._wired_r4_links
+
+    def test_a_session_reopened_after_being_forgotten_opens_fresh(
+        self, tmp_path: Path
+    ) -> None:
+        real = _write_workbook(tmp_path / "real" / "manip.xlsx")
+        workbooks = {"manip": WorkbookRef(name="manip", file=str(real))}
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+        first = manager.get_or_open("manip")
+
+        manager.forget_session("manip")
+        second = manager.get_or_open("manip")
+
+        assert second is not first
+
+
 class TestCheckpoint:
     """checkpoint() persists in-progress writes to the scratch file mid-run, so a later crash
     leaves everything that succeeded so far visible in the recovery artifact (PRD sec 6.3.1) —

@@ -18,6 +18,24 @@ still aren't built (see [Not yet available](#not-yet-available)).
 
 ## Changelog
 
+- **2026-09-07**: Every `xlw_`/`com_` backend call is now wrapped in a structured error
+  boundary (`backends._excel_operation`) — a live Excel/COM failure surfaces as
+  `ActionExecutionError` with a readable message instead of a raw traceback; `ValueError`/
+  `NotImplementedError` guards shared by both backend twins, plus `FileNotFoundError`/
+  `TimeoutError`, still pass through unwrapped. `cli.main` also gained a catch-all so no
+  unexpected exception can escape as a traceback. Fixed a real silent-corruption bug: opening
+  an `.xlsm` for writing now sets `keep_vba` so saving no longer drops its VBA project;
+  gated by file extension so a plain `.xlsx` doesn't get mislabelled macro-enabled. See
+  [`demos/08_full_showcase/README.md`](demos/08_full_showcase/README.md) for the full-showcase
+  demo's own docs (previously undocumented beyond a build-planning script).
+- **2026-09-07**: Fixed a double-close bug in session teardown: an explicit `close` action
+  step left `SessionManager` still tracking that session, so `close_all()`'s end-of-run
+  cleanup tried to close it a second time — harmless against the file backend, but a fatal
+  `pywintypes.com_error` against a live Excel (`xlw`) session, since the COM object was
+  already disconnected. This surfaced as an `ExceptionGroup` and a non-zero exit code even
+  though every real step had already succeeded. `SessionManager.forget_session()` is now
+  called after a successful `close` action so `close_all()` never revisits it.
+
 - **2026-09-03**: Added a third, opt-in validation tier — `--check-existence` (CLI) /
   `run_workflow(..., check_existence=True)` (library) opens every referenced workbook
   read-only via openpyxl, before any session/scratch machinery, and confirms every sheet and

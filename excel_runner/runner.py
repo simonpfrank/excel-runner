@@ -180,7 +180,15 @@ def _dispatch(
         writes=registry[step.action].writes,
     )
     kwargs = {key: value for key, value in resolved.items() if key != "workbook"}
-    return registry[step.action].fn(session=session, **kwargs)
+    result = registry[step.action].fn(session=session, **kwargs)
+    if step.action == "close" and result.status == "success":
+        # The action just closed the real handle. Without telling the manager, `close_all()`
+        # at end of run would still try to close this same session again — harmless for the
+        # file backend, but a second close of a live Excel (xlw) session raises a COM error
+        # and aborts the run even though every step already succeeded (see
+        # SessionManager.forget_session's docstring).
+        session_manager.forget_session(workbook_name)
+    return result
 
 
 def run_workflow(
