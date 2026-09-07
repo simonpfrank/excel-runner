@@ -107,3 +107,8 @@ backends._FindRow.__call__
 # xlwings' own writable property, assigned by `backends.xlw_set_column_width` and never read
 # back by our code — same situation as `Worksheet.title` above.
 backends.xw.Range.column_width
+
+# Tag stamped on every function `backends._excel_operation` wraps. Nothing in the source reads
+# it; it exists so tests/unit/test_excel_error_handling.py can walk the module and prove no
+# `xlw_`/`com_` function slipped past the error boundary.
+backends._excel_operation.__excel_operation__

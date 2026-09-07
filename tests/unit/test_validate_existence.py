@@ -290,7 +290,8 @@ class TestSupportedLinkLayout:
     def test_absolute_link_is_accepted(self, tmp_path: Path) -> None:
         """R3/R4 point at a fixed location that staging never moves, so they stay valid."""
         path = workbook_with_external_link(
-            tmp_path / "linking.xlsx", target=str(tmp_path / "elsewhere" / "prices.xlsx")
+            tmp_path / "linking.xlsx",
+            target=str(tmp_path / "elsewhere" / "prices.xlsx"),
         )
         workflow = _workflow(
             [

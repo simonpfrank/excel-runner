@@ -206,9 +206,7 @@ class TestNeededBackendWithSaveBlockers:
         """A read_only session is never saved, so it can never be corrupted — and file is the
         faster path."""
         assert (
-            engine._needed_backend(
-                "file", self._BLOCKED, writes=True, mode="read_only"
-            )
+            engine._needed_backend("file", self._BLOCKED, writes=True, mode="read_only")
             == "file"
         )
 
@@ -243,9 +241,7 @@ class TestSessionSaveBlockers:
 
         session = manager.get_or_open("linking", capability="file", writes=False)
 
-        assert session.save_blockers == frozenset(
-            {SaveBlocker.OUTBOUND_EXTERNAL_LINKS}
-        )
+        assert session.save_blockers == frozenset({SaveBlocker.OUTBOUND_EXTERNAL_LINKS})
         assert session.backend == "file"
 
     def test_blockers_are_read_from_the_template_for_a_workbook_created_this_run(
@@ -267,9 +263,7 @@ class TestSessionSaveBlockers:
 
         session = manager.get_or_open("report")
 
-        assert session.save_blockers == frozenset(
-            {SaveBlocker.OUTBOUND_EXTERNAL_LINKS}
-        )
+        assert session.save_blockers == frozenset({SaveBlocker.OUTBOUND_EXTERNAL_LINKS})
 
 
 class TestSaveSessionGuard:
@@ -514,7 +508,9 @@ class TestPromotionOfBlockedWorkbooks:
     without the workflow author asking for it.
     """
 
-    def test_first_write_promotes_a_blocked_session_to_xlw(self, tmp_path: Path) -> None:
+    def test_first_write_promotes_a_blocked_session_to_xlw(
+        self, tmp_path: Path
+    ) -> None:
         real = workbook_with_external_link(tmp_path / "real" / "linking.xlsx")
         workbooks = {"linking": WorkbookRef(name="linking", file=str(real))}
         manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))

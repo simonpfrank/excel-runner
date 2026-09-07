@@ -146,6 +146,19 @@ def main(argv: list[str] | None = None) -> int:
     except ExcelRunnerError as exc:
         logger.error(exc.detail.message)
         return 1
+    except Exception as exc:  # noqa: BLE001  # pylint: disable=broad-exception-caught
+        # Nothing unexpected should reach here: backends._excel_operation turns live-Excel
+        # failures into ExcelRunnerError, and every other failure mode is already structured.
+        # This exists so that if something ever does slip through, the user gets a one-line
+        # error and exit 1 rather than a raw traceback — the full stack still reaches the log
+        # via exc_info for diagnosis.
+        logger.error(
+            "excel_runner failed unexpectedly: %s: %s",
+            type(exc).__name__,
+            exc,
+            exc_info=True,
+        )
+        return 1
 
     return 0 if result.status == "success" else 1
 

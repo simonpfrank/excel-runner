@@ -528,7 +528,9 @@ class TestAuditLog:
             working_dir=str(tmp_path),
         )
 
-        records = [json.loads(line) for line in result.audit_log_path.read_text().splitlines()]
+        records = [
+            json.loads(line) for line in result.audit_log_path.read_text().splitlines()
+        ]
         # The log also carries run-level events (workbook_opened, backend_switched — Spec
         # sec 6.2, docs/backend_eligibility_build_plan.md W8), so step records are selected by
         # key rather than by counting lines.

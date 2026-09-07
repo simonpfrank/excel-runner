@@ -73,7 +73,9 @@ def opened(request: pytest.FixtureRequest, tmp_path: Path) -> Iterator[Opened]:
     path = _fixture_workbook(tmp_path / "contract.xlsx")
     primitives = backends.primitives(backend)  # type: ignore[arg-type]
     if backend == "file":
-        yield Opened(backend, primitives, backends.open_workbook(str(path), mode="read_write"))
+        yield Opened(
+            backend, primitives, backends.open_workbook(str(path), mode="read_write")
+        )
         return
     registry = backends.OwnedInstanceRegistry()
     try:
@@ -96,7 +98,9 @@ class TestReadContract:
     def test_resolve_sheet_names_passes_an_explicit_list_through(
         self, opened: Opened
     ) -> None:
-        assert opened.primitives.resolve_sheet_names(opened.handle, ["Notes"]) == ["Notes"]
+        assert opened.primitives.resolve_sheet_names(opened.handle, ["Notes"]) == [
+            "Notes"
+        ]
 
     def test_resolve_sheet_names_filters_by_regex(self, opened: Opened) -> None:
         assert opened.primitives.resolve_sheet_names(
@@ -106,18 +110,24 @@ class TestReadContract:
     def test_resolve_range_expands_a_defined_name_to_its_own_sheet_and_cell(
         self, opened: Opened
     ) -> None:
-        assert opened.primitives.resolve_range(opened.handle, "Notes", "SouthAmount") == (
+        assert opened.primitives.resolve_range(
+            opened.handle, "Notes", "SouthAmount"
+        ) == (
             "Data",
             "B4",
         )
 
-    def test_resolve_range_passes_plain_a1_notation_through(self, opened: Opened) -> None:
+    def test_resolve_range_passes_plain_a1_notation_through(
+        self, opened: Opened
+    ) -> None:
         assert opened.primitives.resolve_range(opened.handle, "Data", "B3") == (
             "Data",
             "B3",
         )
 
-    def test_read_range_returns_a_scalar_for_a_single_cell(self, opened: Opened) -> None:
+    def test_read_range_returns_a_scalar_for_a_single_cell(
+        self, opened: Opened
+    ) -> None:
         assert opened.primitives.read_range(opened.handle, "Data", "B3") == 10
 
     def test_read_range_returns_a_2d_block_for_a_range(self, opened: Opened) -> None:
@@ -153,7 +163,9 @@ class TestWriteContract:
 
         assert opened.primitives.read_range(opened.handle, "Data", "B3") == 99
 
-    def test_write_range_anchors_on_the_top_left_cell_only(self, opened: Opened) -> None:
+    def test_write_range_anchors_on_the_top_left_cell_only(
+        self, opened: Opened
+    ) -> None:
         """The block's size comes from `values`, not from the extent of `range` (PRD sec 11
         item 8) — so a one-cell `range` still writes the whole block."""
         opened.primitives.write_range(
@@ -241,7 +253,9 @@ class TestInsertRangeContract:
 
         assert opened.primitives.read_range(opened.handle, "Data", "B3") == "North"
 
-    def test_whole_row_insert_shifts_existing_content_down(self, opened: Opened) -> None:
+    def test_whole_row_insert_shifts_existing_content_down(
+        self, opened: Opened
+    ) -> None:
         opened.primitives.insert_range(opened.handle, "Data", "3:3")
 
         assert opened.primitives.read_range(opened.handle, "Data", "A4") == "North"
@@ -282,20 +296,28 @@ class TestLookupContract:
         self, opened: Opened
     ) -> None:
         assert (
-            opened.primitives.find_row(opened.handle, "Data", "A", "Region", header_row=2)
+            opened.primitives.find_row(
+                opened.handle, "Data", "A", "Region", header_row=2
+            )
             is None
         )
 
-    def test_find_row_returns_none_when_the_value_is_absent(self, opened: Opened) -> None:
+    def test_find_row_returns_none_when_the_value_is_absent(
+        self, opened: Opened
+    ) -> None:
         assert opened.primitives.find_row(opened.handle, "Data", "A", "Nowhere") is None
 
     def test_find_column_matches_a_header_by_regex(self, opened: Opened) -> None:
-        assert opened.primitives.find_column(opened.handle, "Data", 2, "^Amount$") == "B"
+        assert (
+            opened.primitives.find_column(opened.handle, "Data", 2, "^Amount$") == "B"
+        )
 
     def test_find_column_returns_none_when_no_header_matches(
         self, opened: Opened
     ) -> None:
-        assert opened.primitives.find_column(opened.handle, "Data", 2, "Missing") is None
+        assert (
+            opened.primitives.find_column(opened.handle, "Data", 2, "Missing") is None
+        )
 
     def test_find_columns_omits_patterns_that_matched_nothing(
         self, opened: Opened

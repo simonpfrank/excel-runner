@@ -20,7 +20,9 @@ def _excel_available() -> bool:
     return sys.platform == "win32"
 
 
-requires_excel = pytest.mark.skipif(not _excel_available(), reason="requires a live Excel install")
+requires_excel = pytest.mark.skipif(
+    not _excel_available(), reason="requires a live Excel install"
+)
 
 requires_working_xlwings_save = pytest.mark.skipif(
     sys.platform != "win32",
@@ -71,5 +73,39 @@ def workbook_with_external_link(path: Path, target: str = "target.xlsx") -> Path
             "xl/externalLinks/_rels/externalLink1.xml.rels",
             _EXTERNAL_LINK_RELS.format(target=target),
         )
+    source.unlink()
+    return path
+
+
+VBA_PROJECT_PART = "xl/vbaProject.bin"
+
+_VBA_CONTENT_TYPE_DEFAULT = (
+    '<Default Extension="bin" ContentType="application/vnd.ms-office.vbaProject"/>'
+)
+
+
+def macro_enabled_workbook(path: Path) -> Path:
+    """A real .xlsm carrying an `xl/vbaProject.bin` part — the thing openpyxl silently drops
+    on save unless `load_workbook(keep_vba=True)` was used.
+
+    The .bin content is arbitrary bytes rather than a genuine compiled VBA project: openpyxl
+    never parses it, it only copies the part through verbatim (or fails to), so opaque bytes
+    exercise exactly the behaviour under test while keeping the fixture buildable without
+    Excel. What has to be real is the *packaging* — the part's name and the content-type
+    declaration — since that is all openpyxl looks at.
+
+    Args:
+        path: Where to write the workbook.
+    """
+    source = plain_workbook(path.with_name("_source_" + path.name))
+    with zipfile.ZipFile(source) as src, zipfile.ZipFile(path, "w") as dst:
+        for item in src.infolist():
+            data = src.read(item.filename)
+            if item.filename == "[Content_Types].xml":
+                data = data.replace(
+                    b"</Types>", _VBA_CONTENT_TYPE_DEFAULT.encode() + b"</Types>"
+                )
+            dst.writestr(item, data)
+        dst.writestr(VBA_PROJECT_PART, b"fake-compiled-vba-project")
     source.unlink()
     return path

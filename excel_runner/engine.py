@@ -814,7 +814,9 @@ class SessionManager:
             writes: Whether the dispatching action mutates the workbook.
         """
         real_path = Path(ref.file)
-        scratch_path = self._scratch.stage(name, real_path, writes=(mode == "read_write"))
+        scratch_path = self._scratch.stage(
+            name, real_path, writes=(mode == "read_write")
+        )
         if not scratch_path.exists():
             self._create(ref, scratch_path)
         blockers = inspect_save_blockers(scratch_path)
@@ -1539,7 +1541,9 @@ def _check_supported_link_layout(name: str, path: Path) -> None:
     except (OSError, zipfile.BadZipFile, ElementTree.ParseError):
         return  # not a readable OOXML package \u2014 load_workbook above already reported it
     unsupported = [
-        target for target in targets if classify_link_target(target) == "relative_subpath"
+        target
+        for target in targets
+        if classify_link_target(target) == "relative_subpath"
     ]
     if not unsupported:
         return

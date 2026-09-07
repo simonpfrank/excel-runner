@@ -493,7 +493,9 @@ def write_range(
     Returns:
         A success result with no meaningful output.
     """
-    backends.primitives(session.backend).write_range(session.handle, sheet, range, values)
+    backends.primitives(session.backend).write_range(
+        session.handle, sheet, range, values
+    )
     session.dirty = True
     return ActionResult(status="success", output={})
 

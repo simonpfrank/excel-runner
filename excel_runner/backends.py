@@ -13,13 +13,15 @@ that difference, which is exactly why it was chosen over raw `win32com` (PRD sec
   where actually needed.
 """
 
+import functools
 import logging
 import re
 import shutil
 import time
 from collections.abc import Callable
 from dataclasses import dataclass
-from typing import Any, Literal, Protocol
+from pathlib import Path
+from typing import Any, Literal, ParamSpec, Protocol, TypeVar
 
 import openpyxl
 import xlwings as xw
@@ -28,11 +30,124 @@ from openpyxl.cell.read_only import ReadOnlyCell
 from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.workbook.workbook import Workbook
 
+from excel_runner.core import ActionExecutionError, ErrorDetail, ExcelRunnerError
+
 logger = logging.getLogger(__name__)
 
 _SingleCell = (Cell, ReadOnlyCell)
 _WHOLE_COLUMN_RE = re.compile(r"^([A-Za-z]+):([A-Za-z]+)$")
 _WHOLE_ROW_RE = re.compile(r"^(\d+):(\d+)$")
+
+_P = ParamSpec("_P")
+_R = TypeVar("_R")
+
+# Exception types the primitives raise deliberately, as part of their own documented contract,
+# before or instead of reaching Excel — our structured errors, the argument guards shared by
+# both backend twins (`ValueError` for a duplicate/last sheet, `NotImplementedError` for a
+# partial-range insert), openpyxl's and xlwings' `FileNotFoundError`, and the `TimeoutError`
+# from `com_wait_until_calculation_done`. These already name the real problem, so wrapping
+# them would bury the useful part — and for the guards it would also break the promise that a
+# user cannot tell which backend they landed on from the error they get (PRD sec 11 item 12).
+# Anything else crossing the boundary came from Excel and gets translated.
+_ALREADY_PRECISE_ERRORS = (
+    ExcelRunnerError,
+    FileNotFoundError,
+    NotImplementedError,
+    TimeoutError,
+    ValueError,
+)
+
+
+def _excel_operation(
+    description: str,
+) -> Callable[[Callable[_P, _R]], Callable[_P, _R]]:
+    """Turn any failure from a live-Excel call into a structured `ActionExecutionError`.
+
+    Every `xlw_`/`com_` function is a foreign boundary: on the far side is Excel itself, which
+    signals failure with `pywintypes.com_error` — an opaque HRESULT tuple — or occasionally a
+    bare `KeyError`/`AttributeError` from xlwings' own collection lookups. None of those mean
+    anything to the person who wrote the workflow YAML.
+
+    This matters more than it looks. `runner.run_workflow` deliberately has no try/except
+    around step execution (its docstring: a raised exception is "a genuine authoring mistake"
+    and propagates), and `cli.main` only catches `ExcelRunnerError`. So an unwrapped Excel
+    failure escaped all the way out as a raw traceback — including from
+    `_revert_r4_links_before_commit`, which runs *during commit*, after every step has already
+    passed.
+
+    Catching broad `Exception` is deliberate and correct here, unlike anywhere else in this
+    codebase: the whole point of a boundary is that what crosses it can't be enumerated.
+
+    Args:
+        description: Plain-English name of the operation, phrased to read after "Excel could
+            not " — e.g. "open workbook", not "opening the workbook".
+
+    Returns:
+        A decorator preserving the wrapped function's exact signature, and tagging it with
+        `__excel_operation__` so tests can assert nothing slipped past the boundary.
+    """
+
+    def decorate(fn: Callable[_P, _R]) -> Callable[_P, _R]:
+        @functools.wraps(fn)
+        def guarded(*args: _P.args, **kwargs: _P.kwargs) -> _R:
+            try:
+                return fn(*args, **kwargs)
+            except _ALREADY_PRECISE_ERRORS:
+                raise
+            except Exception as exc:  # noqa: BLE001 - foreign boundary, see docstring
+                logger.debug("Excel call %r failed", description, exc_info=True)
+                raise ActionExecutionError(
+                    ErrorDetail(
+                        message=(
+                            f"Excel could not {description}. The live Excel session "
+                            "reported a failure."
+                        ),
+                        technical_reason=f"{type(exc).__name__}: {exc}",
+                        suggestion=(
+                            "Check the workbook isn't already open in another Excel window, "
+                            "and that no Excel dialog is waiting for input."
+                        ),
+                    )
+                ) from exc
+
+        guarded.__excel_operation__ = description  # type: ignore[attr-defined]
+        return guarded
+
+    return decorate
+
+
+# Macro-enabled OOXML formats openpyxl can read. `.xlsb` is macro-capable too but is a binary
+# format openpyxl cannot open at all, so it never reaches here.
+_MACRO_ENABLED_SUFFIXES = frozenset({".xlsm", ".xltm", ".xlam"})
+
+
+def _needs_vba_preserved(path: str, read_only: bool) -> bool:
+    """Whether `open_workbook` must ask openpyxl to cache the source package for its macros.
+
+    Two failure modes sit either side of this decision, so it can't just be left on:
+
+    * **Off for an .xlsm** — openpyxl writes a fresh package from its parsed model, and it
+      doesn't model VBA, so `xl/vbaProject.bin` is simply not written back. No exception, no
+      warning: the macros are gone. The file backend saves on commit, so the loss lands in
+      the user's real workbook.
+    * **On for an .xlsx** — `Workbook.mime_type` derives the saved workbook part's content
+      type from whether a cached archive is attached, not from what the source contained, so
+      every plain workbook gets stamped macro-enabled and Excel then rejects it with "the
+      file format and extension don't match".
+
+    Extension is the right signal because it's what Excel itself uses: a .bin part in an
+    .xlsx is already a malformed package, and the content type must agree with the name
+    either way.
+
+    Args:
+        path: Path the workbook is being opened from.
+        read_only: Whether the session is read-only. Such a session is never saved, so it has
+            nothing to preserve, and caching the whole source archive would be pure cost.
+
+    Returns:
+        True if `keep_vba` should be set.
+    """
+    return not read_only and Path(path).suffix.lower() in _MACRO_ENABLED_SUFFIXES
 
 
 def open_workbook(
@@ -63,8 +178,12 @@ def open_workbook(
     Raises:
         FileNotFoundError: If path does not exist.
     """
+    read_only = mode == "read_only"
     return openpyxl.load_workbook(
-        path, read_only=(mode == "read_only"), data_only=data_only
+        path,
+        read_only=read_only,
+        data_only=data_only,
+        keep_vba=_needs_vba_preserved(path, read_only),
     )
 
 
@@ -114,6 +233,15 @@ def close_workbook(workbook: Workbook) -> None:
     Args:
         workbook: The workbook to close.
     """
+    # openpyxl's own `close()` only releases `_archive` (read-only/write-only mode) and never
+    # touches `vba_archive`, the in-memory copy of the source package that `keep_vba=True`
+    # attaches in `open_workbook`. Left dangling it is closed by the garbage collector, whose
+    # `ZipFile.__del__` raises `ValueError: I/O operation on closed file` once its backing
+    # BytesIO has already been collected — an unraisable exception surfacing at an arbitrary
+    # later moment. We turned that archive on, so we close it.
+    vba_archive = getattr(workbook, "vba_archive", None)
+    if vba_archive is not None:
+        vba_archive.close()
     workbook.close()
 
 
@@ -543,7 +671,9 @@ def find_column(
         return None
     # `ws[row_number]` always yields the row from column A onward, so the anchor is column 1.
     # `Cell.column` is Optional only in openpyxl's stubs, never in a cell obtained this way.
-    return _match_header_column([cell.value for cell in row], row[0].column or 1, pattern)
+    return _match_header_column(
+        [cell.value for cell in row], row[0].column or 1, pattern
+    )
 
 
 def find_columns(
@@ -610,6 +740,7 @@ def read_cells(workbook: Workbook, sheet: str, cells: list[str]) -> dict[str, An
     return result
 
 
+@_excel_operation("open workbook")
 def xlw_open_workbook(
     app: xw.App, path: str, mode: Literal["read_only", "read_write"]
 ) -> xw.Book:
@@ -638,6 +769,7 @@ def xlw_open_workbook(
     return app.books.open(path, read_only=(mode == "read_only"), update_links=False)
 
 
+@_excel_operation("close workbook")
 def xlw_close_workbook(book: xw.Book) -> None:
     """Close a workbook, without quitting the App instance it belongs to.
 
@@ -648,6 +780,7 @@ def xlw_close_workbook(book: xw.Book) -> None:
     book.close()
 
 
+@_excel_operation("save workbook")
 def xlw_save_workbook(book: xw.Book) -> None:
     """Save a workbook in place, to whatever path it was opened/created at.
 
@@ -658,9 +791,7 @@ def xlw_save_workbook(book: xw.Book) -> None:
     book.save()
 
 
-def save_open_workbook(
-    handle: Any, backend: Literal["file", "xlw"], path: str
-) -> None:
+def save_open_workbook(handle: Any, backend: Literal["file", "xlw"], path: str) -> None:
     """Save an open workbook through whichever backend currently holds it.
 
     One place, rather than the same two-branch `if` repeated at every save site — a session's
@@ -706,6 +837,7 @@ def close_open_workbook(handle: Any, backend: Literal["file", "xlw"]) -> None:
 # (LinkSources/ChangeLink/UpdateLink, further down) are Windows-only.
 
 
+@_excel_operation("resolve range")
 def xlw_resolve_range(book: xw.Book, sheet: str, range: str) -> tuple[str, str]:
     """xlwings twin of `resolve_range` — resolve `range` into plain A1 notation on a sheet.
 
@@ -734,6 +866,7 @@ def xlw_resolve_range(book: xw.Book, sheet: str, range: str) -> tuple[str, str]:
     return sheet, range
 
 
+@_excel_operation("read range")
 def xlw_read_range(book: xw.Book, sheet: str, range: str) -> Any:
     """xlwings twin of `read_range` — read a cell or range of cells.
 
@@ -759,6 +892,7 @@ def xlw_read_range(book: xw.Book, sheet: str, range: str) -> Any:
     return target.value
 
 
+@_excel_operation("list sheet names")
 def xlw_resolve_sheet_names(
     book: xw.Book, sheet: str | list[str] | dict[str, str]
 ) -> list[str]:
@@ -782,6 +916,7 @@ def xlw_resolve_sheet_names(
     return [sheet]
 
 
+@_excel_operation("read cells")
 def xlw_read_cells(book: xw.Book, sheet: str, cells: list[str]) -> dict[str, Any]:
     """xlwings twin of `read_cells` — read a scattered list of specific cells.
 
@@ -803,6 +938,7 @@ def xlw_read_cells(book: xw.Book, sheet: str, cells: list[str]) -> dict[str, Any
     return result
 
 
+@_excel_operation("read document properties")
 def xlw_read_properties(book: xw.Book) -> dict[str, Any]:
     """xlwings twin of `read_properties` — read a live workbook's document properties.
 
@@ -827,6 +963,7 @@ def xlw_read_properties(book: xw.Book) -> dict[str, Any]:
         workbook.close()
 
 
+@_excel_operation("write cell")
 def xlw_write_cell(book: xw.Book, sheet: str, cell: str, value: Any) -> None:
     """xlwings twin of `write_cell` — write a value to a single cell.
 
@@ -842,6 +979,7 @@ def xlw_write_cell(book: xw.Book, sheet: str, cell: str, value: Any) -> None:
     book.sheets[sheet].range(cell).value = value
 
 
+@_excel_operation("write range")
 def xlw_write_range(
     book: xw.Book, sheet: str, range: str, values: list[list[Any]]
 ) -> None:
@@ -856,6 +994,7 @@ def xlw_write_range(
     book.sheets[sheet].range(range.split(":")[0]).value = values
 
 
+@_excel_operation("set column width")
 def xlw_set_column_width(
     book: xw.Book, sheet: str, columns: str, width: float | Literal["autofit"]
 ) -> None:
@@ -880,6 +1019,7 @@ def xlw_set_column_width(
         target.column_width = width
 
 
+@_excel_operation("create sheet")
 def xlw_create_sheet(book: xw.Book, name: str, index: int | None = None) -> None:
     """xlwings twin of `create_sheet` — add a new, empty worksheet.
 
@@ -901,6 +1041,7 @@ def xlw_create_sheet(book: xw.Book, name: str, index: int | None = None) -> None
         book.sheets.add(name, before=book.sheets[index])
 
 
+@_excel_operation("rename sheet")
 def xlw_rename_sheet(book: xw.Book, sheet: str, new_name: str) -> None:
     """xlwings twin of `rename_sheet`.
 
@@ -912,6 +1053,7 @@ def xlw_rename_sheet(book: xw.Book, sheet: str, new_name: str) -> None:
     book.sheets[sheet].name = new_name
 
 
+@_excel_operation("delete sheet")
 def xlw_delete_sheet(book: xw.Book, sheet: str) -> None:
     """xlwings twin of `delete_sheet`.
 
@@ -930,6 +1072,7 @@ def xlw_delete_sheet(book: xw.Book, sheet: str) -> None:
     book.sheets[sheet].delete()
 
 
+@_excel_operation("insert rows or columns")
 def xlw_insert_range(
     book: xw.Book,
     sheet: str,
@@ -959,9 +1102,9 @@ def xlw_insert_range(
         letter = column_match.group(1)
         worksheet.range(f"{letter}:{letter}").insert(shift="right")
         if header:
-            worksheet.range(
-                (header["row"], column_index_from_string(letter))
-            ).value = header["text"]
+            worksheet.range((header["row"], column_index_from_string(letter))).value = (
+                header["text"]
+            )
     elif row_match:
         number = row_match.group(1)
         worksheet.range(f"{number}:{number}").insert(shift="down")
@@ -972,6 +1115,7 @@ def xlw_insert_range(
         )
 
 
+@_excel_operation("find the header row")
 def xlw_find_headers_row(
     book: xw.Book, sheet: str, search_range: str, patterns: list[str]
 ) -> tuple[int, dict[str, str]] | None:
@@ -995,6 +1139,7 @@ def xlw_find_headers_row(
     return _match_headers_row(values, target.row, target.column, patterns)
 
 
+@_excel_operation("find a row")
 def xlw_find_row(
     book: xw.Book,
     sheet: str,
@@ -1028,6 +1173,7 @@ def xlw_find_row(
     return _match_value_row(values, start_row, search_value)
 
 
+@_excel_operation("find a column")
 def xlw_find_column(
     book: xw.Book, sheet: str, header_row: int, pattern: str
 ) -> str | None:
@@ -1052,6 +1198,7 @@ def xlw_find_column(
     return _match_header_column(values, 1, pattern)
 
 
+@_excel_operation("find columns")
 def xlw_find_columns(
     book: xw.Book, sheet: str, header_row: int, patterns: dict[str, str]
 ) -> dict[str, str]:
@@ -1083,6 +1230,7 @@ def xlw_find_columns(
 # but not a faithful "copy" for anything containing formulas or formatting.
 
 
+@_excel_operation("copy a range between workbooks")
 def com_copy_range(
     source_book: xw.Book,
     source_sheet: str,
@@ -1134,6 +1282,7 @@ _DEFAULT_CALCULATION_WAIT_TIMEOUT_SECONDS = 300.0
 _CALCULATION_POLL_INTERVAL_SECONDS = 0.25
 
 
+@_excel_operation("recalculate all open workbooks")
 def xlw_calculate_all(app: xw.App) -> None:
     """Recalculate every open workbook in `app` (xlwings' own portable API).
 
@@ -1144,6 +1293,7 @@ def xlw_calculate_all(app: xw.App) -> None:
     app.calculate()
 
 
+@_excel_operation("recalculate the workbook")
 def com_calculate_workbook(book: xw.Book) -> None:
     """Recalculate every sheet in a single workbook, via COM.
 
@@ -1158,21 +1308,27 @@ def com_calculate_workbook(book: xw.Book) -> None:
     """
     logger.info('Recalculating workbook "%s"', book.name)
     for sheet in book.sheets:
-        sheet.api.Calculate()
+        com_calculate_sheet(book, sheet.name)
 
 
+@_excel_operation("recalculate the sheet")
 def com_calculate_sheet(book: xw.Book, sheet: str) -> None:
     """Recalculate a single worksheet, via COM (no portable xlwings equivalent exists at this
     granularity).
+
+    This is the codebase's only raw `Worksheet.Calculate` call — `com_calculate_workbook`
+    delegates here rather than repeating it, so there is exactly one place where a sheet
+    recalculation can fail and exactly one error boundary guarding it.
 
     Args:
         book: The workbook containing the sheet.
         sheet: Worksheet name.
     """
-    logger.info('Recalculating sheet "%s" in workbook "%s"', sheet, book.name)
+    logger.debug('Recalculating sheet "%s" in workbook "%s"', sheet, book.name)
     book.sheets[sheet].api.Calculate()
 
 
+@_excel_operation("force a full recalculation")
 def com_calculate_full(app: xw.App) -> None:
     """Force a full recalculation of every open workbook in `app`, including cells Excel
     wouldn't otherwise consider dirty — always application-wide, there is no per-workbook
@@ -1185,6 +1341,7 @@ def com_calculate_full(app: xw.App) -> None:
     app.api.CalculateFull()
 
 
+@_excel_operation("force a full rebuild recalculation")
 def com_calculate_full_rebuild(app: xw.App) -> None:
     """Force a full rebuild recalculation (rechecks dependency trees too, not just marks-dirty
     cells) of every open workbook in `app` — always application-wide, there is no per-workbook
@@ -1197,6 +1354,7 @@ def com_calculate_full_rebuild(app: xw.App) -> None:
     app.api.CalculateFullRebuild()
 
 
+@_excel_operation("wait for calculation to finish")
 def com_wait_until_calculation_done(
     app: xw.App, timeout: float = _DEFAULT_CALCULATION_WAIT_TIMEOUT_SECONDS
 ) -> None:
@@ -1232,6 +1390,7 @@ _XL_LINK_TYPE_EXCEL_LINKS = (
 )
 
 
+@_excel_operation("list external link sources")
 def com_link_sources(book: xw.Book) -> list[str]:
     """List every external Excel-workbook link source a workbook currently has.
 
@@ -1249,6 +1408,7 @@ def com_link_sources(book: xw.Book) -> list[str]:
     return result
 
 
+@_excel_operation("repoint an external link")
 def com_change_link(book: xw.Book, name: str, new_name: str) -> None:
     """Repoint one of a workbook's external links to a new target.
 
@@ -1269,6 +1429,7 @@ def com_change_link(book: xw.Book, name: str, new_name: str) -> None:
     book.api.ChangeLink(Name=name, NewName=new_name, Type=_XL_LINK_TYPE_EXCEL_LINKS)
 
 
+@_excel_operation("refresh an external link")
 def com_update_link(book: xw.Book, name: str) -> None:
     """Force a fresh read of one of a workbook's external links from disk.
 
@@ -1298,7 +1459,9 @@ def com_update_link(book: xw.Book, name: str) -> None:
 class _CreateSheet(Protocol):
     """Call signature shared by `create_sheet` and `xlw_create_sheet`."""
 
-    def __call__(self, workbook: Any, /, name: str, index: int | None = None) -> None: ...
+    def __call__(
+        self, workbook: Any, /, name: str, index: int | None = None
+    ) -> None: ...
 
 
 class _InsertRange(Protocol):

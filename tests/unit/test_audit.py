@@ -11,10 +11,19 @@ class TestAuditLogger:
     def test_writes_one_json_line_per_step(self, tmp_path: Path) -> None:
         log_path = tmp_path / "audit.jsonl"
         logger = AuditLogger(log_path)
-        step = Step(id="s1", action="read_range", params={"workbook": "manip", "sheet": "S", "range": "A1"})
+        step = Step(
+            id="s1",
+            action="read_range",
+            params={"workbook": "manip", "sheet": "S", "range": "A1"},
+        )
         result = StepResult(step_id="s1", status="success", output={"values": "x"})
 
-        logger.record_step(step, result, started_at="2026-08-19T10:00:00", ended_at="2026-08-19T10:00:01")
+        logger.record_step(
+            step,
+            result,
+            started_at="2026-08-19T10:00:00",
+            ended_at="2026-08-19T10:00:01",
+        )
 
         lines = log_path.read_text().splitlines()
         assert len(lines) == 1
@@ -30,8 +39,12 @@ class TestAuditLogger:
         step1 = Step(id="s1", action="open", params={"workbook": "manip"})
         step2 = Step(id="s2", action="close", params={"workbook": "manip"})
 
-        logger.record_step(step1, StepResult(step_id="s1", status="success", output={}), "t0", "t1")
-        logger.record_step(step2, StepResult(step_id="s2", status="success", output={}), "t1", "t2")
+        logger.record_step(
+            step1, StepResult(step_id="s1", status="success", output={}), "t0", "t1"
+        )
+        logger.record_step(
+            step2, StepResult(step_id="s2", status="success", output={}), "t1", "t2"
+        )
 
         lines = log_path.read_text().splitlines()
         assert len(lines) == 2
@@ -44,13 +57,20 @@ class TestAuditLogger:
         step = Step(
             id="s1",
             action="find_row",
-            params={"workbook": "manip", "sheet": "S", "column": "A", "search_value": "x"},
+            params={
+                "workbook": "manip",
+                "sheet": "S",
+                "column": "A",
+                "search_value": "x",
+            },
         )
         result = StepResult(
             step_id="s1",
             status="error",
             output={},
-            error=ErrorDetail(message="not found", technical_reason="find_row: no matching row"),
+            error=ErrorDetail(
+                message="not found", technical_reason="find_row: no matching row"
+            ),
         )
 
         logger.record_step(step, result, "t0", "t1")
@@ -80,7 +100,9 @@ class TestAuditLogger:
         logger = AuditLogger(log_path)
         step = Step(id="s1", action="open", params={"workbook": "manip"})
 
-        logger.record_step(step, StepResult(step_id="s1", status="success", output={}), "t0", "t1")
+        logger.record_step(
+            step, StepResult(step_id="s1", status="success", output={}), "t0", "t1"
+        )
 
         assert log_path.exists()
 
@@ -113,7 +135,9 @@ class TestRecordEvent:
         assert record["save_blockers"] == ["outbound_external_links"]
         assert record["at"]
 
-    def test_an_event_is_distinguishable_from_a_step_record(self, tmp_path: Path) -> None:
+    def test_an_event_is_distinguishable_from_a_step_record(
+        self, tmp_path: Path
+    ) -> None:
         """A reader tells them apart by key, not by position — events interleave with steps."""
         log_path = tmp_path / "audit.jsonl"
         logger = AuditLogger(log_path)
