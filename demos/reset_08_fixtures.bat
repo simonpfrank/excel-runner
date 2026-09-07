@@ -10,8 +10,7 @@ REM and fails. This puts the three working copies back to their originals.
 REM
 REM If this repo folder is ever MOVED or CLONED elsewhere, the linked workbook
 REM fixture goes stale first - it stores an absolute path to this checkout's
-REM catalog.xlsx. Regenerate it with:
-REM     .venv\Scripts\python demos\08_full_showcase\generate_linked_workbook_fixture.py
+REM catalog.xlsx. See demos\08_full_showcase\README.md for how to rebuild it.
 REM ---------------------------------------------------------------------------
 
 setlocal

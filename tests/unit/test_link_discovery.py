@@ -4,13 +4,18 @@ requires no Excel/COM at all (real-Excel is only needed to *create* fixtures for
 `scan_external_link_targets`, whose own implementation is pure zipfile/XML).
 """
 
+import zipfile
 from pathlib import Path
+
+import openpyxl
+from openpyxl.workbook.defined_name import DefinedName
 
 from excel_runner.backends import OwnedInstanceRegistry
 from excel_runner.core import WorkbookRef
 from excel_runner.engine import (
     classify_link_target,
     discover_write_intent_link_graph,
+    inspect_save_blockers,
     inspection_paths,
     resolve_link_target,
     scan_external_link_targets,
@@ -307,3 +312,97 @@ class TestScanExternalLinkTargets:
             assert scan_external_link_targets(tmp_path / "standalone.xlsx") == []
         finally:
             registry.close_owned()
+
+
+class TestInternalReferencesAreNotExternalLinks:
+    """A false positive here is expensive, not just untidy: one phantom target makes
+    `inspect_save_blockers` report OUTBOUND_EXTERNAL_LINKS, which promotes the workbook off
+    openpyxl onto a live Excel session for the whole run
+    (docs/backend_eligibility_build_plan.md sec 1.3, and promotion is sticky). A workbook
+    whose formulas merely reference its own other sheets must stay on the fast path.
+
+    Built with openpyxl rather than live Excel deliberately: these assert what the scanner
+    does *not* pick up, so they need to run everywhere, and the on-disk shapes involved
+    (formula text in the sheet XML, a definedName, a hyperlink relationship) are ordinary
+    OOXML that doesn't need Excel to author.
+    """
+
+    def _sheet_rels(self, path: Path) -> list[str]:
+        with zipfile.ZipFile(path) as archive:
+            return [
+                name
+                for name in archive.namelist()
+                if name.startswith("xl/worksheets/_rels/")
+            ]
+
+    def _cross_sheet_workbook(self, path: Path) -> Path:
+        workbook = openpyxl.Workbook()
+        data = workbook.active
+        assert data is not None
+        data.title = "Data"
+        data["A1"] = 5
+        summary = workbook.create_sheet("Summary")
+        summary["A1"] = "=Data!A1*2"
+        summary["A2"] = "=SUM(Data!A1:A10)"
+        summary["A3"] = "='Data'!A1"
+        workbook.save(path)
+        return path
+
+    def test_a_cross_sheet_formula_is_not_an_external_link(self, tmp_path: Path) -> None:
+        path = self._cross_sheet_workbook(tmp_path / "internal.xlsx")
+
+        assert scan_external_link_targets(path) == []
+
+    def test_a_cross_sheet_formula_does_not_block_the_file_backend(
+        self, tmp_path: Path
+    ) -> None:
+        """The consequence that actually matters — this is what decides whether the workbook
+        keeps the openpyxl fast path or gets promoted to a live Excel session."""
+        path = self._cross_sheet_workbook(tmp_path / "internal.xlsx")
+
+        assert inspect_save_blockers(path) == frozenset()
+
+    def test_a_defined_name_spanning_sheets_is_not_an_external_link(
+        self, tmp_path: Path
+    ) -> None:
+        workbook = openpyxl.Workbook()
+        data = workbook.active
+        assert data is not None
+        data.title = "Data"
+        data["A1"] = 5
+        workbook.defined_names.add(DefinedName("Total", attr_text="Data!$A$1"))
+        path = tmp_path / "named.xlsx"
+        workbook.save(path)
+
+        assert scan_external_link_targets(path) == []
+        assert inspect_save_blockers(path) == frozenset()
+
+    def test_a_hyperlink_is_not_an_external_link(self, tmp_path: Path) -> None:
+        """The sharpest case: a hyperlink really is stored as a `TargetMode="External"`
+        relationship, so the `TargetMode` check alone would happily pick it up. What keeps it
+        out is that the scanner only reads `xl/externalLinks/_rels/`, and a hyperlink lives in
+        `xl/worksheets/_rels/`. A workbook is not link-bearing just because a cell points at
+        a website."""
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        assert sheet is not None
+        sheet["A1"] = "see docs"
+        sheet["A1"].hyperlink = "https://example.com/reference.xlsx"
+        path = tmp_path / "hyperlinked.xlsx"
+        workbook.save(path)
+
+        # Guard: if openpyxl stopped writing the hyperlink as an external relationship this
+        # test would pass for the wrong reason, proving nothing about the scanner.
+        assert self._sheet_rels(path) != []
+        with zipfile.ZipFile(path) as archive:
+            assert b'TargetMode="External"' in archive.read(self._sheet_rels(path)[0])
+
+        assert scan_external_link_targets(path) == []
+        assert inspect_save_blockers(path) == frozenset()
+
+    def test_a_genuine_external_link_is_still_detected(self, tmp_path: Path) -> None:
+        """The other half of the contract: tightening against internal references must not
+        have made the scanner blind."""
+        path = workbook_with_external_link(tmp_path / "linked.xlsx", "target.xlsx")
+
+        assert scan_external_link_targets(path) == ["target.xlsx"]

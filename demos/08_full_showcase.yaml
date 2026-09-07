@@ -109,12 +109,13 @@ steps:
 
   # --- a genuine R4 (absolute-path) external link, opened before any recalculate happens ---
   # linked_workbook/originals/linked.xlsx already has a real Excel-authored external link to
-  # catalog.xlsx (built by generate_linked_workbook_fixture.py — see that file for why it's
-  # not a plain checked-in template like every other originals/*.xlsx here). Opening it now,
-  # while catalog is already staged, is what triggers engine.SessionManager's staging-time
-  # link rewire (_wire_r4_links_touching): its link gets repointed from catalog's real path
-  # to catalog's *scratch* copy, so anything that reads it below sees this run's in-progress
-  # catalog data, not catalog.xlsx's last-committed state.
+  # catalog.xlsx — see demos/08_full_showcase/README.md ("The linked workbook fixture") for
+  # why it's not a plain checked-in template like every other originals/*.xlsx here, and what
+  # to do if this repo ever moves. Opening it now, while catalog is already staged, is what
+  # triggers engine.SessionManager's staging-time link rewire (_wire_r4_links_touching): its
+  # link gets repointed from catalog's real path to catalog's *scratch* copy, so anything that
+  # reads it below sees this run's in-progress catalog data, not catalog.xlsx's last-committed
+  # state.
   - id: open_linked_workbook
     action: open
     workbook: linked_workbook
