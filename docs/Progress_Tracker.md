@@ -33,7 +33,7 @@
 | `ScratchManager` (staging/atomic commit, crash-safety) | ✅ | ✅ | |
 | Tier-1 static validation | ✅ | ✅ | Real-defined-names checking excluded by design (needs workbook access) — **resolved as a runtime error instead** (`backends.resolve_range`, 2026-09-02), not a static-validation gap anymore. Whole-template-expression exemption added 2026-09-01. |
 | Tier-2 step-graph validation | ✅ | ✅ | |
-| Tier-3 existence validation (`engine.validate_existence`) | ✅ | ✅ | Added 2026-09-03. Opt-in (`--check-existence` / `check_existence=True`) — opens every referenced workbook read-only via openpyxl and confirms every literally-named sheet/defined name a step references actually exists, tracking `create_sheet`/`rename_sheet`/`delete_sheet` step-by-step. Deliberately skips plain A1 cell/range references and templated values. |
+| Shared read-only preflight / Tier-3 existence validation | ✅ | ✅ | `--dry-run` validates and exits without scratch/workbook mutation; `--check-existence` runs the same preflight before production execution. Checks literal workbook sheets/names, text parsing, regexes, and table boundaries/headers/lookups; values derived from prior step output are deferred. |
 | `AuditLogger`, `run_workflow` orchestration, public API surface | ✅ | ✅ | |
 | `OwnedInstanceRegistry`, xlwings link-graph primitives (`com_link_sources`, `com_change_link`, `com_update_link`) | ✅ | ✅ | Backend primitives built/tested; not all wired into a dedicated action yet (`com_update_link`). |
 

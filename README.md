@@ -23,6 +23,9 @@ still aren't built (see [Not yet available](#not-yet-available)).
   table discovery plus header-driven copy/update actions; and workbook-level defined-name targets
   for `write_cell` and `write_range`. `--check-existence` now validates defined names used by
   those write targets. These actions have unit and real-workbook workflow integration coverage.
+- **2026-09-11**: Added shared read-only preflight validation. `--dry-run` validates and exits
+  without staging or changing files; `--check-existence` runs the same preflight before a real
+  workflow execution, so production runs fail before any workbook mutation.
 - **2026-09-07**: Every `xlw_`/`com_` backend call is now wrapped in a structured error
   boundary (`backends._excel_operation`) — a live Excel/COM failure surfaces as
   `ActionExecutionError` with a readable message instead of a raw traceback; `ValueError`/
@@ -677,7 +680,17 @@ links resolve correctly.
 Output: `.output.scope`, `.output.mode`, plus `.output.sheet`/`.output.warning` when `scope` is
 `"sheet"`.
 
-## Validation
+## Preflight and validation
+
+Use the compiler-style read-only preflight before a run:
+
+```powershell
+# Validate only. No staging, Excel process, save, calculation, or action dispatch.
+.venv\Scripts\python .\excel_runner\cli.py .\workflow.yaml --dry-run
+
+# Run the same preflight, then execute only when it succeeds.
+.venv\Scripts\python .\excel_runner\cli.py .\workflow.yaml --check-existence
+```
 
 A workflow is checked in up to three tiers before/while it runs:
 
@@ -685,16 +698,16 @@ A workflow is checked in up to three tiers before/while it runs:
    params, param types match, step-id references resolve in order. No workbook access at all.
 2. **Planning** (always on) — infers whether each workbook needs to be opened read-only or
    read-write, from which actions touch it. Still no workbook access.
-3. **Existence** (opt-in — `--check-existence` / `check_existence=True`) — opens every
-   referenced workbook read-only via openpyxl and confirms every sheet and workbook-level
-   defined name a step references by literal name actually exists (accounting for sheets
-   created/renamed/removed by earlier steps in the same workflow). Deliberately does not
-   validate plain A1-style cell/range references (e.g. `"A1"`, `"A1:D6"`) — only sheet names
-   and defined names. Opt-in because it's the first tier that touches real files; a workbook
-   that doesn't exist yet (fresh `create_if_missing`, no template) is skipped.
+3. **Read-only preflight** (`--dry-run`, or before execution with `--check-existence`) — opens
+  referenced workbooks read-only and confirms literal sheet names, workbook-level defined
+  names, and table boundaries/header/lookup references. It also validates literal text input
+  files by parsing them and compiles literal regular expressions. Values derived from earlier
+  step output are deferred to execution because their final values do not exist yet. A workbook
+  that does not exist yet (`create_if_missing` with no template) is skipped.
 
-All three raise `ValidationError` (with a close-match suggestion for typos) before any step
-runs — nothing is partially executed because of a bad reference.
+`--dry-run` stops after these checks: it does not create a run directory, scratch copy, Excel
+process, workbook write, save, or calculation. `--check-existence` performs the same checks,
+then executes normally. Validation errors stop the real run before any action dispatch.
 
 ## Not yet available
 

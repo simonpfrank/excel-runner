@@ -7,6 +7,7 @@ surface (sec 6.3, build order item 8) isn't built yet.
 
 import json
 import logging
+import re
 from dataclasses import asdict, dataclass
 from datetime import datetime
 from pathlib import Path
@@ -192,6 +193,45 @@ def _dispatch(
     return result
 
 
+def preflight_workflow(
+    path: str | Path, env_overrides: dict[str, Any] | None = None
+) -> None:
+    """Validate a workflow and its literal workbook references without changing files.
+
+    This compiler-style preflight performs workflow loading, static validation, step planning,
+    and real-workbook existence validation. It does not create a scratch directory, open a
+    workbook for writing, start Excel, or dispatch an action.
+    """
+    workflow: Workflow = core.load(path, env_overrides)
+    registry = engine.discover_actions(actions_module)
+    engine.validate_static(workflow, registry)
+    engine.plan(workflow, registry)
+    engine.validate_existence(workflow)
+    _validate_literal_action_inputs(workflow)
+
+
+def _validate_literal_action_inputs(workflow: Workflow) -> None:
+    """Validate literal non-workbook inputs whose runtime values are already knowable."""
+    for step in workflow.steps:
+        if step.action == "read_text_file" and not any(
+            core.is_whole_template_expression(value)
+            for value in step.params.values()
+            if isinstance(value, str)
+        ):
+            actions_module.read_text_file(**step.params)
+        pattern = step.params.get("pattern")
+        if isinstance(pattern, str) and not core.is_whole_template_expression(pattern):
+            try:
+                re.compile(pattern)
+            except re.error as exc:
+                raise core.ActionExecutionError(
+                    ErrorDetail(
+                        f'{step.action}: invalid regular expression: {exc}',
+                        "invalid preflight regular expression",
+                    )
+                ) from exc
+
+
 def run_workflow(
     path: str | Path,
     env_overrides: dict[str, Any] | None = None,
@@ -233,7 +273,7 @@ def run_workflow(
     engine.validate_static(workflow, registry)
     plan = engine.plan(workflow, registry)
     if check_existence:
-        engine.validate_existence(workflow)
+        preflight_workflow(path, env_overrides)
 
     # working_dir is a fixed, predictable path (not a random tempfile.mkdtemp() one) so
     # external tooling can construct it itself from just the yaml's filename, without reading

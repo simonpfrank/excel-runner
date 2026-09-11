@@ -1516,6 +1516,12 @@ _RANGE_PARAM_ACTIONS: dict[str, tuple[str, ...]] = {
     "write_cell": ("cell",),
     "write_range": ("range",),
 }
+_TABLE_ACTIONS = {
+    "read_table",
+    "copy_table_columns",
+    "update_table_cells",
+    "replace_table_text",
+}
 
 
 def _looks_like_a1(value: str) -> bool:
@@ -1727,6 +1733,79 @@ def _check_step_existence(
     _check_range_field_existence(step, wb_name, defined_names)
 
 
+def _is_literal_string(value: Any) -> bool:
+    return isinstance(value, str) and not is_whole_template_expression(value)
+
+
+def _table_validation_error(step: Step, message: str) -> ValidationError:
+    return ValidationError(
+        ErrorDetail(message=f"{_step_label(step)}: {message}", technical_reason=message)
+    )
+
+
+def _validate_table_references(step: Step, workbook: Any) -> None:
+    if step.action not in _TABLE_ACTIONS:
+        return
+    sheet_name = step.params.get("sheet")
+    header_cell = step.params.get("header_cell")
+    if not _is_literal_string(sheet_name) or not _is_literal_string(header_cell):
+        return
+    try:
+        worksheet = workbook[sheet_name]
+        anchor = worksheet[header_cell]
+    except (KeyError, ValueError) as exc:
+        raise _table_validation_error(step, f"invalid table header_cell {header_cell!r}.") from exc
+
+    headers: list[str] = []
+    normalized_headers: set[str] = set()
+    column = anchor.column
+    while (value := worksheet.cell(anchor.row, column).value) not in (None, ""):
+        if not isinstance(value, str) or value.casefold() in normalized_headers:
+            raise _table_validation_error(
+                step, "table headers must be unique non-empty text."
+            )
+        headers.append(value)
+        normalized_headers.add(value.casefold())
+        column += 1
+    if not headers:
+        raise _table_validation_error(step, "table header_cell is blank.")
+
+    row = anchor.row + 1
+    while worksheet.cell(row, anchor.column).value not in (None, ""):
+        row += 1
+    if row == anchor.row + 1:
+        raise _table_validation_error(step, "table has no data rows.")
+
+    header_indexes = {header.casefold(): index for index, header in enumerate(headers)}
+    names = [step.params.get("lookup_column")]
+    names.extend(step.params.get("source_columns", []))
+    names.extend(step.params.get("target_columns", []))
+    for name in names:
+        if _is_literal_string(name) and name.casefold() not in header_indexes:
+            raise _table_validation_error(step, f"table column {name!r} was not found.")
+
+    lookup_column = step.params.get("lookup_column")
+    lookup_rows = step.params.get("lookup_rows", [])
+    if not _is_literal_string(lookup_column) or not isinstance(lookup_rows, list):
+        return
+    lookup_index = header_indexes.get(lookup_column.casefold())
+    if lookup_index is None:
+        return
+    for lookup_value in lookup_rows:
+        if not _is_literal_string(lookup_value):
+            continue
+        matches = [
+            current_row
+            for current_row in range(anchor.row + 1, row)
+            if str(worksheet.cell(current_row, anchor.column + lookup_index).value).casefold()
+            == lookup_value.casefold()
+        ]
+        if len(matches) != 1:
+            raise _table_validation_error(
+                step, f"table row {lookup_value!r} must occur exactly once."
+            )
+
+
 def validate_existence(workflow: Workflow) -> None:
     """Tier-3 validation (opt-in): confirms every sheet and workbook-level defined name a step
     references by literal name actually exists in the real workbook \u2014 read-only, via openpyxl,
@@ -1761,6 +1840,9 @@ def validate_existence(workflow: Workflow) -> None:
 
         for step in workflow.steps:
             _check_step_existence(step, known_sheets, defined_names)
+            workbook_name = step.params.get("workbook")
+            if workbook_name in known_sheets:
+                _validate_table_references(step, opened[inspection_paths(workflow.workbooks)[workbook_name]])
     finally:
         for wb in opened.values():
             wb.close()

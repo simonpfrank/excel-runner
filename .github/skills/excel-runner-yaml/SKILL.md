@@ -41,6 +41,21 @@ There is no `name:`, `description:`, `version:`, or `on_error:` top-level key. D
 one — unrecognized top-level keys are silently ignored by the loader (they are not validated),
 which means a typo here fails silently instead of erroring.
 
+## Preflight commands
+
+Use the read-only preflight while authoring or reviewing a workflow:
+
+```powershell
+.venv\Scripts\python .\excel_runner\cli.py .\workflow.yaml --dry-run
+```
+
+It validates workflow structure plus literal workbook sheets, defined names, text input parsing,
+regular expressions, and table references, but never stages, writes, saves, recalculates, or
+launches Excel. Values that come from earlier `steps.*` output are deferred to execution.
+
+For a production run, add `--check-existence`: it performs the same preflight before executing
+the workflow. Do not expect either mode to verify calculated or post-write cell values.
+
 ## 2. `env:` block
 
 - Plain dict, any keys, any JSON-scalar values (str/int/float/bool/null) or nested

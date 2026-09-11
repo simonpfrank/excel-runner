@@ -18,7 +18,7 @@ import logging
 import sys
 
 from core import ExcelRunnerError
-from runner import run_workflow
+from runner import preflight_workflow, run_workflow
 
 logger = logging.getLogger("excel_runner.cli")
 
@@ -132,12 +132,24 @@ def main(argv: list[str] | None = None) -> int:
             "real files."
         ),
     )
+    parser.add_argument(
+        "--dry-run",
+        action="store_true",
+        help=(
+            "Run read-only preflight validation and exit without staging, changing, saving, "
+            "or recalculating workbooks."
+        ),
+    )
     args = parser.parse_args(argv)
     env_overrides = dict(args.env)
 
     configure_logging(args.logging_level)
 
     try:
+        if args.dry_run:
+            preflight_workflow(args.workflow, env_overrides or None)
+            logger.info("Preflight complete: no workflow actions were executed.")
+            return 0
         result = run_workflow(
             args.workflow,
             env_overrides or None,

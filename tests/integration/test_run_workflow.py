@@ -12,7 +12,7 @@ import openpyxl
 import pytest
 
 from excel_runner.core import ActionExecutionError, ValidationError
-from excel_runner.runner import run_workflow
+from excel_runner.runner import preflight_workflow, run_workflow
 
 
 def _make_workbook(path: Path) -> Path:
@@ -103,6 +103,101 @@ class TestHappyPath:
 
         assert result.status == "success"
         assert openpyxl.load_workbook(real)["Sheet"]["B1"].value == "explicit"
+
+
+class TestPreflight:
+    def test_preflight_validates_a_write_workflow_without_changing_the_workbook(
+        self, tmp_path: Path
+    ) -> None:
+        workbook_path = _make_workbook(tmp_path / "input.xlsx")
+        workflow_path = _write_yaml(
+            tmp_path / "workflow.yaml",
+            f"""
+            workbooks:
+              input:
+                file: "{workbook_path.as_posix()}"
+            steps:
+              - id: write_value
+                action: write_cell
+                workbook: input
+                sheet: "Sheet"
+                cell: "A1"
+                value: "changed"
+            """,
+        )
+
+        preflight_workflow(workflow_path)
+
+        assert openpyxl.load_workbook(workbook_path)["Sheet"]["A1"].value == "hello"
+        assert not (tmp_path / "excel_runner_runs").exists()
+
+    @pytest.mark.parametrize(
+        ("action", "params"),
+        [
+            (
+                "read_text_file",
+                'file: "{input_path}"',
+            ),
+            (
+                "replace_text",
+                (
+                  'workbook: input\n                sheet: "Sheet"\n'
+                  '                pattern: "["\n                replacement: "x"'
+                ),
+            ),
+        ],
+    )
+    def test_preflight_rejects_invalid_literal_input(
+        self, tmp_path: Path, action: str, params: str
+    ) -> None:
+        workbook_path = _make_workbook(tmp_path / "input.xlsx")
+        input_path = tmp_path / "bad.csv"
+        input_path.write_text('header\n"unclosed\n')
+        rendered_params = params.format(input_path=input_path.as_posix())
+        workflow_path = _write_yaml(
+            tmp_path / "workflow.yaml",
+            f"""
+            workbooks:
+              input:
+                file: "{workbook_path.as_posix()}"
+            steps:
+              - id: validate_input
+                action: {action}
+                {rendered_params}
+            """,
+        )
+
+        with pytest.raises(ActionExecutionError):
+            preflight_workflow(workflow_path)
+
+    def test_preflight_rejects_missing_table_column(self, tmp_path: Path) -> None:
+        workbook_path = _make_workbook(tmp_path / "input.xlsx")
+        sheet = openpyxl.load_workbook(workbook_path)
+        sheet["Sheet"]["B7"] = "ITEM"
+        sheet["Sheet"]["C7"] = "VALUE"
+        sheet["Sheet"]["B8"] = "first"
+        sheet.save(workbook_path)
+        workflow_path = _write_yaml(
+            tmp_path / "workflow.yaml",
+            f"""
+            workbooks:
+              input:
+                file: "{workbook_path.as_posix()}"
+            steps:
+              - id: update_table
+                action: update_table_cells
+                workbook: input
+                sheet: "Sheet"
+                header_cell: "B7"
+                lookup_column: "ITEM"
+                lookup_rows: ["first"]
+                target_columns: ["MISSING"]
+                value: "updated"
+            """,
+        )
+
+        with pytest.raises(ValidationError, match="MISSING"):
+            preflight_workflow(workflow_path)
 
 
 class TestAdditionalFunctions:

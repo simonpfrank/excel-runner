@@ -8,9 +8,9 @@ not this file's.
 """
 
 import logging
-from pathlib import Path
 import subprocess
 import sys
+from pathlib import Path
 from unittest.mock import patch
 
 import pytest
@@ -108,6 +108,17 @@ class TestMain:
         mock_run.assert_called_once_with(
             "workflow.yaml", None, working_dir=None, check_existence=True
         )
+
+    def test_dry_run_preflights_without_running_the_workflow(self) -> None:
+        with (
+            patch("excel_runner.cli.preflight_workflow") as mock_preflight,
+            patch("excel_runner.cli.run_workflow") as mock_run,
+        ):
+            exit_code = main(["workflow.yaml", "--dry-run", "--env", "period=202606"])
+
+        assert exit_code == 0
+        mock_preflight.assert_called_once_with("workflow.yaml", {"period": "202606"})
+        mock_run.assert_not_called()
 
     def test_logging_level_flag_sets_the_package_logger_level(self) -> None:
         with patch("excel_runner.cli.run_workflow", return_value=_success_result()):
