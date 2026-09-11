@@ -1305,6 +1305,35 @@ def _check_required_params(
     return None
 
 
+def _check_write_target_sheets(
+    workflow: Workflow, _registry: dict[str, ActionSpec]
+) -> ValidationError | None:
+    target_fields = {"write_cell": "cell", "write_range": "range"}
+    for step in workflow.steps:
+        target_field = target_fields.get(step.action)
+        if target_field is None:
+            continue
+        target = step.params.get(target_field)
+        sheet = step.params.get("sheet")
+        if (
+            isinstance(target, str)
+            and _looks_like_a1(target)
+            and (not isinstance(sheet, str) or not sheet.strip())
+        ):
+            return ValidationError(
+                ErrorDetail(
+                    message=(
+                        f'{_step_label(step)}: A1 target "{target}" requires a nonblank '
+                        '"sheet" field.'
+                    ),
+                    technical_reason="A1 write target without a usable sheet",
+                    field="sheet",
+                    suggestion='Add a worksheet name with `sheet: "Sheet1"`.',
+                )
+            )
+    return None
+
+
 def _check_param_types(
     workflow: Workflow, registry: dict[str, ActionSpec]
 ) -> ValidationError | None:
@@ -1373,6 +1402,7 @@ _STATIC_CHECKS: list[
     _check_action_exists,
     _check_unknown_params,
     _check_required_params,
+    _check_write_target_sheets,
     _check_param_types,
     _check_step_references,
 ]
@@ -1528,6 +1558,10 @@ def _looks_like_a1(value: str) -> bool:
     return bool(_A1_RANGE_RE.match(value))
 
 
+def _contains_template_expression(value: Any) -> bool:
+    return isinstance(value, str) and "{{" in value and "}}" in value
+
+
 def _sheet_candidates(value: Any) -> list[str]:
     """Extract the literal, checkable sheet name(s) from a `sheet`-shaped param value.
 
@@ -1537,14 +1571,14 @@ def _sheet_candidates(value: Any) -> list[str]:
     `{{ steps.x... }}` template expression can't be known statically, so it's skipped too.
     """
     if isinstance(value, str):
-        if value == "all" or is_whole_template_expression(value):
+        if value == "all" or _contains_template_expression(value):
             return []
         return [value]
     if isinstance(value, list):
         return [
             item
             for item in value
-            if isinstance(item, str) and not is_whole_template_expression(item)
+            if isinstance(item, str) and not _contains_template_expression(item)
         ]
     return []  # dict ("matching") or None \u2014 dynamic/unspecified, nothing to check
 
@@ -1645,7 +1679,7 @@ def _check_create_sheet_existence(
     if (
         wb_name in known_sheets
         and isinstance(new_name, str)
-        and not is_whole_template_expression(new_name)
+        and not _contains_template_expression(new_name)
     ):
         known_sheets[wb_name].add(new_name)
 
@@ -1658,7 +1692,7 @@ def _check_rename_sheet_existence(
     if wb_name in known_sheets and isinstance(old_name, str):
         if old_name not in known_sheets[wb_name]:
             raise _sheet_error(step, wb_name, old_name, known_sheets[wb_name])
-        if isinstance(new_name, str) and not is_whole_template_expression(new_name):
+        if isinstance(new_name, str) and not _contains_template_expression(new_name):
             known_sheets[wb_name].discard(old_name)
             known_sheets[wb_name].add(new_name)
 
@@ -1688,9 +1722,7 @@ def _check_range_field_existence(
         value = step.params.get(field)
         candidates = value if isinstance(value, list) else [value]
         for candidate in candidates:
-            if not isinstance(candidate, str) or is_whole_template_expression(
-                candidate
-            ):
+            if not isinstance(candidate, str) or _contains_template_expression(candidate):
                 continue
             if _looks_like_a1(candidate):
                 continue
@@ -1734,7 +1766,7 @@ def _check_step_existence(
 
 
 def _is_literal_string(value: Any) -> bool:
-    return isinstance(value, str) and not is_whole_template_expression(value)
+    return isinstance(value, str) and not _contains_template_expression(value)
 
 
 def _table_validation_error(step: Step, message: str) -> ValidationError:
@@ -1836,7 +1868,6 @@ def validate_existence(workflow: Workflow) -> None:
             wb = opened[path]
             known_sheets[name] = set(wb.sheetnames)
             defined_names[name] = set(wb.defined_names.keys())
-            _check_supported_link_layout(name, path)
 
         for step in workflow.steps:
             _check_step_existence(step, known_sheets, defined_names)

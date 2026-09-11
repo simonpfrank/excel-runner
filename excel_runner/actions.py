@@ -619,14 +619,15 @@ def read_metadata(
 
 @file_action(writes=True)
 def write_cell(
-    session: WorkbookSession, sheet: str, cell: str, value: Any
+    session: WorkbookSession, cell: str, value: Any, sheet: str | None = None
 ) -> ActionResult:
     """Write a value to a single cell.
 
     Args:
         session: The workbook session to write to.
-        sheet: Worksheet name.
-        cell: An A1-style cell reference (e.g. "B2").
+        sheet: Worksheet name for an A1 target. Optional for a defined name, whose
+            destination sheet is used instead.
+        cell: An A1-style cell reference (e.g. "B2") or a defined name.
         value: The value to write. A string starting with "=" is stored as a formula.
 
     Returns:
@@ -639,14 +640,19 @@ def write_cell(
 
 @file_action(writes=True)
 def write_range(
-    session: WorkbookSession, sheet: str, range: str, values: list[list[Any]]
+    session: WorkbookSession,
+    range: str,
+    values: list[list[Any]],
+    sheet: str | None = None,
 ) -> ActionResult:
     """Write a 2D block of values, anchored at the top-left cell of `range`.
 
     Args:
         session: The workbook session to write to.
-        sheet: Worksheet name.
-        range: An A1-style cell or range — only the top-left cell is used as the anchor.
+        sheet: Worksheet name for an A1 target. Optional for a defined name, whose
+            destination sheet is used instead.
+        range: An A1-style cell or range, or a defined name. Only the top-left cell is
+            used as the anchor.
         values: A 2D list of row values to write.
 
     Returns:

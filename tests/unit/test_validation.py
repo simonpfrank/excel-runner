@@ -116,6 +116,31 @@ class TestRequiredParams:
             validation.validate_static(workflow, _REGISTRY)
         assert "workbook" in exc_info.value.detail.message
 
+    @pytest.mark.parametrize("sheet", [None, ""])
+    def test_named_write_target_allows_an_omitted_or_blank_sheet(
+        self, sheet: str | None
+    ) -> None:
+        params: dict[str, object] = {
+            "workbook": "manip",
+            "cell": "NamedTarget",
+            "value": "updated",
+        }
+        if sheet is not None:
+            params["sheet"] = sheet
+        workflow = _workflow([Step(id="s1", action="write_cell", params=params)])
+
+        validation.validate_static(workflow, _REGISTRY)  # should not raise
+
+    @pytest.mark.parametrize("sheet", [None, ""])
+    def test_a1_write_target_requires_a_nonblank_sheet(self, sheet: str | None) -> None:
+        params: dict[str, object] = {"workbook": "manip", "cell": "B2", "value": "updated"}
+        if sheet is not None:
+            params["sheet"] = sheet
+        workflow = _workflow([Step(id="s1", action="write_cell", params=params)])
+
+        with pytest.raises(ValidationError, match="sheet"):
+            validation.validate_static(workflow, _REGISTRY)
+
 
 class TestParamTypes:
     def test_field_that_should_be_a_list_but_is_a_string_raises_with_a_wrap_suggestion(

@@ -244,7 +244,7 @@ def close_workbook(workbook: Workbook) -> None:
     workbook.close()
 
 
-def resolve_range(workbook: Workbook, sheet: str, range: str) -> tuple[str, str]:
+def resolve_range(workbook: Workbook, sheet: str | None, range: str) -> tuple[str, str]:
     """Resolve `range` into plain A1 notation on a specific sheet — either unchanged (already
     A1), or via a workbook-level defined name (PRD sec 7's named/defined-range support).
 
@@ -332,7 +332,7 @@ def resolve_sheet_names(
     return [sheet]
 
 
-def write_cell(workbook: Workbook, sheet: str, cell: str, value: Any) -> None:
+def write_cell(workbook: Workbook, sheet: str | None, cell: str, value: Any) -> None:
     """Write a value to a single cell.
 
     A value starting with "=" is stored as a formula automatically — openpyxl's normal
@@ -351,7 +351,7 @@ def write_cell(workbook: Workbook, sheet: str, cell: str, value: Any) -> None:
 
 
 def write_range(
-    workbook: Workbook, sheet: str, range: str, values: list[list[Any]]
+    workbook: Workbook, sheet: str | None, range: str, values: list[list[Any]]
 ) -> None:
     """Write a 2D block of values, anchored at the top-left cell of `range`.
 

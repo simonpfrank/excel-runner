@@ -34,5 +34,8 @@ demos/08_full_showcase/linked_workbook/linked.xlsx
 /output/
 .vscode/
 unify_storage/
+vulture_whitelist.py
+/temp
+uninstall.txt
 
 

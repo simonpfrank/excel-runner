@@ -111,6 +111,24 @@ class TestSheetExistence:
         )
         validation.validate_existence(workflow)  # should not raise
 
+    def test_embedded_template_range_is_deferred(self, workbook_path: Path) -> None:
+        workflow = _workflow(
+            [
+                Step(
+                    id="s1",
+                    action="read_range",
+                    params={
+                        "workbook": "wb",
+                        "sheet": "Products",
+                        "range": "{{ steps.find_column.output.column }}2:{{ steps.find_column.output.column }}6",
+                    },
+                )
+            ],
+            {"wb": WorkbookRef(name="wb", file=str(workbook_path))},
+        )
+
+        validation.validate_existence(workflow)  # must defer to execution
+
     @pytest.mark.parametrize(
         ("action", "field"),
         [("write_cell", "cell"), ("write_range", "range")],
@@ -264,17 +282,10 @@ class TestSheetExistence:
         assert "Missing" in exc_info.value.detail.message
 
 
-class TestSupportedLinkLayout:
-    """Tier-3 also refuses link layouts this tool cannot honour
-    (docs/backend_eligibility_build_plan.md W7).
+class TestExternalLinkPreflight:
+    """Tier-3 validates source workbooks without imposing scratch-layout constraints."""
 
-    Every workbook a run touches is staged into one flat scratch folder, so a link that points
-    *into another folder* (`data\\prices.xlsx`) has no correct meaning once staged: leaving it
-    alone breaks it, rewriting it would silently point somewhere the author never wrote.
-    Refusing up front is the only honest option.
-    """
-
-    def test_relative_subpath_link_is_refused(self, tmp_path: Path) -> None:
+    def test_relative_subpath_link_is_accepted(self, tmp_path: Path) -> None:
         path = workbook_with_external_link(
             tmp_path / "linking.xlsx", target="data/prices.xlsx"
         )
@@ -289,14 +300,9 @@ class TestSupportedLinkLayout:
             {"wb": WorkbookRef(name="wb", file=str(path))},
         )
 
-        with pytest.raises(ValidationError) as exc_info:
-            validation.validate_existence(workflow)
-
-        assert "data/prices.xlsx" in exc_info.value.detail.message
-        assert "another folder" in exc_info.value.detail.message
+        validation.validate_existence(workflow)  # must not raise
 
     def test_same_folder_link_is_accepted(self, tmp_path: Path) -> None:
-        """R1 survives the flat scratch layout intact — both workbooks land side by side."""
         path = workbook_with_external_link(
             tmp_path / "linking.xlsx", target="prices.xlsx"
         )
@@ -314,7 +320,6 @@ class TestSupportedLinkLayout:
         validation.validate_existence(workflow)  # must not raise
 
     def test_absolute_link_is_accepted(self, tmp_path: Path) -> None:
-        """R3/R4 point at a fixed location that staging never moves, so they stay valid."""
         path = workbook_with_external_link(
             tmp_path / "linking.xlsx",
             target=str(tmp_path / "elsewhere" / "prices.xlsx"),
@@ -332,11 +337,9 @@ class TestSupportedLinkLayout:
 
         validation.validate_existence(workflow)  # must not raise
 
-    def test_a_templates_unsupported_link_is_caught_before_the_workbook_exists(
+    def test_a_templates_relative_link_is_accepted_before_the_workbook_exists(
         self, tmp_path: Path
     ) -> None:
-        """The workbook inherits the layout it cannot honour, so the refusal must happen on
-        the first run too — not only once the file happens to exist."""
         template = workbook_with_external_link(
             tmp_path / "template.xlsx", target="data/prices.xlsx"
         )
@@ -359,7 +362,4 @@ class TestSupportedLinkLayout:
             },
         )
 
-        with pytest.raises(ValidationError) as exc_info:
-            validation.validate_existence(workflow)
-
-        assert "data/prices.xlsx" in exc_info.value.detail.message
+        validation.validate_existence(workflow)  # must not raise
