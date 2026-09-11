@@ -111,6 +111,32 @@ class TestSheetExistence:
         )
         validation.validate_existence(workflow)  # should not raise
 
+    @pytest.mark.parametrize(
+        ("action", "field"),
+        [("write_cell", "cell"), ("write_range", "range")],
+    )
+    def test_write_actions_require_existing_defined_names(
+        self, workbook_path: Path, action: str, field: str
+    ) -> None:
+        workflow = _workflow(
+            [
+                Step(
+                    id="s1",
+                    action=action,
+                    params={
+                        "workbook": "wb",
+                        "sheet": "Products",
+                        field: "NoSuchName",
+                        "value" if action == "write_cell" else "values": 1,
+                    },
+                )
+            ],
+            {"wb": WorkbookRef(name="wb", file=str(workbook_path))},
+        )
+        with pytest.raises(ValidationError) as exc_info:
+            validation.validate_existence(workflow)
+        assert "NoSuchName" in exc_info.value.detail.message
+
     def test_create_sheet_satisfies_a_later_reference(
         self, workbook_path: Path
     ) -> None:

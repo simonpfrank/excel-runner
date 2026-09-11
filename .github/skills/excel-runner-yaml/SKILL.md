@@ -181,8 +181,8 @@ steps so anything referenced already ran.
 ## 7. Full action catalog
 
 Every action below lists its exact required/optional fields and exact output keys. `workbook:`
-is required on all of these except `stop` (no workbook at all) and `copy` (nested `source`/
-`target`, see 7.2). Output is always a keyed dict (never a bare value) — reference sub-fields
+is required on all of these except `stop`, `dump`, and `read_text_file` (no workbook at all), and
+`copy` (nested `source`/target`, see 7.2). Output is always a keyed dict (never a bare value) — reference sub-fields
 as `{{ steps.<id>.output.<key> }}`.
 
 ### 7.1 Basic
@@ -284,14 +284,66 @@ Output for `target: cells`: cell reference → value directly at the top of `out
 **`write_cell`**
 | Field | Required | Notes |
 |---|---|---|
-| `sheet`, `cell`, `value` | yes | a `value` string starting with `=` is stored as a formula, not evaluated (openpyxl doesn't recalculate) |
+| `sheet`, `cell`, `value` | yes | `cell` is A1 or a one-cell workbook-level defined name; a defined name's own sheet wins. A `value` string starting with `=` is stored as a formula, not evaluated (openpyxl doesn't recalculate) |
 Output: `{}`.
 
 **`write_range`**
 | Field | Required | Notes |
 |---|---|---|
-| `sheet`, `range`, `values` | yes | `values` is always a 2D list (list of row-lists), even for one row: `[[1, 2, 3]]`. `range` only needs its top-left cell — the block is written starting there. |
+| `sheet`, `range`, `values` | yes | `range` is A1 or a one-area workbook-level defined name; its own sheet wins. `values` is always a 2D list (list of row-lists), even for one row: `[[1, 2, 3]]`. Only the resolved range's top-left cell anchors the block. |
 Output: `{}`.
+
+**`read_text_file`** — reads a `.fac`, CSV, TSV, or simple text file as strings. **No
+`workbook:` field.**
+| Field | Required | Notes |
+|---|---|---|
+| `file` | yes | source path; read-only |
+| `delimiter` | no | exactly one character; overrides extension defaults |
+| `quotechar` | no | exactly one character; default `"` |
+| `encoding` | no | default `utf-8` |
+Output: `{"values": [[...], ...]}`. `.csv`/`.fac` use commas; `.tsv`/`.txt` use tabs; every
+other extension returns one non-empty line per row. Fields never receive automatic type checking
+or conversion: identifiers such as `00123` remain strings.
+
+**`replace_text`** — regex replacement in each populated cell of the selected sheet(s).
+| Field | Required | Notes |
+|---|---|---|
+| `sheet`, `pattern`, `replacement` | yes | `sheet` uses the same exact/list/`all`/`matching` forms as `read_range` |
+Output: `{"replacements": int}` (changed cells).
+
+**`replace_in_range`** — regex replacement limited to one A1 or one-area defined-name range.
+| Field | Required | Notes |
+|---|---|---|
+| `sheet`, `range`, `pattern`, `replacement` | yes | defined name's destination sheet wins over `sheet` |
+Output: `{"replacements": int}` (changed cells).
+
+**`read_table`** — reads a rectangular table from its literal top-left header cell. Headers end
+at the first blank to the right; data ends at the first blank in the first table column.
+| Field | Required |
+|---|---|
+| `sheet`, `header_cell` | yes |
+Output: `{"values": [[...]], "headers": ["..."], "range": "B7:D20"}`. Blank, duplicate,
+or non-text headers and tables with no data rows are errors.
+
+**`copy_table_columns`** — copies data rows only between header-selected table columns.
+| Field | Required |
+|---|---|
+| `sheet`, `header_cell`, `source_columns`, `target_columns` | yes |
+The two column lists must be non-empty and equal in length. Header matching is case-insensitive.
+Output: `{}`.
+
+**`update_table_cells`** — writes one value at paired lookup-row and target-header intersections.
+| Field | Required |
+|---|---|
+| `sheet`, `header_cell`, `lookup_column`, `lookup_rows`, `target_columns`, `value` | yes |
+The lookup and target lists must be non-empty and equal in length; headers and lookup values are
+matched case-insensitively and must each occur exactly once. Output: `{}`.
+
+**`replace_table_text`** — regex replacement at the same paired table intersections.
+| Field | Required |
+|---|---|
+| `sheet`, `header_cell`, `lookup_column`, `lookup_rows`, `target_columns`, `pattern`, `replacement` | yes |
+Output: `{"replacements": int}` (changed cells).
 
 **`write_row`** — two mutually exclusive modes, both under the same `values` field:
 | Field | Required | Notes |

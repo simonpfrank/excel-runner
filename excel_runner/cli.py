@@ -17,10 +17,10 @@ import argparse
 import logging
 import sys
 
-from excel_runner.core import ExcelRunnerError
-from excel_runner.runner import run_workflow
+from core import ExcelRunnerError
+from runner import run_workflow
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("excel_runner.cli")
 
 _LOG_FORMAT = (
     "%(asctime)s %(levelname)-8s %(module)s %(funcName)s:%(lineno)d %(message)s"
@@ -37,7 +37,7 @@ class _BelowWarningFilter(logging.Filter):
 
 
 def configure_logging(level_name: str) -> None:
-    """Attach the CLI's stdout/stderr console handlers to the `excel_runner` logger.
+    """Attach the CLI's stdout/stderr console handlers to the package logger.
 
     DEBUG/INFO go to stdout; WARNING/ERROR/CRITICAL go to stderr — so a caller piping only one
     stream still sees a coherent picture (AGENTS.md's logging section). Clears any handlers
@@ -45,7 +45,7 @@ def configure_logging(level_name: str) -> None:
     same process, as tests do) don't accumulate duplicate handlers.
 
     Args:
-        level_name: One of "DEBUG", "INFO", "WARNING", "ERROR" — the `excel_runner` logger's
+        level_name: One of "DEBUG", "INFO", "WARNING", "ERROR" — the package logger's
             new severity threshold.
     """
     package_logger = logging.getLogger("excel_runner")
@@ -62,7 +62,8 @@ def configure_logging(level_name: str) -> None:
     stderr_handler.setLevel(logging.WARNING)
     package_logger.addHandler(stderr_handler)
 
-    package_logger.setLevel(getattr(logging, level_name))
+    level = getattr(logging, level_name)
+    package_logger.setLevel(level)
 
 
 def _parse_env_override(raw: str) -> tuple[str, str]:

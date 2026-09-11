@@ -105,6 +105,108 @@ class TestHappyPath:
         assert openpyxl.load_workbook(real)["Sheet"]["B1"].value == "explicit"
 
 
+class TestAdditionalFunctions:
+    def test_text_table_and_replacement_actions_run_against_a_real_workbook(
+        self, tmp_path: Path
+    ) -> None:
+        workbook_path = tmp_path / "table.xlsx"
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        assert sheet is not None
+        sheet.title = "BASIS"
+        sheet["B7"] = "BASIS_ITEM"
+        sheet["C7"] = "SOURCE"
+        sheet["D7"] = "TARGET"
+        sheet["B8"] = "ACC_RATIO"
+        sheet["C8"] = "value_202512"
+        sheet["B9"] = "ECO_TBL"
+        sheet["C9"] = "other"
+        other = workbook.create_sheet("Other")
+        other["A1"] = "value_202512"
+        workbook.defined_names["NamedTarget"] = openpyxl.workbook.defined_name.DefinedName(
+            "NamedTarget", attr_text="BASIS!$E$8"
+        )
+        workbook.save(workbook_path)
+        fac_path = tmp_path / "input.fac"
+        fac_path.write_text("CODE,VALUE\n00123,from_fac\n")
+        workflow_path = _write_yaml(
+            tmp_path / "additional.yaml",
+            f"""
+            workbooks:
+              table:
+                file: "{workbook_path.as_posix()}"
+            steps:
+              - id: read_fac
+                action: read_text_file
+                file: "{fac_path.as_posix()}"
+              - id: write_fac
+                action: write_range
+                workbook: table
+                sheet: "BASIS"
+                range: "G7"
+                values: "{{{{ steps.read_fac.output.values }}}}"
+              - id: write_name
+                action: write_cell
+                workbook: table
+                sheet: "BASIS"
+                cell: "NamedTarget"
+                value: "named"
+              - id: read_basis
+                action: read_table
+                workbook: table
+                sheet: "BASIS"
+                header_cell: "B7"
+              - id: copy_column
+                action: copy_table_columns
+                workbook: table
+                sheet: "BASIS"
+                header_cell: "B7"
+                source_columns: ["SOURCE"]
+                target_columns: ["TARGET"]
+              - id: update_cell
+                action: update_table_cells
+                workbook: table
+                sheet: "BASIS"
+                header_cell: "B7"
+                lookup_column: "BASIS_ITEM"
+                lookup_rows: ["ECO_TBL"]
+                target_columns: ["TARGET"]
+                value: "updated"
+              - id: replace_table
+                action: replace_table_text
+                workbook: table
+                sheet: "BASIS"
+                header_cell: "B7"
+                lookup_column: "BASIS_ITEM"
+                lookup_rows: ["ACC_RATIO"]
+                target_columns: ["TARGET"]
+                pattern: "\\\\d{{6}}"
+                replacement: "202606"
+              - id: replace_range
+                action: replace_in_range
+                workbook: table
+                sheet: "BASIS"
+                range: "NamedTarget"
+                pattern: "named"
+                replacement: "range"
+              - id: replace_sheets
+                action: replace_text
+                workbook: table
+                sheet: {{ matching: "^Other$" }}
+                pattern: "202512"
+                replacement: "202606"
+            """,
+        )
+        result = run_workflow(workflow_path, working_dir=tmp_path)
+        assert result.status == "success"
+        updated = openpyxl.load_workbook(workbook_path)
+        assert updated["BASIS"]["D8"].value == "value_202606"
+        assert updated["BASIS"]["D9"].value == "updated"
+        assert updated["BASIS"]["E8"].value == "range"
+        assert updated["BASIS"]["G8"].value == "00123"
+        assert updated["Other"]["A1"].value == "value_202606"
+
+
 class TestIfConditions:
     def test_skipped_step_does_not_run(self, tmp_path: Path) -> None:
         _make_workbook(tmp_path / "output" / "manip.xlsx")

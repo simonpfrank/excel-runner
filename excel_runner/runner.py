@@ -12,11 +12,12 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-from excel_runner import actions as actions_module
-from excel_runner import core, engine
-from excel_runner.core import ActionResult, ErrorDetail, Step, WorkbookSession, Workflow
+import actions as actions_module
+import core
+import engine
+from core import ActionResult, ErrorDetail, Step, WorkbookSession, Workflow
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("excel_runner.runner")
 
 
 @dataclass(frozen=True)

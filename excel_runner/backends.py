@@ -25,14 +25,13 @@ from typing import Any, Literal, ParamSpec, Protocol, TypeVar
 
 import openpyxl
 import xlwings as xw
+from core import ActionExecutionError, ErrorDetail, ExcelRunnerError
 from openpyxl.cell.cell import Cell
 from openpyxl.cell.read_only import ReadOnlyCell
 from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.workbook.workbook import Workbook
 
-from excel_runner.core import ActionExecutionError, ErrorDetail, ExcelRunnerError
-
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("excel_runner.backends")
 
 _SingleCell = (Cell, ReadOnlyCell)
 _WHOLE_COLUMN_RE = re.compile(r"^([A-Za-z]+):([A-Za-z]+)$")
@@ -345,7 +344,10 @@ def write_cell(workbook: Workbook, sheet: str, cell: str, value: Any) -> None:
         cell: An A1-style cell reference (e.g. "B2").
         value: The value to write.
     """
-    workbook[sheet][cell] = value
+    resolved_sheet, resolved_cell = resolve_range(workbook, sheet, cell)
+    if ":" in resolved_cell:
+        raise ValueError("write_cell requires a single cell reference.")
+    workbook[resolved_sheet][resolved_cell] = value
 
 
 def write_range(
@@ -362,11 +364,12 @@ def write_range(
         range: An A1-style cell or range — only the top-left cell is used as the anchor.
         values: A 2D list of row values to write.
     """
-    anchor = workbook[sheet][range.split(":")[0]]
+    resolved_sheet, resolved_range = resolve_range(workbook, sheet, range)
+    anchor = workbook[resolved_sheet][resolved_range.split(":")[0]]
     start_row, start_col = anchor.row, anchor.column
     for row_offset, row_values in enumerate(values):
         for col_offset, value in enumerate(row_values):
-            workbook[sheet].cell(
+            workbook[resolved_sheet].cell(
                 row=start_row + row_offset, column=start_col + col_offset, value=value
             )
 
@@ -976,7 +979,10 @@ def xlw_write_cell(book: xw.Book, sheet: str, cell: str, value: Any) -> None:
         cell: An A1-style cell reference.
         value: The value to write.
     """
-    book.sheets[sheet].range(cell).value = value
+    resolved_sheet, resolved_cell = xlw_resolve_range(book, sheet, cell)
+    if ":" in resolved_cell:
+        raise ValueError("write_cell requires a single cell reference.")
+    book.sheets[resolved_sheet].range(resolved_cell).value = value
 
 
 @_excel_operation("write range")
@@ -991,7 +997,8 @@ def xlw_write_range(
         range: An A1-style cell or range — only the top-left cell is used as the anchor.
         values: A 2D list of row values to write.
     """
-    book.sheets[sheet].range(range.split(":")[0]).value = values
+    resolved_sheet, resolved_range = xlw_resolve_range(book, sheet, range)
+    book.sheets[resolved_sheet].range(resolved_range.split(":")[0]).value = values
 
 
 @_excel_operation("set column width")

@@ -8,7 +8,7 @@ Design notes live in [`docs/PRD.md`](docs/PRD.md) and [`docs/Specification.md`](
 ## Status
 
 v1 file-backend engine is built and tested: loading, templating, validation, session/scratch
-management, 21 actions, and the orchestration loop (`run_workflow`). A CLI entrypoint is also
+management, 28 actions, and the orchestration loop (`run_workflow`). A CLI entrypoint is also
 available (`python -m excel_runner`, the `excel-runner` console script, or running
 `excel_runner/cli.py` directly) for triggering a run from outside Python. Almost every action
 runs against files directly via openpyxl — no live Excel process involved. The exception is
@@ -18,6 +18,11 @@ still aren't built (see [Not yet available](#not-yet-available)).
 
 ## Changelog
 
+- **2026-09-11**: Added `read_text_file` for read-only FAC/CSV/TSV/line-based input, preserving
+  every field as text; regex replacement across sheets, ranges, and lookup-selected table cells;
+  table discovery plus header-driven copy/update actions; and workbook-level defined-name targets
+  for `write_cell` and `write_range`. `--check-existence` now validates defined names used by
+  those write targets. These actions have unit and real-workbook workflow integration coverage.
 - **2026-09-07**: Every `xlw_`/`com_` backend call is now wrapped in a structured error
   boundary (`backends._excel_operation`) — a live Excel/COM failure surfaces as
   `ActionExecutionError` with a readable message instead of a raw traceback; `ValueError`/
@@ -368,7 +373,9 @@ Output for `cells`: cell reference → value (e.g. `.output.A1`).
 
 #### `write_cell`
 
-Writes one value to one cell. A value starting with `=` is stored as a formula.
+Writes one value to one cell. A value starting with `=` is stored as a formula. `cell` accepts
+either A1 notation or a workbook-level defined name resolving to one cell; a defined name's
+destination sheet takes precedence over `sheet`.
 
 | Field | Required |
 |---|---|
@@ -379,7 +386,7 @@ Writes one value to one cell. A value starting with `=` is stored as a formula.
   action: write_cell
   workbook: manip
   sheet: "Summary"
-  cell: "B2"
+  cell: "B2" # Or a one-cell workbook-level defined name.
   value: "Complete"
 
 - id: set_formula
@@ -395,7 +402,9 @@ the workbook is recalculated (see `recalculate` below).
 
 #### `write_range`
 
-Writes a 2D block of values, anchored at the top-left cell of `range`.
+Writes a 2D block of values, anchored at the top-left cell of `range`. `range` accepts A1
+notation or a one-area workbook-level defined name; the name's destination sheet wins over
+`sheet`.
 
 | Field | Required |
 |---|---|
@@ -410,6 +419,59 @@ Writes a 2D block of values, anchored at the top-left cell of `range`.
   values:
     - [10, 20, 30]
     - [40, 50, 60]
+```
+
+#### `read_text_file`
+
+Reads a text file as `{{ steps.<id>.output.values }}`, a 2D list of **strings** suitable for
+`write_range`. It has no `workbook:` field and never changes the source file. `.csv` and `.fac`
+default to comma-separated values; `.tsv` and `.txt` default to tab-separated values; other
+extensions return one non-empty input line per one-cell row. Use `delimiter`, `quotechar`, or
+`encoding` to override parsing. No type checking or conversion occurs, so values such as
+`00123`, `202606`, and `1.50` remain text.
+
+```yaml
+- id: read_basis_fac
+  action: read_text_file
+  file: "./GLOBAL/BASIS_202606.fac"
+
+- id: write_basis
+  action: write_range
+  workbook: manip
+  sheet: "BASIS"
+  range: "B7"
+  values: "{{ steps.read_basis_fac.output.values }}"
+```
+
+#### Table and replacement actions
+
+`replace_text` replaces a regular expression in every populated cell of one sheet, a sheet list,
+`"all"`, or `{ matching: "<regex>" }`. `replace_in_range` limits that operation to an A1 or
+one-area defined-name range. Both return `{"replacements": <changed cell count>}`.
+
+`read_table`, `copy_table_columns`, `update_table_cells`, and `replace_table_text` discover a
+table from a literal top-left `header_cell`, such as `"B7"`: headers extend right to the first
+blank, and data rows extend down to the first blank in the first table column. Header and lookup
+matching in table-writing actions is case-insensitive; ambiguous names or lookup rows are errors.
+
+```yaml
+- id: copy_source_to_target
+  action: copy_table_columns
+  workbook: manip
+  sheet: "BASIS"
+  header_cell: "B7"
+  source_columns: ["SOURCE"]
+  target_columns: ["TARGET"]
+
+- id: set_table_value
+  action: update_table_cells
+  workbook: manip
+  sheet: "BASIS"
+  header_cell: "B7"
+  lookup_column: "BASIS_ITEM"
+  lookup_rows: ["ACC_RATIO"]
+  target_columns: ["TARGET"]
+  value: "na"
 ```
 
 #### `write_row`

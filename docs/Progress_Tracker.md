@@ -11,7 +11,10 @@
 | `stop`, `dump` (control-flow) | ✅ | ✅ | `dump` added 2026-09-03 — prints/writes prior steps' recorded output as JSON (`ids` filter, `to: console|file`); no `workbook:` field, same schema-exemption treatment as `stop`. Every run also always writes `working_dir/steps_dump.json` regardless of whether a `dump` step is used. |
 | `copy` | ✅ | ✅ | **`com` capability now** (moved from `file`, 2026-09-02) — real Excel `Range.Copy` via `backends.com_copy_range`, so formulas/formatting come across too, not just values. `source_range`/`target_range` accept workbook-level defined names (resolved natively by xlwings' `sheet.range(name)`). |
 | `read_range` | ✅ | ✅ | Single-sheet, list, `all`, `{matching: regex}` all built (2026-09-01). `formula: true` param + workbook-level defined-name support for `range:` both built 2026-09-02 (`backends.resolve_range`) — named-range gap closed. |
-| `write_cell`, `write_range` | ✅ | ✅ | Named-range support NOT extended here — `write_*`'s `range`/`cell` is where you're writing *to*, not reading a possibly-named source from; not the same gap. |
+| `write_cell`, `write_range` | ✅ | ✅ | Workbook-level one-area defined names are supported for write targets; `write_cell` requires a single cell and `write_range` uses the resolved area's top-left anchor. |
+| `read_text_file` | ✅ | ✅ | Read-only control action for CSV/FAC, TSV/TXT, and one-line-per-row text; always returns strings and never changes the source file. |
+| `replace_text`, `replace_in_range` | ✅ | ✅ | Regex replacement across selected sheets or one A1/defined-name range; returns changed-cell count. |
+| `read_table`, `copy_table_columns`, `update_table_cells`, `replace_table_text` | ✅ | ✅ | Header-cell table discovery and case-insensitive header/lookup matching; dynamic source-table copy remains deferred. |
 | `write_row` | 🟡 | ✅ (built parts) | Explicit column-mapping + positional modes done; by-header mode (`values_by_header`/`headers_from`) blocked — needs step-output context. |
 | `insert_range` | 🟡 | ✅ (built parts) | Whole-row/whole-column only; partial-range raises `NotImplementedError` deliberately. |
 | `set_column_width`, `create_sheet`, `rename_sheet`, `delete_sheet` | ✅ | ✅ | |
@@ -47,7 +50,7 @@
 | Scratch-directory collision avoidance for concurrent runs (PRD §6.3.1/§12) | Open question |
 | CLI / MCP wrapper | Deferred (PRD §3/§5) |
 | Read a `@file_action` (e.g. `read_range`) via the live COM session when a workbook is already open `xlw`, instead of always switching to `file` first (PRD §12) | Not designed — raised 2026-09-01 after observing a ~2m20s `read_range` step against a large real workbook |
-| **Named/defined-range support for `copy`/`read_range`/`write_cell`/`write_range`'s `range:` field** | **Resolved 2026-09-02 for the read side** (`backends.resolve_range`, built for `read_range`, `read_metadata(cells)`, `find_headers_row`, and `copy`'s `source_range`/`target_range` via xlwings' native range resolution). `write_cell`/`write_range`'s `range:`/`cell` (write *targets*, not sources) deliberately left as-is — not the same gap. |
+| **Named/defined-range support for `copy`/`read_range`/`write_cell`/`write_range`'s `range:` field** | **Resolved** for reads and writes. `write_cell` accepts a single-cell name; `write_range` accepts one contiguous area and writes from its top-left cell. |
 
 ## Last Session (2026-09-03, Windows)
 **Status:** Tier-3 opt-in existence validation + `dump` control action + always-on

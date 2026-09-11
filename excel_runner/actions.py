@@ -11,15 +11,15 @@ banners, since there's no file boundary to do it now that actions live in one mo
 (docs/Specification.md sec 4).
 """
 
+import csv
 import json
 import logging
+import re
 from pathlib import Path
 from typing import Any, Literal
 
-from openpyxl.utils import column_index_from_string, get_column_letter
-
-from excel_runner import backends
-from excel_runner.core import (
+import backends
+from core import (
     ActionExecutionError,
     ActionResult,
     ErrorDetail,
@@ -28,8 +28,167 @@ from excel_runner.core import (
     control_action,
     file_action,
 )
+from openpyxl.utils import column_index_from_string, get_column_letter
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("excel_runner.actions")
+
+
+@control_action
+def read_text_file(
+    file: str,
+    delimiter: str | None = None,
+    quotechar: str = '"',
+    encoding: str = "utf-8",
+) -> ActionResult:
+    """Read a delimited or line-based text file without converting field types."""
+    if delimiter is not None and len(delimiter) != 1:
+        raise ActionExecutionError(
+            ErrorDetail(
+                "read_text_file: delimiter must be one character.", "invalid delimiter"
+            )
+        )
+    if len(quotechar) != 1:
+        raise ActionExecutionError(
+            ErrorDetail(
+                "read_text_file: quotechar must be one character.", "invalid quotechar"
+            )
+        )
+    path = Path(file)
+    effective_delimiter = delimiter
+    if effective_delimiter is None:
+        effective_delimiter = {
+            ".csv": ",",
+            ".fac": ",",
+            ".tsv": "\t",
+            ".txt": "\t",
+        }.get(path.suffix.lower())
+    try:
+        if effective_delimiter is None:
+            with path.open("r", encoding=encoding, newline="") as handle:
+                values = [[line.rstrip("\r\n")] for line in handle if line.strip()]
+        else:
+            with path.open("r", encoding=encoding, newline="") as handle:
+                values = [
+                    row
+                    for row in csv.reader(
+                        handle,
+                        delimiter=effective_delimiter,
+                        quotechar=quotechar,
+                        strict=True,
+                    )
+                    if any(field.strip() for field in row)
+                ]
+    except (OSError, UnicodeError, csv.Error) as exc:
+        raise ActionExecutionError(
+            ErrorDetail(
+                f"read_text_file: could not read {path}: {exc}",
+                f"{type(exc).__name__}: {exc}",
+            )
+        ) from exc
+    return ActionResult(status="success", output={"values": values})
+
+
+def _cell_value(session: WorkbookSession, sheet: str, row: int, column: int) -> Any:
+    if session.backend == "file":
+        return session.handle[sheet].cell(row=row, column=column).value
+    return session.handle.sheets[sheet].range((row, column)).value
+
+
+def _set_cell_value(
+    session: WorkbookSession, sheet: str, row: int, column: int, value: Any
+) -> None:
+    if session.backend == "file":
+        session.handle[sheet].cell(row=row, column=column).value = value
+    else:
+        session.handle.sheets[sheet].range((row, column)).value = value
+
+
+def _table_bounds(
+    session: WorkbookSession, sheet: str, header_cell: str
+) -> tuple[int, int, int, int, list[str]]:
+    if session.backend == "file":
+        anchor = session.handle[sheet][header_cell]
+        start_row, start_column = anchor.row, anchor.column
+    else:
+        anchor = session.handle.sheets[sheet].range(header_cell)
+        start_row, start_column = anchor.row, anchor.column
+    headers: list[str] = []
+    normalized_headers: set[str] = set()
+    column = start_column
+    while (value := _cell_value(session, sheet, start_row, column)) not in (None, ""):
+        if not isinstance(value, str) or value.lower() in normalized_headers:
+            raise ActionExecutionError(
+                ErrorDetail(
+                    "read_table: headers must be unique non-empty text.",
+                    "invalid table headers",
+                )
+            )
+        headers.append(value)
+        normalized_headers.add(value.lower())
+        column += 1
+    if not headers:
+        raise ActionExecutionError(
+            ErrorDetail("read_table: header_cell is blank.", "blank table header")
+        )
+    row = start_row + 1
+    while _cell_value(session, sheet, row, start_column) not in (None, ""):
+        row += 1
+    if row == start_row + 1:
+        raise ActionExecutionError(
+            ErrorDetail("read_table: table has no data rows.", "empty table")
+        )
+    return start_row, start_column, row - 1, column - 1, headers
+
+
+def _table_columns(headers: list[str], names: list[str]) -> list[int]:
+    lowered = {header.lower(): index for index, header in enumerate(headers)}
+    try:
+        return [lowered[name.lower()] for name in names]
+    except KeyError as exc:
+        raise ActionExecutionError(
+            ErrorDetail(
+                f"Table column {exc.args[0]!r} was not found.", "missing table column"
+            )
+        ) from exc
+
+
+def _table_targets(
+    session: WorkbookSession,
+    sheet: str,
+    header_cell: str,
+    lookup_column: str,
+    lookup_rows: list[str],
+    target_columns: list[str],
+) -> list[tuple[int, int]]:
+    if not lookup_rows or len(lookup_rows) != len(target_columns):
+        raise ActionExecutionError(
+            ErrorDetail(
+                "lookup_rows and target_columns must be non-empty and have equal lengths.",
+                "invalid paired table parameters",
+            )
+        )
+    start_row, start_column, end_row, _, headers = _table_bounds(session, sheet, header_cell)
+    lookup_index = _table_columns(headers, [lookup_column])[0]
+    target_indices = _table_columns(headers, target_columns)
+    result: list[tuple[int, int]] = []
+    for lookup_value, target_index in zip(lookup_rows, target_indices, strict=True):
+        matching = [
+            row
+            for row in range(start_row + 1, end_row + 1)
+            if str(
+                _cell_value(session, sheet, row, start_column + lookup_index)
+            ).lower()
+            == lookup_value.lower()
+        ]
+        if len(matching) != 1:
+            raise ActionExecutionError(
+                ErrorDetail(
+                    f"Table row {lookup_value!r} must occur exactly once.",
+                    "missing or duplicate table row",
+                )
+            )
+        result.append((matching[0], start_column + target_index))
+    return result
 
 # --- basic -------------------------------------------------------------------------------
 
@@ -498,6 +657,207 @@ def write_range(
     )
     session.dirty = True
     return ActionResult(status="success", output={})
+
+
+def _replace_cells(cells: list[tuple[Any, Any]], pattern: str, replacement: str) -> int:
+    try:
+        regex = re.compile(pattern)
+    except re.error as exc:
+        raise ActionExecutionError(
+            ErrorDetail(
+                f"Invalid replacement pattern: {exc}", "invalid regular expression"
+            )
+        ) from exc
+    changed = 0
+    for get_value, set_value in cells:
+        value = get_value()
+        if value is None:
+            continue
+        updated, count = regex.subn(replacement, str(value))
+        if count:
+            set_value(updated)
+            changed += 1
+    return changed
+
+
+@file_action(writes=True)
+def replace_text(
+    session: WorkbookSession,
+    sheet: str | list[str] | dict[str, str],
+    pattern: str,
+    replacement: str,
+) -> ActionResult:
+    """Replace regex matches in every populated cell of selected sheets."""
+    names = backends.primitives(session.backend).resolve_sheet_names(session.handle, sheet)
+    cells: list[tuple[Any, Any]] = []
+    for name in names:
+        if session.backend == "file":
+            for row in session.handle[name].iter_rows():
+                for cell in row:
+                    if cell.value is not None:
+                        cells.append(
+                            (
+                                lambda cell=cell: cell.value,
+                                lambda value, cell=cell: setattr(cell, "value", value),
+                            )
+                        )
+        else:
+            used = session.handle.sheets[name].used_range
+            for row in range(used.row, used.row + used.rows.count):
+                for column in range(used.column, used.column + used.columns.count):
+                    cells.append(
+                        (
+                            lambda row=row, column=column, name=name: _cell_value(
+                                session, name, row, column
+                            ),
+                            lambda value, row=row, column=column, name=name: _set_cell_value(
+                                session, name, row, column, value
+                            ),
+                        )
+                    )
+    changed = _replace_cells(cells, pattern, replacement)
+    session.dirty = session.dirty or bool(changed)
+    return ActionResult(status="success", output={"replacements": changed})
+
+
+@file_action(writes=True)
+def replace_in_range(
+    session: WorkbookSession,
+    sheet: str,
+    range: str,
+    pattern: str,
+    replacement: str,
+) -> ActionResult:
+    """Replace regex matches inside one A1 or defined-name range."""
+    resolved_sheet, resolved_range = backends.primitives(session.backend).resolve_range(
+        session.handle, sheet, range
+    )
+    if session.backend == "file":
+        selected = session.handle[resolved_sheet][resolved_range]
+        rows = ((selected,),) if not isinstance(selected, tuple) else selected
+        cells = [
+            (
+                lambda cell=cell: cell.value,
+                lambda value, cell=cell: setattr(cell, "value", value),
+            )
+            for row in rows
+            for cell in row
+        ]
+    else:
+        selected = session.handle.sheets[resolved_sheet].range(resolved_range)
+        cells = [
+            (
+                lambda row=row, column=column: _cell_value(
+                    session, resolved_sheet, row, column
+                ),
+                lambda value, row=row, column=column: _set_cell_value(
+                    session, resolved_sheet, row, column, value
+                ),
+            )
+            for row in range(selected.row, selected.row + selected.rows.count)
+            for column in range(selected.column, selected.column + selected.columns.count)
+        ]
+    changed = _replace_cells(cells, pattern, replacement)
+    session.dirty = session.dirty or bool(changed)
+    return ActionResult(status="success", output={"replacements": changed})
+
+
+@file_action
+def read_table(session: WorkbookSession, sheet: str, header_cell: str) -> ActionResult:
+    """Read a rectangular table discovered from its top-left header cell."""
+    start_row, start_column, end_row, end_column, headers = _table_bounds(
+        session, sheet, header_cell
+    )
+    values = [
+        [_cell_value(session, sheet, row, column) for column in range(start_column, end_column + 1)]
+        for row in range(start_row, end_row + 1)
+    ]
+    end_ref = get_column_letter(end_column) + str(end_row)
+    return ActionResult(
+        status="success",
+        output={"values": values, "headers": headers, "range": f"{header_cell}:{end_ref}"},
+    )
+
+
+@file_action(writes=True)
+def copy_table_columns(
+    session: WorkbookSession,
+    sheet: str,
+    header_cell: str,
+    source_columns: list[str],
+    target_columns: list[str],
+) -> ActionResult:
+    """Copy table data columns selected by header name."""
+    if not source_columns or len(source_columns) != len(target_columns):
+        raise ActionExecutionError(
+            ErrorDetail(
+                "source_columns and target_columns must be non-empty and have equal lengths.",
+                "invalid paired table parameters",
+            )
+        )
+    start_row, start_column, end_row, _, headers = _table_bounds(session, sheet, header_cell)
+    for source, target in zip(
+        _table_columns(headers, source_columns),
+        _table_columns(headers, target_columns),
+        strict=True,
+    ):
+        for row in range(start_row + 1, end_row + 1):
+            _set_cell_value(
+                session,
+                sheet,
+                row,
+                start_column + target,
+                _cell_value(session, sheet, row, start_column + source),
+            )
+    session.dirty = True
+    return ActionResult(status="success", output={})
+
+
+@file_action(writes=True)
+def update_table_cells(
+    session: WorkbookSession,
+    sheet: str,
+    header_cell: str,
+    lookup_column: str,
+    lookup_rows: list[str],
+    target_columns: list[str],
+    value: Any,
+) -> ActionResult:
+    """Write one value to cells selected by table headers and lookup-row values."""
+    for row, column in _table_targets(
+        session, sheet, header_cell, lookup_column, lookup_rows, target_columns
+    ):
+        _set_cell_value(session, sheet, row, column, value)
+    session.dirty = True
+    return ActionResult(status="success", output={})
+
+
+@file_action(writes=True)
+def replace_table_text(
+    session: WorkbookSession,
+    sheet: str,
+    header_cell: str,
+    lookup_column: str,
+    lookup_rows: list[str],
+    target_columns: list[str],
+    pattern: str,
+    replacement: str,
+) -> ActionResult:
+    """Replace regex matches in table cells selected by headers and lookup rows."""
+    cells = [
+        (
+            lambda row=row, column=column: _cell_value(session, sheet, row, column),
+            lambda value, row=row, column=column: _set_cell_value(
+                session, sheet, row, column, value
+            ),
+        )
+        for row, column in _table_targets(
+            session, sheet, header_cell, lookup_column, lookup_rows, target_columns
+        )
+    ]
+    changed = _replace_cells(cells, pattern, replacement)
+    session.dirty = session.dirty or bool(changed)
+    return ActionResult(status="success", output={"replacements": changed})
 
 
 @file_action(writes=True)

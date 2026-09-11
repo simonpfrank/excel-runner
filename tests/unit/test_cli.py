@@ -9,6 +9,8 @@ not this file's.
 
 import logging
 from pathlib import Path
+import subprocess
+import sys
 from unittest.mock import patch
 
 import pytest
@@ -16,6 +18,19 @@ import pytest
 from excel_runner.cli import main
 from excel_runner.core import ErrorDetail, ValidationError
 from excel_runner.runner import RunResult, StepResult
+
+
+def test_cli_script_can_run_directly() -> None:
+    cli_path = Path(__file__).parents[2] / "excel_runner" / "cli.py"
+
+    result = subprocess.run(
+        [sys.executable, str(cli_path), "--help"],
+        check=False,
+        capture_output=True,
+        text=True,
+    )
+
+    assert result.returncode == 0, result.stderr
 
 
 def _success_result() -> RunResult:

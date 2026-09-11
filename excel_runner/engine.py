@@ -18,10 +18,9 @@ from typing import Any, Literal
 from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree
 
+import backends
 import openpyxl
-
-from excel_runner import backends
-from excel_runner.core import (
+from core import (
     ACTION_CAPABILITIES,
     ACTION_WRITES,
     ActionExecutionError,
@@ -36,7 +35,7 @@ from excel_runner.core import (
     is_whole_template_expression,
 )
 
-logger = logging.getLogger(__name__)
+logger = logging.getLogger("excel_runner.engine")
 
 
 @dataclass(frozen=True)
@@ -1269,9 +1268,9 @@ def _check_unknown_params(
     for step in workflow.steps:
         if step.action in _SCHEMA_EXEMPT_ACTIONS:
             continue
-        allowed = (
-            set(registry[step.action].param_schema["properties"]) | _IMPLICIT_FIELDS
-        )
+        allowed = set(registry[step.action].param_schema["properties"])
+        if registry[step.action].capability != "none":
+            allowed |= _IMPLICIT_FIELDS
         extra = sorted(set(step.params) - allowed)
         if extra:
             return ValidationError(
@@ -1290,9 +1289,9 @@ def _check_required_params(
     for step in workflow.steps:
         if step.action in _SCHEMA_EXEMPT_ACTIONS:
             continue
-        required = (
-            set(registry[step.action].param_schema["required"]) | _IMPLICIT_FIELDS
-        )
+        required = set(registry[step.action].param_schema["required"])
+        if registry[step.action].capability != "none":
+            required |= _IMPLICIT_FIELDS
         missing = sorted(required - set(step.params))
         if missing:
             return ValidationError(
@@ -1514,6 +1513,8 @@ _RANGE_PARAM_ACTIONS: dict[str, tuple[str, ...]] = {
     "read_range": ("range",),
     "read_metadata": ("cells",),
     "find_headers_row": ("search_range",),
+    "write_cell": ("cell",),
+    "write_range": ("range",),
 }
 
 
