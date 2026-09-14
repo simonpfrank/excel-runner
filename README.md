@@ -377,12 +377,15 @@ Output for `cells`: cell reference → value (e.g. `.output.A1`).
 #### `write_cell`
 
 Writes one value to one cell. A value starting with `=` is stored as a formula. `cell` accepts
-either A1 notation or a workbook-level defined name resolving to one cell; a defined name's
-destination sheet takes precedence over `sheet`.
+either A1 notation or a workbook-level defined name resolving to one cell. An A1 target
+requires `sheet`; a defined name uses its own destination sheet and allows `sheet` to be
+omitted or blank. A nonblank supplied sheet that differs from the name's destination is ignored
+and logged as a warning.
 
 | Field | Required |
 |---|---|
-| `sheet`, `cell`, `value` | yes |
+| `cell`, `value` | yes |
+| `sheet` | required for an A1 target; optional for a defined name |
 
 ```yaml
 - id: set_status
@@ -398,6 +401,12 @@ destination sheet takes precedence over `sheet`.
   sheet: "Model"
   cell: "D10"
   value: "=SUM(D2:D9)"
+
+- id: set_named_value
+  action: write_cell
+  workbook: manip
+  cell: "Inputs_Status"
+  value: "Complete"
 ```
 
 Note: openpyxl doesn't evaluate formulas — reading `D10` back gives `None`/stale data until
@@ -406,12 +415,14 @@ the workbook is recalculated (see `recalculate` below).
 #### `write_range`
 
 Writes a 2D block of values, anchored at the top-left cell of `range`. `range` accepts A1
-notation or a one-area workbook-level defined name; the name's destination sheet wins over
-`sheet`.
+notation or a one-area workbook-level defined name. An A1 target requires `sheet`; a defined
+name uses its own destination sheet and allows `sheet` to be omitted or blank. A nonblank,
+conflicting supplied sheet is ignored and logged as a warning.
 
 | Field | Required |
 |---|---|
-| `sheet`, `range`, `values` | yes |
+| `range`, `values` | yes |
+| `sheet` | required for an A1 target; optional for a defined name |
 
 ```yaml
 - id: write_block

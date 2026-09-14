@@ -1,5 +1,8 @@
 """Unit tests for the `write_range` action (PRD sec 7/sec 11 item 8)."""
 
+import pytest
+from openpyxl.workbook.defined_name import DefinedName
+
 from excel_runner import backends
 from excel_runner.actions import write_range as write_range_action
 from excel_runner.core import ACTION_CAPABILITIES, WorkbookSession
@@ -18,3 +21,23 @@ class TestWriteRangeAction:
         assert file_session.dirty is False
         write_range_action(session=file_session, sheet="Summary", range="D1", values=[["x"]])
         assert file_session.dirty is True
+
+    @pytest.mark.parametrize("sheet", [None, ""])
+    def test_named_range_target_allows_an_omitted_or_blank_sheet(
+        self, file_session: WorkbookSession, sheet: str | None
+    ) -> None:
+        file_session.handle.defined_names.add(
+            DefinedName("StatusRange", attr_text="Summary!$D$1:$E$2")
+        )
+
+        write_range_action(
+            session=file_session,
+            sheet=sheet,
+            range="StatusRange",
+            values=[[1, 2], [3, 4]],
+        )
+
+        assert backends.read_range(file_session.handle, "Summary", "D1:E2") == [
+            [1, 2],
+            [3, 4],
+        ]

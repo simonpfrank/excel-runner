@@ -299,13 +299,15 @@ Output for `target: cells`: cell reference → value directly at the top of `out
 **`write_cell`**
 | Field | Required | Notes |
 |---|---|---|
-| `sheet`, `cell`, `value` | yes | `cell` is A1 or a one-cell workbook-level defined name; a defined name's own sheet wins. A `value` string starting with `=` is stored as a formula, not evaluated (openpyxl doesn't recalculate) |
+| `cell`, `value` | yes | `cell` is A1 or a one-cell workbook-level defined name. |
+| `sheet` | required for A1; optional for defined name | A defined name's own sheet wins. Omit `sheet`, use `sheet:`, or use `sheet: ""` when pasting a named-target step; a nonblank conflicting sheet is ignored and logged as a warning. A `value` string starting with `=` is stored as a formula, not evaluated (openpyxl doesn't recalculate). |
 Output: `{}`.
 
 **`write_range`**
 | Field | Required | Notes |
 |---|---|---|
-| `sheet`, `range`, `values` | yes | `range` is A1 or a one-area workbook-level defined name; its own sheet wins. `values` is always a 2D list (list of row-lists), even for one row: `[[1, 2, 3]]`. Only the resolved range's top-left cell anchors the block. |
+| `range`, `values` | yes | `range` is A1 or a one-area workbook-level defined name. `values` is always a 2D list (list of row-lists), even for one row: `[[1, 2, 3]]`. Only the resolved range's top-left cell anchors the block. |
+| `sheet` | required for A1; optional for defined name | A defined name's own sheet wins. Omit `sheet`, use `sheet:`, or use `sheet: ""` when pasting a named-target step; a nonblank conflicting sheet is ignored and logged as a warning. |
 Output: `{}`.
 
 **`read_text_file`** — reads a `.fac`, CSV, TSV, or simple text file as strings. **No

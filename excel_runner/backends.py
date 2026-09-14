@@ -841,7 +841,7 @@ def close_open_workbook(handle: Any, backend: Literal["file", "xlw"]) -> None:
 
 
 @_excel_operation("resolve range")
-def xlw_resolve_range(book: xw.Book, sheet: str, range: str) -> tuple[str, str]:
+def xlw_resolve_range(book: xw.Book, sheet: str | None, range: str) -> tuple[str, str]:
     """xlwings twin of `resolve_range` — resolve `range` into plain A1 notation on a sheet.
 
     Args:
@@ -967,7 +967,7 @@ def xlw_read_properties(book: xw.Book) -> dict[str, Any]:
 
 
 @_excel_operation("write cell")
-def xlw_write_cell(book: xw.Book, sheet: str, cell: str, value: Any) -> None:
+def xlw_write_cell(book: xw.Book, sheet: str | None, cell: str, value: Any) -> None:
     """xlwings twin of `write_cell` — write a value to a single cell.
 
     A string starting with "=" is stored as a formula, same as the file-backend twin (Excel's
@@ -987,7 +987,7 @@ def xlw_write_cell(book: xw.Book, sheet: str, cell: str, value: Any) -> None:
 
 @_excel_operation("write range")
 def xlw_write_range(
-    book: xw.Book, sheet: str, range: str, values: list[list[Any]]
+    book: xw.Book, sheet: str | None, range: str, values: list[list[Any]]
 ) -> None:
     """xlwings twin of `write_range` — write a 2D block anchored at `range`'s top-left cell.
 

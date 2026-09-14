@@ -633,6 +633,7 @@ def write_cell(
     Returns:
         A success result with no meaningful output.
     """
+    _warn_ignored_sheet(session, sheet, cell)
     backends.primitives(session.backend).write_cell(session.handle, sheet, cell, value)
     session.dirty = True
     return ActionResult(status="success", output={})
@@ -658,11 +659,32 @@ def write_range(
     Returns:
         A success result with no meaningful output.
     """
+    _warn_ignored_sheet(session, sheet, range)
     backends.primitives(session.backend).write_range(
         session.handle, sheet, range, values
     )
     session.dirty = True
     return ActionResult(status="success", output={})
+
+
+def _warn_ignored_sheet(
+    session: WorkbookSession, sheet: str | None, target: str
+) -> None:
+    if not isinstance(sheet, str) or not sheet.strip():
+        return
+    resolve = (
+        backends.resolve_range
+        if session.backend == "file"
+        else backends.xlw_resolve_range
+    )
+    resolved_sheet, _ = resolve(session.handle, sheet, target)
+    if resolved_sheet != sheet:
+        logger.warning(
+            'Write target "%s" resolves to sheet "%s"; supplied sheet "%s" is ignored.',
+            target,
+            resolved_sheet,
+            sheet,
+        )
 
 
 def _replace_cells(cells: list[tuple[Any, Any]], pattern: str, replacement: str) -> int:
