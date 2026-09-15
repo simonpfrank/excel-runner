@@ -79,8 +79,8 @@ def test_read_text_file_rejects_malformed_csv(tmp_path: Path) -> None:
 
 def test_write_actions_accept_a_defined_name(tmp_path: Path) -> None:
     session = _table_session(tmp_path)
-    write_cell(session, "BASIS", "TargetCell", "hello")
-    write_range(session, "BASIS", "TargetCell", [["range"]])
+    write_cell(session, "TargetCell", "hello", "BASIS")
+    write_range(session, "TargetCell", [["range"]], "BASIS")
     assert session.handle["BASIS"]["D8"].value == "range"
 
 
@@ -90,7 +90,7 @@ def test_write_cell_rejects_a_multi_cell_defined_name(tmp_path: Path) -> None:
         "TargetRange", attr_text="BASIS!$D$8:$D$9"
     )
     with pytest.raises(ValueError, match="single cell"):
-        write_cell(session, "BASIS", "TargetRange", "hello")
+        write_cell(session, "TargetRange", "hello", "BASIS")
 
 
 def test_replacements_use_sheet_selection_and_range(tmp_path: Path) -> None:

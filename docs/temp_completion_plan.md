@@ -12,8 +12,8 @@ workflow, testing, documentation, or quality guarantees.
 ## Current-Cycle Scope
 
 - Make the project installable and runnable as a Python package from a clean environment.
-- Agree the deployment model for Unify: package installation and command-line entry point versus
-  invoking the main modules through `cli.py` with only the required runtime files.
+- Prepare the agreed CED/Unify source deployment: a flat destination root with `cli.py` and its
+  sibling runtime modules, invoked through `python cli.py workflow.yaml`.
 - Define and validate a minimal distributable file set for the destination repository.
 - Suppress the known openpyxl data-validation warning at the appropriate boundary without hiding
   unrelated warnings.
@@ -38,9 +38,9 @@ workflow, testing, documentation, or quality guarantees.
   workflow against shared-folder paths. Collect local copies of every input/template workbook,
   configure the workflow to use those local files, and validate the run locally. Only after the
   workflow is confirmed correct should paths be changed to approved shared-folder locations.
-- Document both primary invocation forms before other usage material:
-  `excel-runner <workflow.yaml>` for an installed package, and
-  `.venv\Scripts\python excel_runner\cli.py <workflow.yaml>` for repository development.
+- Document CED's primary invocation before other usage material: `python cli.py <workflow.yaml>`
+  from the flat CED deployment root. Document package interfaces and repository development as
+  compatibility/contributor alternatives.
 - Explain all command-line arguments and environment overrides following the invocation examples.
 - Move the README change log below installation and run instructions.
 - State that users do not choose between openpyxl and xlwings: Excel Runner selects the safe and
@@ -61,11 +61,12 @@ workflow, testing, documentation, or quality guarantees.
 
 ## Quality And Test Completion
 
-- Make all automated tests pass before release and record the final command, counts, skips, and
-  coverage result.
-- Diagnose and fix the confirmed audit-record and defined-name write test failures.
-- Diagnose the full-suite hang around backend/live-Excel coverage and make the test behavior
-  deterministic, explicit, and appropriate for the release environment.
+- Maintain 100% automated-test success with no skipped tests in the supported Windows-and-Excel
+  release environment; record the final command, count, duration, and coverage result.
+- Preserve regression coverage for the corrected audit-record and defined-name write tests.
+- Keep live-Excel coverage enabled in the full suite. The suite takes several minutes because it
+  starts real Excel instances; test runners must allow that duration rather than treating it as a
+  hang.
 - Ensure Pylint is installed and declared in the project, then address Pylint findings.
 - Correct tool scope/configuration so Vulture, Pyright, and Mypy check project code rather than
   the virtual environment; resolve or explicitly configure every remaining agreed finding.
@@ -74,11 +75,11 @@ workflow, testing, documentation, or quality guarantees.
 
 ## Package And Unify Deployment Decision
 
-Agreed initial deployment model: source-module deployment. Transfer the main `excel_runner`
-modules to the destination repository and invoke the runner directly:
+Agreed initial deployment model: flat-root source-module deployment. Transfer `cli.py` and its
+runtime-module siblings to the CED root and invoke the runner directly:
 
 ```powershell
-python excel_runner\cli.py workflow.yaml
+python cli.py workflow.yaml
 ```
 
 This intentionally does not depend on building or publishing a package artifact in this
@@ -94,10 +95,10 @@ Decisions still required before implementation:
 3. Whether xlwings/Excel automation is available in Unify, and the required behavior if it is not.
 4. Versioning, release tag, destination repository ownership, and the migration procedure.
 
-The destination module layout must keep direct `cli.py` execution reliable from the agreed
-working directory. The source transfer must include every runtime module, `requirements.txt`, and
-the operational YAML/workbook assets required by the specific Unify workflow, while excluding
-tests, local fixtures, run outputs, and temporary reports.
+The destination layout must keep direct `cli.py` execution reliable from the CED root. The source
+transfer must include `cli.py`, `core.py`, `runner.py`, `engine.py`, `actions.py`, `backends.py`,
+`requirements.txt`, and the operational YAML/workbook assets required by the specific Unify
+workflow, while excluding tests, local fixtures, run outputs, and temporary reports.
 
 ## Legacy Action Review
 
@@ -169,19 +170,20 @@ tests, local fixtures, run outputs, and temporary reports.
 
 ### Agreed Deployment Approach
 
-#### Source-module deployment
+#### Flat-root source-module deployment
 
-Distribute `excel_runner/cli.py` and the modules it imports, then invoke:
+Distribute these files at the CED root: `cli.py`, `core.py`, `runner.py`, `engine.py`,
+`actions.py`, `backends.py`, and `requirements.txt`. Then invoke:
 
 ```powershell
-python excel_runner\cli.py workflow.yaml
+python cli.py workflow.yaml
 ```
 
 Advantages: it matches the required Unify invocation, does not require a build step in this
 repository, and makes the deployed runtime files explicit.
 
 Constraints to address: dependency installation remains required; imports must continue to work
-when `cli.py` is invoked directly from the transferred source tree; and the transferred file set
+when `cli.py` is invoked directly from the flat CED root; and the transferred file set
 must be explicitly versioned and documented.
 
 #### Deferred Package Option
@@ -194,13 +196,13 @@ work a blocker for this release cycle.
 
 1. Confirm the target release version, supported Python version, destination repository, and
   whether migration preserves Git history or copies a selected source snapshot.
-2. Define a minimal source deployment manifest: the `excel_runner` runtime modules,
-  `requirements.txt`, the target workflow YAML file(s), and only the runtime assets each workflow
-  needs. Explicitly exclude tests, documentation drafts, `temp` fixtures, run outputs, caches,
-  and `.venv`.
+2. Define a minimal flat-root source deployment manifest: `cli.py`, `core.py`, `runner.py`,
+  `engine.py`, `actions.py`, `backends.py`, `requirements.txt`, the target workflow YAML file(s),
+  and only the runtime assets each workflow needs. Explicitly exclude tests, documentation drafts,
+  `temp` fixtures, run outputs, caches, and `.venv`.
 3. Make direct execution robust from the approved destination repository working directory.
   Preserve or replace the current import handling only after a test proves
-  `python excel_runner\cli.py workflow.yaml` works from outside the module directory.
+  `python cli.py workflow.yaml` works from the flat CED root.
 4. Define runtime versus developer dependencies. Document `pip install -r requirements.txt` for
   Unify and desktop source deployment. Convert `requirements.txt` to UTF-8 and decide how it is
   kept synchronized with runtime dependencies in `pyproject.toml`.
@@ -240,32 +242,30 @@ in `engine.py`.
 
 ### Quality And Test Remediation Plan
 
-#### Test Failures To Fix First
+#### Completed Test Remediation
 
-1. `TestStop.test_stopped_steps_still_get_an_audit_record` raises `KeyError: "step_id"` because
-  its audit JSON parsing assumes every log line is a step record. Establish the audit-file record
-  contract, then either separate non-step records from `audit.jsonl` or make the test select only
-  records with the step-record schema. Add regression coverage for the agreed contract.
-2. `test_write_actions_accept_a_defined_name` and
-  `test_write_cell_rejects_a_multi_cell_defined_name` both pass parameters to `write_cell` in an
-  order the backend interprets as `sheet="hello"`. Decide whether the test is stale or the public
-  action signature has regressed, then align the test and public contract. Preserve defined-name
-  validation and add runner-level YAML coverage for it.
+1. `TestStop.test_stopped_steps_still_get_an_audit_record` was stale: `audit.jsonl` deliberately
+   includes both run-level `event` records and per-step `step_id` records. The assertion now
+   filters step records, matching the established audit-file contract. Focused audit tests pass.
+2. The two defined-name write tests were stale: `write_cell` and `write_range` accept the target
+   before the optional sheet. Their positional calls now match the public action signatures and
+   correctly verify named-target behavior. Focused tests pass.
+3. The former full-suite "hang" was an external execution wrapper's two-minute capture limit,
+   not a blocked test. The real Excel backend contract alone takes 86 seconds and the ordered
+   backend suite takes 157 seconds. Do not add a skip gate for supported Windows Excel runs.
+4. Full no-skip validation completed on 2026-09-15:
 
-#### Reliable Full-Suite Execution
+   ```powershell
+   .venv\Scripts\pytest -q -rs
+   ```
 
-1. The full suite stalls at the first live-Excel/xlwings test in `TestOpenWorkbookForFormulaRead`.
-  The current `requires_excel` marker only tests for Windows, not whether Excel can launch and
-  respond.
-2. Introduce an explicit registered marker for live-Excel tests, plus a capability probe with a
-  short bounded timeout and a clear skip reason when Excel is unavailable. Do not silently skip
-  a capability that production requires.
-3. Add timeouts to individual COM tests and guarantee cleanup of spawned Excel instances after a
-  timeout/failure. A blocked test must fail or skip deterministically rather than stall the whole
-  suite.
-4. Run the complete suite in a confirmed Windows-and-Excel environment until every selected test
-  passes. Record exact pass/fail/skip counts and coverage in the test summary. Release acceptance
-  is zero failed tests; skips must be capability-justified and recorded.
+   Result: `601 passed in 301.05s (0:05:01)`, with zero skipped tests.
+
+#### Ongoing Full-Suite Requirement
+
+Run the full suite in the supported Windows-and-Excel environment after each substantial release
+slice. Release acceptance is 100% selected tests passing with zero skips. Configure external test
+runners to permit at least the observed five-minute execution time.
 
 #### Quality Tooling
 
@@ -302,10 +302,10 @@ Required order:
   > of the required workbooks, run and validate the workflow locally, then update paths to
   > approved shared folders only after the results are confirmed.
 
-3. Command line: direct `python excel_runner\cli.py workflow.yaml` first for desktop and Unify
-  source deployment. List `python -m excel_runner` and `excel-runner` as optional, future
-  package-installation alternatives rather than the production path for this cycle. Use actual
-  Windows examples and explain all arguments: workflow, repeatable `--env KEY=VALUE`,
+3. Command line: direct `python cli.py workflow.yaml` first for CED source deployment, with all
+  runtime modules placed at the CED root. List `python -m excel_runner` and `excel-runner` as
+  optional, future package-installation alternatives rather than the production path for this
+  cycle. Use actual Windows examples and explain all arguments: workflow, repeatable `--env KEY=VALUE`,
   `--working-dir`, `--logging-level`,
   `--no-logfile`, `--check-existence`, and `--dry-run`.
   State that both execution modes are covered by automated smoke tests: direct root-level
@@ -413,7 +413,8 @@ quantities. Adding it solely because `parse_date` exists would create an unsafe 
 
 - Source-module deployment manifest and clean-environment `cli.py` smoke tests pass.
 - Unify deployment model and operational instructions are agreed and documented.
-- Every selected test passes; live-Excel tests have an explicit capability policy and cannot hang.
+- Every selected test passes with no skipped tests in the supported Windows-and-Excel environment.
+- The full test runner permits the observed five-minute live-Excel execution time.
 - All configured quality checks pass from defined project scope.
 - Pylint is installed and declared in `pyproject.toml`.
 - The data-validation warning is narrowly suppressed and regression-tested.

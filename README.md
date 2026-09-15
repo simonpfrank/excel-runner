@@ -1,20 +1,290 @@
-# excel_runner
+# Excel Runner
 
-Declarative, YAML-driven Excel automation. Describe a workflow — open workbooks, read and
-write ranges, look things up, chain steps together — as data, not a script.
+Excel Runner is declarative, YAML-driven Excel automation. A workflow describes workbook reads,
+writes, lookups, copies, and control flow as data rather than as a bespoke Python script.
+The runner selects its workbook backend automatically, stages work in a scratch directory,
+validates workflows before changes begin, commits successful outputs atomically, records an
+audit log, and cleans up the Excel instances it owns.
 
-Design notes live in [`docs/PRD.md`](docs/PRD.md) and [`docs/Specification.md`](docs/Specification.md).
+> **First-run safety:** never point a new or changed workflow at a shared folder. Copy the
+> input workbooks locally, run `--dry-run` and `--check-existence`, validate the local output,
+> then change to approved production paths.
 
-## Status
+## Install and run
 
-v1 file-backend engine is built and tested: loading, templating, validation, session/scratch
-management, 28 actions, and the orchestration loop (`run_workflow`). A CLI entrypoint is also
-available (`python -m excel_runner`, the `excel-runner` console script, or running
-`excel_runner/cli.py` directly) for triggering a run from outside Python. Almost every action
-runs against files directly via openpyxl — no live Excel process involved. The exception is
-`recalculate`, which needs a real, locally-spawned Excel instance (via xlwings/COM) — the
-session it's given switches to that backend automatically. A few other Excel-specific things
-still aren't built (see [Not yet available](#not-yet-available)).
+### Script only deployment (non-package)
+
+Deploy the Python files and `requirements.txt` in the chosen directory. The workflow YAML file
+can have any name and be stored in any folder.
+
+```text
+cli.py
+core.py
+runner.py
+engine.py
+actions.py
+backends.py
+requirements.txt
+workflow.yaml
+```
+
+Install the runtime dependencies, then run the workflow from that directory:
+
+```powershell
+python -m pip install -r requirements.txt
+python cli.py workflow.yaml --dry-run
+python cli.py workflow.yaml --check-existence
+python cli.py workflow.yaml
+```
+
+`requirements.txt` is the runtime dependency for this source deployment. Use local
+workbook copies for the first two commands and inspect the output before a production run.
+
+### Development and contributing (package deployment)
+
+For package development, create a virtual environment and install the project with its
+development dependencies. If you are unfamiliar with Python virtual environments, refer to the
+Unify Python best-practice document or an equivalent trusted guide.
+
+```powershell
+git clone <this repo>
+cd excel-runner
+python -m venv .venv
+.venv\Scripts\python -m pip install -e ".[dev]"
+```
+
+Package interfaces remain available for development and compatibility:
+
+```powershell
+.venv\Scripts\python -m excel_runner workflow.yaml
+```
+
+### Command-line options
+
+- `--env KEY=VALUE`: Override an `env:` value; repeat for multiple values.
+- `--working-dir PATH`: Place `excel_runner_runs/<workflow-name>/` under `PATH`. This is where
+  temporary files plus audit and run logs go.
+- `--logging-level DEBUG|INFO|WARNING|ERROR`: Set console and log-file verbosity.
+- `--no-logfile`: Do not create `run.log` beside the audit log.
+- `--dry-run`: Validate without staging, changing, saving, or recalculating workbooks.
+- `--check-existence`: Validate referenced workbook files, sheets, and defined names before a
+  real run.
+
+### Preflight and validation
+
+Use the compiler-style read-only preflight checks before a run:
+
+```powershell
+# Validate only. No staging, Excel process, save, calculation, or action dispatch.
+.venv\Scripts\python .\excel_runner\cli.py .\workflow.yaml --dry-run
+
+# Run the same preflight, then execute only when it succeeds.
+.venv\Scripts\python .\excel_runner\cli.py .\workflow.yaml --check-existence
+
+# Suppress the default human-readable log file for either command.
+.venv\Scripts\python .\excel_runner\cli.py .\workflow.yaml --no-logfile
+```
+
+A workflow is checked in up to three tiers before/while it runs:
+
+1. **Structural** (always on) — every action exists, no unrecognized or missing-required
+   params, param types match, step-id references resolve in order. No workbook access at all.
+2. **Planning** (always on) — infers whether each workbook needs to be opened read-only or
+   read-write, from which actions touch it. Still no workbook access.
+3. **Read-only preflight** (`--dry-run`, or before execution with `--check-existence`) — opens
+  referenced workbooks read-only and confirms literal sheet names, workbook-level defined
+  names, and table boundaries/header/lookup references. It also validates literal text input
+  files by parsing them and compiles literal regular expressions. Values derived from earlier
+  step output are deferred to execution because their final values do not exist yet. A workbook
+  that does not exist yet (`create_if_missing` with no template) is skipped.
+
+The CLI writes all console log records to `excel_runner_runs/<workflow-name>/run.log` by default,
+alongside the structured `audit.jsonl` created during execution. Pass `--no-logfile` to disable
+the human-readable log. A default `--dry-run` creates only this `run.log`; it still does not
+create a scratch copy, Excel process, workbook write, save, calculation, or action dispatch.
+`--check-existence` performs the same checks, then executes normally. Validation errors stop the
+real run before any action dispatch.
+
+
+## Run a workflow from a script:
+
+```python
+from excel_runner import run_workflow
+
+result = run_workflow("workflow.yaml")
+print(result.status)          # "success" or "error"
+for step in result.step_results:
+    print(step.step_id, step.status)
+```
+
+Pass `env_overrides` to parameterize a run without editing the file:
+
+```python
+run_workflow("workflow.yaml", env_overrides={"output_folder": "/tmp/run-42"})
+```
+
+## Using it as a library
+
+```python
+from excel_runner import run_workflow, list_actions, RunResult, StepResult
+
+result: RunResult = run_workflow("workflow.yaml")
+
+for spec in list_actions():
+    print(spec.name, "-", spec.description)
+```
+
+`list_actions()` returns every built action's name, description, capability, and parameter
+schema — useful for building a tool wrapper (CLI, API and handoff, MCP server, agent framework) on top without
+duplicating the action catalog.
+
+
+## Quick start
+
+A minimal workflow: read one cell, write it somewhere else.
+
+```yaml
+workbooks:
+  my_book:
+    file: "./my_book.xlsx"
+
+steps:
+  - id: get_total
+    action: read_range
+    workbook: my_book
+    sheet: "Summary"
+    range: "B2"
+
+  - id: write_total
+    action: write_cell
+    workbook: my_book
+    sheet: "Summary"
+    cell: "D2"
+    value: "{{ steps.get_total.output.values }}"
+```
+
+The workbook opens automatically and is saved automatically at the end if every step succeeds;
+no explicit `save` step is needed (see [Workbook lifecycle](#workbook-lifecycle)).
+
+## Workflow YAML explained
+
+A workflow file has three top-level blocks:
+* `env`: Variables set before the workflow starts, such as paths. The same values can be
+  overridden from the command line or library code.
+* `workbooks`: Logical workbook names used by steps. See the action reference for options such
+  as templates.
+* `steps`: Ordered actions. Each step needs a tracking `id` containing letters, numbers, and
+  underscores, with no spaces and no leading number.
+
+```yaml
+env:                              # optional — plain values, referenced as {{ env.NAME }}
+  input_folder: "./input"         # These can be overridden in the command line
+  output_folder: "./output"
+
+workbooks:                        # every workbook the workflow touches, by logical name
+  historical:
+    file: "{{ env.input_folder }}/historical.xlsx"
+  results:
+    file: "{{ env.output_folder }}/results.xlsx"
+    template: historical          # begin every run from this workbook's content
+
+steps:                            # run in order
+  - id: some_step                 # unique, referenced by later steps
+    action: read_range            # one of the actions below
+    workbook: historical          # logical name from workbooks: above
+    sheet: "Summary"
+    range: "A1:D10"
+```
+
+Workflows can be authored manually or with GitHub Copilot using the
+[`excel-runner-yaml` skill](.github/skills/excel-runner-yaml/SKILL.md). The skill is the
+authoritative field-by-field YAML syntax reference; this README is an introduction and action
+overview.
+
+### Referencing another step's output
+
+Values use the Jinja2 templating syntax. A `{{ ... }}` expression can refer to an `env` value or
+the output of an earlier step.
+
+Every step's result is available as `{{ steps.<id>.output }}` once that step has run:
+
+```yaml
+value: "{{ steps.get_total.output.values }}"
+```
+
+If a field's value is *entirely* one `{{ }}` expression, it resolves to the real Python value
+(a number stays a number) rather than a string. Embedded in a longer string
+(`"{{ env.output_folder }}/results.xlsx"`), it's substituted as text.
+
+### Conditional steps
+
+```yaml
+- id: maybe_write
+  action: write_cell
+  workbook: results
+  sheet: "Summary"
+  cell: "E1"
+  value: "found it"
+  if: "{{ steps.find_it.status == 'success' }}"
+```
+
+A step whose `if:` evaluates false is skipped (not run, not an error). Every step's `status`
+(`success`, `error`, `skipped`, or `stopped` — see [`stop`](#stop)) is available the same way as
+its output.
+
+### When an action doesn't find what it's looking for
+
+Search actions (`find_row`, `find_column`, `find_headers_row`) return `status: "error"` when
+nothing matches — that's a normal outcome, not a crash. The workflow keeps running; later steps
+can check `if: "{{ steps.find_it.status == 'success' }}"` to react to it. A genuinely broken
+step (bad parameters, an unsupported combination) raises instead and stops the run — nothing
+is ever written back to the real files unless every step in the run succeeded.
+
+### Workbook lifecycle
+
+Excel Runner stages both read-only and read-write workflow sessions in its scratch directory.
+Read-only copies are never committed; changed workbook copies are committed only after a
+successful run. The read-only preflight is the exception: it opens declared workbook paths
+directly to validate them before a run begins.
+
+Workbooks open automatically on first reference — no `open` step required. On a fully
+successful run, every workbook that was written to is saved automatically. Explicit `open`/
+`save`/`close` steps exist for manual control (e.g. saving partway through) but are optional.
+
+When a workbook declares `template: <logical name>`, its scratch copy always starts from that
+template on every run, even when its own `file:` already exists. The successful result replaces
+that file atomically. `create_if_missing: true` creates a blank workbook only when no template
+is declared.
+
+All work occurs in the workflow's scratch directory, not directly against declared workbook
+paths. On success, changed scratch workbooks are closed, saved, and atomically committed to
+their `file:` destinations; on an error, they remain only in the run artifacts. A template is
+therefore suitable for repeatable output generation: an old output never becomes the next run's
+hidden input.
+
+### Save blockers
+
+Excel Runner normally uses openpyxl, including for ordinary reads and writes. Before the first
+write, it inspects the staged workbook for save blockers. The only empirically verified blocker
+today is an outbound external-workbook link: openpyxl can damage that link metadata when it
+saves, even when the workflow did not change the formula containing the link.
+
+Read-only access remains on openpyxl. A blocker-bearing workbook that will be written is
+automatically promoted to a locally spawned Excel/xlwings session before its first write and
+stays there for the run. This requires a usable local Excel installation; the runner reports an
+error rather than falling back to an unsafe save. Detected blockers and backend changes are
+recorded in the audit log.
+
+An external link to a workbook that is not modified by the run remains pointed at that workbook's
+real path. It is not staged, rewired, or changed merely because another workbook links to it.
+The linking workbook still uses Excel/xlwings for saving, because its outbound link is a save
+blocker. Only an absolute link to another declared workbook that will also be modified is
+temporarily rewired to that workbook's scratch copy and included in commit ordering.
+
+Additional save blockers are added only when testing demonstrates that openpyxl cannot safely
+round-trip that workbook feature.
+
+
 
 ## Changelog
 
@@ -79,131 +349,11 @@ still aren't built (see [Not yet available](#not-yet-available)).
   testing.
 - **2026-08-20**: Fixed a real, intermittent (~50% of runs) hang in
   `OwnedInstanceRegistry.close_owned()` on Windows (`spawn()` now uses `add_book=True` so
-  spawned instances register in `xw.apps`). Added a CLI entrypoint (`excel_runner/cli.py`,
-  `__main__.py`, `excel-runner` console script) to run a workflow YAML file and print its
+  spawned instances register in `xw.apps`). Added CLI entrypoints (`cli.py`, `__main__.py`,
+  `excel-runner` console script) to run a workflow YAML file and print its
   result as JSON — driven by the need to invoke a workflow from an external orchestration
   workflow as an external process. Full quality-gate suite (pytest, ruff, mypy --strict, pyright,
   radon) confirmed clean on Windows for the first time.
-
-## Install and run
-
-```bash
-git clone <this repo>
-cd excel-runner
-uv venv .venv --python 3.12
-source .venv/bin/activate
-uv pip install -e .
-```
-
-Run a workflow from a script:
-
-```python
-from excel_runner import run_workflow
-
-result = run_workflow("workflow.yaml")
-print(result.status)          # "success" or "error"
-for step in result.step_results:
-    print(step.step_id, step.status)
-```
-
-Pass `env_overrides` to parameterize a run without editing the file:
-
-```python
-run_workflow("workflow.yaml", env_overrides={"output_folder": "/tmp/run-42"})
-```
-
-## Quick start
-
-A minimal workflow: read one cell, write it somewhere else.
-
-```yaml
-workbooks:
-  manip:
-    file: "./manip.xlsx"
-
-steps:
-  - id: get_total
-    action: read_range
-    workbook: manip
-    sheet: "Summary"
-    range: "B2"
-
-  - id: write_total
-    action: write_cell
-    workbook: manip
-    sheet: "Summary"
-    cell: "D2"
-    value: "{{ steps.get_total.output.values }}"
-```
-
-The workbook is saved automatically at the end, if every step succeeded — no explicit `save`
-step needed (see [Workbook lifecycle](#workbook-lifecycle)).
-
-## Workflow YAML
-
-A workflow file has three top-level blocks:
-
-```yaml
-env:                              # optional — plain values, referenced as {{ env.NAME }}
-  input_folder: "./input"
-  output_folder: "./output"
-
-workbooks:                        # every workbook the workflow touches, by logical name
-  historical:
-    file: "{{ env.input_folder }}/historical.xlsx"
-  results:
-    file: "{{ env.output_folder }}/results.xlsx"
-    template: historical          # begin every run from this workbook's content
-
-steps:                            # run in order
-  - id: some_step                 # unique, referenced by later steps
-    action: read_range            # one of the actions below
-    workbook: historical          # logical name from workbooks: above
-    sheet: "Summary"
-    range: "A1:D10"
-```
-
-### Referencing another step's output
-
-Every step's result is available as `{{ steps.<id>.output }}` once that step has run:
-
-```yaml
-value: "{{ steps.get_total.output.values }}"
-```
-
-If a field's value is *entirely* one `{{ }}` expression, it resolves to the real Python value
-(a number stays a number) rather than a string. Embedded in a longer string
-(`"{{ env.output_folder }}/results.xlsx"`), it's substituted as text.
-
-### Conditional steps
-
-```yaml
-- id: maybe_write
-  action: write_cell
-  workbook: results
-  sheet: "Summary"
-  cell: "E1"
-  value: "found it"
-  if: "{{ steps.find_it.status == 'success' }}"
-```
-
-A step whose `if:` evaluates false is skipped (not run, not an error). Every step's `status`
-(`success`, `error`, `skipped`, or `stopped` — see [`stop`](#stop)) is available the same way as
-its output.
-
-### When an action doesn't find what it's looking for
-
-Search actions (`find_row`, `find_column`, `find_headers_row`) return `status: "error"` when
-nothing matches — that's a normal outcome, not a crash. The workflow keeps running; later steps
-can check `if: "{{ steps.find_it.status == 'success' }}"` to react to it. A genuinely broken
-step (bad parameters, an unsupported combination) raises instead and stops the run — nothing
-is ever written back to the real files unless every step in the run succeeded.
-
-### Workbook lifecycle
-
-Workbooks open automatically on first reference — no `open` step required. On a fully
-successful run, every workbook that was written to is saved automatically. Explicit `open`/
-`save`/`close` steps exist for manual control (e.g. saving partway through) but are optional.
 
 ## Action reference
 
@@ -215,22 +365,25 @@ which needs `source:`/`target:` instead. Fields are required unless marked optio
 #### `open`
 
 Confirms a workbook is open. Rarely needed explicitly — workbooks open automatically. No other
-fields.
+fields. This should almost never be needed. The `workbook` value names an entry in the
+`workbooks:` section.
 
 ```yaml
 - id: open_it
   action: open
-  workbook: manip
+  workbook: my_book
 ```
 
 #### `save`
 
-Saves the workbook now, instead of waiting for the automatic end-of-run save.
+Saves the workbook now instead of waiting for the automatic end-of-run save. This can be useful
+when testing a workflow stage, for example a `save` action followed by `stop` so you can review
+the workbook at that point.
 
 ```yaml
 - id: save_it
   action: save
-  workbook: manip
+  workbook: my_book
 ```
 
 #### `close`
@@ -240,7 +393,7 @@ Closes the workbook, releasing its file handle.
 ```yaml
 - id: close_it
   action: close
-  workbook: manip
+  workbook: my_book
 ```
 
 #### `stop`
@@ -282,12 +435,18 @@ workflow's internal per-step storage while authoring/debugging a workflow. No `w
 
 Every run also always writes `working_dir/steps_dump.json` — every step's recorded output, in
 one pretty-printed JSON object — regardless of whether a `dump` step is used.
+The `dump` action's own step output is `{}`; the JSON it prints or writes is its side effect.
 
 ### Data
+**Note:** Where an action explicitly supports a workbook-level defined name, it can be used in
+place of an A1 cell or range reference. This is not a general rule for every range-like field;
+`copy` still requires both source and target sheet names.
 
 #### `copy`
 
-Copies a range — or the whole sheet, if `range` is omitted — from one workbook into another. This loads Excel so it is the same as copy and paste.
+Copies a range — or the source sheet's used range when `range` is omitted — from one workbook
+into another. This uses Excel copy/paste through a shared live Excel session, so formulas and
+formatting are preserved rather than copied as values only.
 
 | Field | Required | Notes |
 |---|---|---|
@@ -303,7 +462,7 @@ Copies a range — or the whole sheet, if `range` is omitted — from one workbo
     sheet: "Reserving Data"
     range: "A1:AC50"
   target:
-    workbook: manip
+    workbook: my_book
     sheet: "Reserving Data"
     range: "A1"
 ```
@@ -331,7 +490,7 @@ resolved sheet.
 ```yaml
 - id: get_totals
   action: read_range
-  workbook: manip
+  workbook: my_book
   sheet: "Outputs"
   range: "A1:D50"
 ```
@@ -339,7 +498,7 @@ resolved sheet.
 ```yaml
 - id: get_ah_status
   action: read_range
-  workbook: manip
+  workbook: my_book
   sheet: { matching: "^A&H" }
   range: "O6"
 # .output.values is keyed by sheet name, e.g. {"A&H North": "Pass", "A&H South": "Fail"}
@@ -354,17 +513,35 @@ Reads workbook document properties, or a scattered list of specific cells.
 | `target` | yes | `"properties"` or `"cells"` |
 | `sheet`, `cells` | if `target: cells` | `cells` is a list of A1 references |
 
+The action returns every non-empty standard document property available in the workbook. Common
+properties include:
+
+* `title`
+* `subject`
+* `creator`
+* `keywords`
+* `description`
+* `lastModifiedBy`
+* `created`
+* `modified`
+* `category`
+* `contentStatus`
+* `identifier`
+* `language`
+* `revision`
+* `version`
+
 ```yaml
 - id: get_props
   action: read_metadata
-  workbook: manip
+  workbook: my_book
   target: properties
 ```
 
 ```yaml
 - id: get_specific_cells
   action: read_metadata
-  workbook: manip
+  workbook: my_book
   target: cells
   sheet: "Summary"
   cells: ["A1", "B3"]
@@ -372,6 +549,33 @@ Reads workbook document properties, or a scattered list of specific cells.
 
 Output for `properties`: property name → value (e.g. `.output.title`, `.output.creator`).
 Output for `cells`: cell reference → value (e.g. `.output.A1`).
+
+Set `formula: true` with `target: cells` to return formula text instead of a cached calculated
+value. `target: textboxes` is not implemented and raises a clear runtime error.
+
+#### `parse_date`
+
+Parses a text value using Python `datetime.strptime` directives and returns a native Python
+date. It has no `workbook:` field. Invalid input or calendar dates produce a structured action
+error.
+
+| Field | Required | Notes |
+|---|---|---|
+| `value`, `format` | yes | Example format: `"%Y-%m-%d"` |
+
+```yaml
+- id: parse_period_end
+  action: parse_date
+  value: "2026-06-30"
+  format: "%Y-%m-%d"
+
+- id: write_period_end
+  action: write_cell
+  workbook: my_book
+  sheet: "Summary"
+  cell: "B2"
+  value: "{{ steps.parse_period_end.output.value }}"
+```
 
 #### `write_cell`
 
@@ -389,21 +593,21 @@ and logged as a warning.
 ```yaml
 - id: set_status
   action: write_cell
-  workbook: manip
+  workbook: my_book
   sheet: "Summary"
   cell: "B2" # Or a one-cell workbook-level defined name.
   value: "Complete"
 
 - id: set_formula
   action: write_cell
-  workbook: manip
+  workbook: my_book
   sheet: "Model"
   cell: "D10"
   value: "=SUM(D2:D9)"
 
 - id: set_named_value
   action: write_cell
-  workbook: manip
+  workbook: my_book
   cell: "Inputs_Status"
   value: "Complete"
 ```
@@ -426,7 +630,7 @@ conflicting supplied sheet is ignored and logged as a warning.
 ```yaml
 - id: write_block
   action: write_range
-  workbook: manip
+  workbook: my_book
   sheet: "Summary"
   range: "B2"
   values:
@@ -450,7 +654,7 @@ extensions return one non-empty input line per one-cell row. Use `delimiter`, `q
 
 - id: write_basis
   action: write_range
-  workbook: manip
+  workbook: my_book
   sheet: "BASIS"
   range: "B7"
   values: "{{ steps.read_basis_fac.output.values }}"
@@ -470,7 +674,7 @@ matching in table-writing actions is case-insensitive; ambiguous names or lookup
 ```yaml
 - id: copy_source_to_target
   action: copy_table_columns
-  workbook: manip
+  workbook: my_book
   sheet: "BASIS"
   header_cell: "B7"
   source_columns: ["SOURCE"]
@@ -478,7 +682,7 @@ matching in table-writing actions is case-insensitive; ambiguous names or lookup
 
 - id: set_table_value
   action: update_table_cells
-  workbook: manip
+  workbook: my_book
   sheet: "BASIS"
   header_cell: "B7"
   lookup_column: "BASIS_ITEM"
@@ -496,7 +700,7 @@ column.
 # explicit column mapping
 - id: write_summary_row
   action: write_row
-  workbook: manip
+  workbook: my_book
   sheet: "Summary"
   row: 5
   values: { B: "North", C: 1200, D: "PASS" }
@@ -504,7 +708,7 @@ column.
 # positional — values in order, starting at start_column
 - id: write_summary_row_positional
   action: write_row
-  workbook: manip
+  workbook: my_book
   sheet: "Summary"
   row: 5
   start_column: B
@@ -529,7 +733,7 @@ structured error, not a crash.
 ```yaml
 - id: insert_flag_column
   action: insert_range
-  workbook: manip
+  workbook: my_book
   sheet: "Summary"
   at: "C:C"
   header: { row: 1, text: "Flag" }
@@ -545,7 +749,7 @@ structured error, not a crash.
 ```yaml
 - id: widen_columns
   action: set_column_width
-  workbook: manip
+  workbook: my_book
   sheet: "Summary"
   columns: "A:C"
   width: autofit
@@ -565,7 +769,7 @@ Returns a structured error (not a crash) if a sheet named `name` already exists.
 ```yaml
 - id: add_data_sheet
   action: create_sheet
-  workbook: manip
+  workbook: my_book
   name: "Data"
 ```
 
@@ -580,7 +784,7 @@ Renames an existing worksheet.
 ```yaml
 - id: rename_it
   action: rename_sheet
-  workbook: manip
+  workbook: my_book
   sheet: "Sheet"
   new_name: "Data"
 ```
@@ -597,7 +801,7 @@ sheet — a workbook can't have zero sheets.
 ```yaml
 - id: remove_scratch_sheet
   action: delete_sheet
-  workbook: manip
+  workbook: my_book
   sheet: "Scratch"
 ```
 
@@ -610,7 +814,7 @@ Finds the row where every pattern (regex) matches some cell in that row.
 ```yaml
 - id: find_headers
   action: find_headers_row
-  workbook: manip
+  workbook: my_book
   sheet: "Summary"
   search_range: "A1:J10"
   patterns: ["Region", "Total", "Status"]
@@ -625,7 +829,7 @@ Finds the row where a column equals a value.
 ```yaml
 - id: find_north
   action: find_row
-  workbook: manip
+  workbook: my_book
   sheet: "Summary"
   column: "A"
   search_value: "North"
@@ -641,7 +845,7 @@ Finds one column by header pattern (regex).
 ```yaml
 - id: find_status_col
   action: find_column
-  workbook: manip
+  workbook: my_book
   sheet: "Summary"
   header_row: 1
   pattern: "Status"
@@ -657,13 +861,15 @@ absent from the output — not an error.
 ```yaml
 - id: find_key_columns
   action: find_columns
-  workbook: manip
+  workbook: my_book
   sheet: "Summary"
   header_row: 1
   patterns: { region: "Region.*", total: "Total.*", status: "Status" }
 ```
 
 Output: logical name → column letter (e.g. `.output.region`).
+
+### Recalculation
 
 #### `recalculate`
 
@@ -680,9 +886,9 @@ links resolve correctly.
 | `sheet` | no | only meaningful with `scope: "sheet"`; if omitted, the active sheet is used and `.output.warning` names which one |
 
 ```yaml
-- id: recalc_manip
+- id: recalc_my_book
   action: recalculate
-  workbook: manip
+  workbook: my_book
   scope: workbook
   mode: normal
 ```
@@ -690,48 +896,21 @@ links resolve correctly.
 Output: `.output.scope`, `.output.mode`, plus `.output.sheet`/`.output.warning` when `scope` is
 `"sheet"`.
 
-## Preflight and validation
-
-Use the compiler-style read-only preflight before a run:
-
-```powershell
-# Validate only. No staging, Excel process, save, calculation, or action dispatch.
-.venv\Scripts\python .\excel_runner\cli.py .\workflow.yaml --dry-run
-
-# Run the same preflight, then execute only when it succeeds.
-.venv\Scripts\python .\excel_runner\cli.py .\workflow.yaml --check-existence
-
-# Suppress the default human-readable log file for either command.
-.venv\Scripts\python .\excel_runner\cli.py .\workflow.yaml --no-logfile
-```
-
-A workflow is checked in up to three tiers before/while it runs:
-
-1. **Structural** (always on) — every action exists, no unrecognized or missing-required
-   params, param types match, step-id references resolve in order. No workbook access at all.
-2. **Planning** (always on) — infers whether each workbook needs to be opened read-only or
-   read-write, from which actions touch it. Still no workbook access.
-3. **Read-only preflight** (`--dry-run`, or before execution with `--check-existence`) — opens
-  referenced workbooks read-only and confirms literal sheet names, workbook-level defined
-  names, and table boundaries/header/lookup references. It also validates literal text input
-  files by parsing them and compiles literal regular expressions. Values derived from earlier
-  step output are deferred to execution because their final values do not exist yet. A workbook
-  that does not exist yet (`create_if_missing` with no template) is skipped.
-
-The CLI writes all console log records to `excel_runner_runs/<workflow-name>/run.log` by default,
-alongside the structured `audit.jsonl` created during execution. Pass `--no-logfile` to disable
-the human-readable log. A default `--dry-run` creates only this `run.log`; it still does not
-create a scratch copy, Excel process, workbook write, save, calculation, or action dispatch.
-`--check-existence` performs the same checks, then executes normally. Validation errors stop the
-real run before any action dispatch.
 
 ## Not yet available
 
 Flagged clearly rather than silently missing:
 
-- **`write_table`, `aggregate`, `write_row`'s by-header mode** — each needs to reference another
-  step's output by its step id directly (not through `{{ }}` templating), which isn't wired up
-  yet.
+- **Additional save blockers** — only outbound external-workbook links are currently verified.
+  Other file types or workbook features need empirical safety testing before they are treated as
+  blockers.
+- **`copy` named-range sheet resolution** — `copy` requires source and target sheet names even
+  when a named range is supplied. The action does not yet resolve the named range's sheet.
+- **`read_metadata` cell properties** — formatting and layout details such as font, fill,
+  number format, column width, and row height are not supported.
+- **`write_table`, `aggregate`, `write_row's` dedicated by-header mode** — no action-specific
+  contract has been designed. Whole-expression `{{ }}` templating can already compose prior
+  step outputs into `write_range` or `write_row` values where suitable.
 - **`read_links`, `write_links`** — reading/rewriting external workbook links. A real
   limitation in openpyxl (not just unbuilt), see `docs/PRD.md` §7.
 - **`refresh_links`, `run_macro`, `export_pdf`** — all need a live Excel session
@@ -740,33 +919,48 @@ Flagged clearly rather than silently missing:
   error if requested.
 - **`update_summary_table`** — not designed yet.
 
-## Using it as a library
+## Running in Unify
 
-```python
-from excel_runner import run_workflow, list_actions, RunResult, StepResult
+**TBC:** the Unify deployment model, its command wrapper, working-directory ownership, and
+operational credential handling have not yet been agreed. Until that decision is documented,
+deploy the source bundle only in a locally controlled Windows environment with Excel installed;
+keep input workbooks local for the first `--dry-run` and `--check-existence` validation.
 
-result: RunResult = run_workflow("workflow.yaml")
+## Development and contribution
 
-for spec in list_actions():
-    print(spec.name, "-", spec.description)
-```
+When adding actions or modifying core code, read the specification and ensure GitHub Copilot is
+also instructed to use it.
 
-`list_actions()` returns every built action's name, description, capability, and parameter
-schema — useful for building a tool wrapper (CLI, MCP server, agent framework) on top without
-duplicating the action catalog.
+### GitHub Copilot and manual editing
+Either in your prompt or instructions files ensure the following are done:
+* Create a branch from the `develop` branch.
+* Add unit tests for every part of the change.
+* When using GitHub Copilot, instruct it to use test-driven development: write a failing test,
+  implement the behavior, then rerun the test until it passes.
+* Once unit tests pass, add sufficient integration tests for the new functionality or fix.
+* Update all required documentation, including a README changelog entry.
+* Run all required quality checks. Integration tests can take time because they operate through
+  Excel.
+* Commit with clear messages and submit a pull request explaining what changed, why, how, and
+  the supporting evidence. Before a pull request, all tests must pass and every module must have
+  at least 90% coverage.
 
-## Development
 
-```bash
-uv pip install -e ".[dev]"    # adds pytest, ruff, mypy, radon, vulture
-source .venv/bin/activate
-python -m pytest tests/unit/ tests/integration/    # 415 tests, 96% branch coverage
-ruff check .
-mypy excel_runner tests
-radon cc excel_runner --min C
-vulture excel_runner vulture_whitelist.py --min-confidence 60
+```powershell
+.venv\Scripts\python -m pip install -e ".[dev]"
+.venv\Scripts\pytest tests\unit tests\integration
+.venv\Scripts\ruff check .
+.venv\Scripts\mypy --strict excel_runner tests vulture_whitelist.py
+.venv\Scripts\radon cc --min C .
+.venv\Scripts\vulture excel_runner vulture_whitelist.py --min-confidence 60
 ```
 
 `docs/Progress_Tracker.md` tracks build status per component. `docs/Specification.md` §0
 explains the sourcing policy for a prior, superseded tool this project doesn't reuse code or
 structure from.
+
+> **Maintenance requirement:** Every behavior change must update this `README.md`, the
+> [`excel-runner-yaml` skill](.github/skills/excel-runner-yaml/SKILL.md), and
+> [`docs/test_summary.md`](docs/test_summary.md), as well as the progress tracker and
+> specification where they describe the changed behavior. New behavior is developed test-first
+> with unit tests and real-workbook integration tests.

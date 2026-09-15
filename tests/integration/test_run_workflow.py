@@ -708,9 +708,13 @@ class TestStop:
             working_dir=str(tmp_path),
         )
 
-        lines = result.audit_log_path.read_text().splitlines()
+        records = [
+          json.loads(line) for line in result.audit_log_path.read_text().splitlines()
+        ]
         records = {
-            json.loads(line)["step_id"]: json.loads(line)["status"] for line in lines
+          record["step_id"]: record["status"]
+          for record in records
+          if "step_id" in record
         }
         assert records == {"guard": "success", "never_runs": "stopped"}
 

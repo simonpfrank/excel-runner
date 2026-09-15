@@ -46,7 +46,13 @@ which means a typo here fails silently instead of erroring.
 Use the read-only preflight while authoring or reviewing a workflow:
 
 ```powershell
-.venv\Scripts\python .\excel_runner\cli.py .\workflow.yaml --dry-run
+python cli.py workflow.yaml --dry-run
+```
+
+In a development checkout, package-mode invocation is also supported:
+
+```powershell
+.venv\Scripts\python -m excel_runner workflow.yaml --dry-run
 ```
 
 It validates workflow structure plus literal workbook sheets, defined names, text input parsing,
@@ -259,18 +265,18 @@ step.
 ```
 Output: `{}`.
 
-**Omitting `source.range` copies the whole sheet** — but specifically its **used range**
-(openpyxl's `iter_rows()` over the sheet's tracked dimension), not literally every cell up to
-the spreadsheet limit, and **values only**: no formatting, no merged cells, no column widths,
-and formulas are copied as whatever `.value` holds (a formula string if the source was opened
-without `data_only`), never recalculated.
+**Omitting `source.range` copies the source sheet's used range**, not literally every cell up
+to Excel's spreadsheet limit. `copy` uses Excel's COM `Range.Copy` operation through a shared
+live Excel instance, so it has normal Excel copy/paste semantics: formulas, formatting, merged
+cells, and column widths are preserved.
 
 ### 7.3 Data
 
 **`read_range`**
 | Field | Required |
 |---|---|
-| `sheet`, `range` | yes |
+| `range` | yes |
+| `sheet` | required for A1 references; optional for a workbook-level defined name |
 `sheet` accepts a single name (`"North"`), an explicit list (`["North", "South"]`) for
 multi-sheet capture, `"all"` (every sheet in the workbook), or `{ matching: "<regex>" }`
 (every sheet whose name matches, `re.search`-style — same convention as
@@ -278,6 +284,15 @@ multi-sheet capture, `"all"` (every sheet in the workbook), or `{ matching: "<re
 Output: `{"values": ...}` — for a single sheet name, a single scalar for a single-cell `range`
 or a 2D list of rows for a multi-cell range (unchanged); for a list/`all`/`matching` sheet
 spec, a dict keyed by sheet name instead. Reference as `{{ steps.<id>.output.values }}`.
+
+For a workbook-level defined name, omit `sheet:`; the name supplies its destination sheet:
+
+```yaml
+- id: read_named_total
+  action: read_range
+  workbook: results
+  range: "ApprovedTotal"
+```
 
 **`read_metadata`**
 | Field | Required | Notes |

@@ -6,7 +6,7 @@ Date: 2026-09-15
 
 ```powershell
 & .venv\Scripts\ruff check .
-& .venv\Scripts\pylint --max-line-length=119 --max-module-lines=500 .
+& .venv\Scripts\pylint excel_runner tests vulture_whitelist.py
 & .venv\Scripts\vulture . --min-confidence 60
 & .venv\Scripts\pyright .
 & .venv\Scripts\mypy --strict .
@@ -19,7 +19,7 @@ Date: 2026-09-15
 | Check | Result | Details |
 | --- | --- | --- |
 | `ruff check .` | Pass | No findings. |
-| `pylint --max-line-length=119 --max-module-lines=500 .` | Not run | `.venv\Scripts\pylint` is absent, so the configured command exits `1` before analysis. |
+| `pylint excel_runner tests vulture_whitelist.py` | Not run | Pylint was not installed in the virtual environment when this report was created. |
 | `vulture . --min-confidence 60` | Fail | Exits `3` because it scans `.venv` and reports extensive third-party unused symbols. It also reports five repository/test findings. |
 | `pyright .` | Fail | `76` errors and `41` warnings. The environment cannot resolve installed `pytest`, `xlwings`, and `openpyxl` sources; several concrete test typing issues are also reported. |
 | `mypy --strict .` | Incomplete | The literal command recursively scans `.venv` and stalls. The equivalent repository-scoped check, `mypy --strict excel_runner tests vulture_whitelist.py`, completes with `74` errors in `15` files. |

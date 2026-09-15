@@ -1,8 +1,8 @@
 # excel_runner — Product Requirements Document
 
-Status: **Draft — core action catalog and syntax mostly decided.** A couple of items
-(`aggregate`, `update_summary_table`'s exact parameters) are explicitly flagged for later
-discussion rather than settled now.
+Status: **Current product requirements.** The runner provides 29 actions, a CLI, automatic
+file/xlwings backend selection, scratch staging with transactional commits, template-first
+lifecycle semantics, preflight and existence validation, and audit logging.
 
 ## 1. Problem statement
 
@@ -1101,7 +1101,9 @@ workbooks:
 **10. Creating a new workbook** — no dedicated action. The `workbooks:` registry already
 requires declaring a workbook upfront (see the header example above); `create_if_missing: true`
 plus implicit lazy-open (§6.3) creates it the moment it's first referenced. Template selection
-is a registry-entry field:
+is a registry-entry field. A declared `template:` is the source for every run, including when
+the destination file already exists; `create_if_missing` only creates a blank workbook when no
+template is declared:
 ```yaml
 workbooks:
   results:

@@ -10,6 +10,8 @@ code, so vulture can't see that they're used at all. Run: `vulture excel_runner
 vulture_whitelist.py`.
 """
 
+from openpyxl.worksheet.worksheet import Worksheet
+
 from excel_runner import actions, backends, engine, runner
 from excel_runner.core import (
     ActionExecutionError,
@@ -24,7 +26,6 @@ from excel_runner.core import (
     evaluate_condition,
     xlw_action,
 )
-from openpyxl.worksheet.worksheet import Worksheet
 
 WorkbookRef.name
 WorkbookRef.file

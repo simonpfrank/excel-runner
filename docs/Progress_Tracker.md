@@ -3,7 +3,13 @@
 ## Status legend
 ❌ Not Done · 🟡 In Progress · ✅ Done — Results: ✅ Pass · ❌ Fail · ⏭️ N/A
 
-## Quick status (updated 2026-09-02 — see "Last Session" entries below for narrative detail)
+## Quick status (updated 2026-09-15 — see "Last Session" entries below for narrative detail)
+
+**Release documentation:** The README, PRD, specification, and YAML authoring skill have been
+reconciled for the implemented template lifecycle, `copy` COM semantics, `parse_date`, formula
+reads, text/table actions, and preflight behavior. The remaining Unify deployment model is
+explicitly TBC because its operational contract has not been agreed. Test-summary totals and
+release quality status remain pending a completed, supported full-suite run.
 
 | Action / component | Built | Tested | Notes |
 |---|---|---|---|
@@ -15,8 +21,8 @@
 | `read_text_file` | ✅ | ✅ | Read-only control action for CSV/FAC, TSV/TXT, and one-line-per-row text; always returns strings and never changes the source file. |
 | `replace_text`, `replace_in_range` | ✅ | ✅ | Regex replacement across selected sheets or one A1/defined-name range; returns changed-cell count. |
 | `read_table`, `copy_table_columns`, `update_table_cells`, `replace_table_text` | ✅ | ✅ | Header-cell table discovery and case-insensitive header/lookup matching; dynamic source-table copy remains deferred. |
-| `write_row` | 🟡 | ✅ (built parts) | Explicit column-mapping + positional modes done; by-header mode (`values_by_header`/`headers_from`) blocked — needs step-output context. |
-| `insert_range` | 🟡 | ✅ (built parts) | Whole-row/whole-column only; partial-range raises `NotImplementedError` deliberately. |
+| `write_row` | ✅ | ✅ | Explicit column-mapping and positional modes are built. A dedicated by-header mode is deferred pending its own action contract; whole-expression templating can compose prior step output where appropriate. |
+| `insert_range` | ✅ | ✅ | Supports whole-row and whole-column insertion only; a partial range returns a structured action error. |
 | `set_column_width`, `create_sheet`, `rename_sheet`, `delete_sheet` | ✅ | ✅ | |
 | `find_headers_row`, `find_row`, `find_column`, `find_columns` | ✅ | ✅ | `find_headers_row`'s `search_range` gained workbook-level defined-name support (2026-09-02). `find_row`'s `column` (bare column letter) and `find_column`/`find_columns`' `header_row` (row number) aren't range/cell references, so named-range resolution doesn't apply to them — a scope boundary, not a gap. |
 | `read_metadata` (properties, cells) | ✅ | ✅ | `textboxes` sub-target explicitly not built (COM-only, deferred). `cells` sub-target gained `formula: true` + per-cell defined-name resolution (2026-09-02). |
@@ -51,6 +57,19 @@
 | CLI / MCP wrapper | Deferred (PRD §3/§5) |
 | Read a `@file_action` (e.g. `read_range`) via the live COM session when a workbook is already open `xlw`, instead of always switching to `file` first (PRD §12) | Not designed — raised 2026-09-01 after observing a ~2m20s `read_range` step against a large real workbook |
 | **Named/defined-range support for `copy`/`read_range`/`write_cell`/`write_range`'s `range:` field** | **Resolved** for reads and writes. `write_cell` accepts a single-cell name; `write_range` accepts one contiguous area and writes from its top-left cell. |
+
+## Last Session (2026-09-15, Windows)
+**Status:** Template-backed workbook lifecycle — **complete**.
+**Working on:**
+- Corrected `SessionManager` staging so a workbook with `template:` always starts from the
+  declared template, even when its output `file:` already exists. A successful run commits the
+  completed scratch copy atomically to that output path.
+- Kept `create_if_missing` limited to its intended fallback: it creates a blank workbook only
+  when there is no declared template and the output file does not exist.
+- Added regression coverage for an existing output being replaced by its template's content;
+  the focused lifecycle suite previously recorded 93 passing tests.
+- Updated the README, YAML authoring skill, full-showcase documentation, PRD, and specification
+  to describe the same lifecycle contract.
 
 ## Last Session (2026-09-03, Windows)
 **Status:** Tier-3 opt-in existence validation + `dump` control action + always-on

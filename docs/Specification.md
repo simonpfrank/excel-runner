@@ -617,7 +617,7 @@ with an entry in `core.py`'s `ACTION_CAPABILITIES` dict (populated by the `@file
 `param_schema` is derived from the function's signature, skipping `session` and marking any
 parameter with no default as required.
 
-### 5.2 Session management — **built** (except bidirectional backend switching, see below)
+### 5.2 Session management — **built**
 
 ```python
 @dataclass
@@ -639,13 +639,11 @@ class SessionManager:
     def get_or_open(
         self, name: str, mode: Literal["read_only","read_write"] = "read_write",
         capability: Literal["file", "xlw", "com", "depends_on_param", "none"] = "file",
-    ) -> WorkbookSession: ...     # built — raises on a capability/backend mismatch, see below
+    ) -> WorkbookSession: ...     # built — switches backend when the dispatch requires it
     def checkpoint(self) -> None: ...     # save every dirty staged session's scratch file
     def commit_all(self) -> None: ...     # save-all (via checkpoint's helper) + ScratchManager commit, §5.3
     def close_all(self) -> None: ...      # always runs — see runner.py's try/finally, §6.1
-    # _switch_backend (the actual save/close/reopen dance, PRD sec 6.2.2) is NOT built yet —
-    # needs the live-Excel phase's remaining pieces (§8 item 10) and a live Excel instance to
-    # verify for real. No stub for it; it's simply absent until then.
+    def _switch_backend(self, session, needed) -> None: ...  # save, close, reopen in place
 ```
 
 **`checkpoint()` was added after the fact, found via a failing crash-safety integration test,
@@ -666,50 +664,20 @@ current path. It's `path`, not reused-as-`scratch_path`, because `scratch_path` 
 means "was this session staged" — `path` is always concrete: the scratch path for a staged
 (read-write) session, the real path for a read-only one.
 
-**Mode is caller-specified, not statically inferred — this is deliberate for now, not a
-shortcut.** PRD §6.3's "infer read-only vs. read-write from whether a workbook is ever a
-target" is tier-2 validation's job (§5.4), which comes *after* session management in the build
-order. Rather than block session management on validation existing, `get_or_open`'s `mode`
-param is the seam that inference will feed into later — `mode="read_write"` today just means
-"the caller is telling me this workbook will be written to," which is exactly the condition
-PRD §6.3.1 stages against, whether a human or a validation pass decided it.
+**Dispatch determines mode and backend eligibility.** `get_or_open` receives the action's
+capability, write intent, and the session's detected save blockers. `_needed_backend` selects
+`file` for ordinary actions and `xlw` for `xlw`/`com` actions. When an already-open session needs
+another backend, `_switch_backend` saves pending changes through the current safe backend, closes
+the existing handle, and reopens the same scratch path on the required backend.
 
-**Bidirectional backend switching (PRD §6.2.2) — capability threading is built; the actual
-switch is not.** `get_or_open` gained a `capability` param (from the dispatching action's
-`ActionSpec.capability`, §5.1) alongside `mode`, threaded through from `runner.py`'s `_dispatch`
-(§6.1) — it already had the registry lookup to find `fn`, so passing `.capability` too was the
-only change needed on the dispatch side, no new information threaded in from elsewhere. A new
-module-level `_needed_backend(capability)` maps capability to the backend it needs (`file` →
-`file`; `xlw`/`com` → `xlw`, since `com` reaches deeper via xlwings' `.api` on an xlw-backed
-session rather than needing a distinct backend state). `get_or_open` now checks every returned
-session (newly-opened or cached) against this: **if the session's current backend doesn't match
-what the capability needs, it raises a clear `ActionExecutionError` rather than silently
-returning the wrong backend or switching** — the actual switch (save-if-dirty → close → reopen
-on the other side, PRD §6.2.2's `_switch_backend`) isn't built yet, so this is the honest
-boundary of what's supported today, not a stub. Every action built so far is `file`-capability,
-so this boundary is never hit in current real usage — proven by the full existing test/
-integration suite passing unchanged with `capability` defaulting to `"file"` everywhere it
-isn't explicitly passed.
-
-**Still to build**: `_switch_backend` itself (save-then-close-then-reopen, mirroring the
-sequence already used by `checkpoint()`/`close_all()`, just also triggered mid-run at the exact
-point a switch is needed) and its `OwnedInstanceRegistry` (§3.1) integration — `SessionManager`
-will hold one registry per run, spawning its single shared App lazily on the first `xlw`/`com`
-request, not one App per workbook. `close_all()` (below) will need to additionally call
-`self._xlw_registry.close_owned()` once this exists. Needs a live Excel instance to build and
-verify for real — paused per the user's request (2026-08-20), see `docs/Progress_Tracker.md`.
-
-> **Stale as of 2026-09-04**: `_switch_backend` *is* built (`engine.py`, save-if-dirty → close
-> → reopen, both directions). The two paragraphs above predate it and need rewriting.
-
-#### 5.2.1 Save blockers and sticky promotion — **rule, not yet implemented**
+#### 5.2.1 Save blockers and sticky promotion — **built**
 
 openpyxl cannot safely save every workbook. Inspection therefore answers *"what stops openpyxl
 saving this file safely?"* and returns a **set of named blockers**, never a boolean:
 
 - **Empty set** → the `file` backend is used as normal.
 - **Non-empty** → the session is promoted to `xlw` on its first write, and **stays on `xlw` for
-  the rest of the run**. `_switch_backend` must refuse an `xlw` → `file` demotion for such a
+  the rest of the run**. `_switch_backend` refuses an `xlw` → `file` demotion for such a
   session: the demotion itself is harmless, but the next file-backend write would corrupt the
   workbook. This is what forces the twin requirement in §4.0.
 
@@ -727,14 +695,17 @@ pre-populated with guesses.
 The blocker set goes in the run's audit record, so a run that was slower than expected can be
 explained.
 
-Detection must inspect the `template:` when the target file does not exist yet, or a
-template-borne blocker is missed on the workbook's first run.
-
-
-**`create_if_missing`/`template` resolution lives in `SessionManager._create()`**, called from
-both the read-write and read-only open paths when the target file doesn't exist yet. `template`
 is a *logical name* (another entry in the `workbooks:` registry), resolved to that entry's
-`file` path before delegating to `backends.create_workbook()`.
+Detection must inspect a template-backed workbook's staged copy, including when the target file
+already exists, so template-borne blockers are seen on every run.
+
+
+**`template` resolution happens during `SessionManager` staging.** `template` is a *logical
+name* (another entry in the `workbooks:` registry), resolved to that entry's `file` path and
+copied to scratch on every run. It is authoritative: an existing destination `file:` is not
+used as the source. If no template is declared and the destination is missing,
+`SessionManager._create()` delegates to `backends.create_workbook()` to make a blank workbook
+when `create_if_missing: true` is set.
 
 **A real bug, caught by a coverage gap, not by intuition**: the read-only-plus-`create_if_missing`
 combination (unusual — why read something you just created blank? — but not forbidden) failed
