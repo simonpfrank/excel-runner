@@ -2,7 +2,10 @@
 
 from pathlib import Path
 
-from excel_runner.core import load
+import pytest
+
+from excel_runner.core import ValidationError, load
+from excel_runner.runner import preflight_workflow
 
 _BASIC_WORKFLOW = """
 env:
@@ -85,6 +88,37 @@ class TestLoadEnvOverrides:
     def test_env_overrides_can_add_new_keys(self, tmp_path: Path) -> None:
         workflow = load(_write(tmp_path, _BASIC_WORKFLOW), env_overrides={"run_id": "42"})
         assert workflow.env["run_id"] == "42"
+
+
+class TestEnvironmentValues:
+    @pytest.mark.parametrize("value", [None, "", "   "])
+    def test_preflight_rejects_blank_effective_environment_value(
+        self, tmp_path: Path, value: object
+    ) -> None:
+        workflow_path = _write(
+            tmp_path,
+            """
+            env:
+              output_filepath: "./output.xlsx"
+            workbooks: {}
+            steps: []
+            """,
+        )
+
+        with pytest.raises(ValidationError, match="output_filepath"):
+            preflight_workflow(workflow_path, {"output_filepath": value})
+
+    def test_load_rejects_blank_value_declared_in_environment(self, tmp_path: Path) -> None:
+        with pytest.raises(ValidationError, match="input_folder"):
+            load(_write(tmp_path, _BASIC_WORKFLOW.replace('"./input"', '""')))
+
+    def test_override_can_supply_a_blank_yaml_default(self, tmp_path: Path) -> None:
+        workflow = load(
+            _write(tmp_path, _BASIC_WORKFLOW.replace('"./input"', '""')),
+            env_overrides={"input_folder": "./input"},
+        )
+
+        assert workflow.env["input_folder"] == "./input"
 
 
 class TestLoadYamlBooleanGotcha:

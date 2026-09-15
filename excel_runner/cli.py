@@ -16,6 +16,7 @@ section) — every library module (`runner.py`, `engine.py`, `backends.py`, ...)
 import argparse
 import logging
 import sys
+from pathlib import Path
 
 from core import ExcelRunnerError
 from runner import preflight_workflow, run_workflow
@@ -36,8 +37,8 @@ class _BelowWarningFilter(logging.Filter):
         return record.levelno < logging.WARNING
 
 
-def configure_logging(level_name: str) -> None:
-    """Attach the CLI's stdout/stderr console handlers to the package logger.
+def configure_logging(level_name: str, log_file: Path | None = None) -> None:
+    """Attach the CLI's console and optional file handlers to the package logger.
 
     DEBUG/INFO go to stdout; WARNING/ERROR/CRITICAL go to stderr — so a caller piping only one
     stream still sees a coherent picture (AGENTS.md's logging section). Clears any handlers
@@ -47,8 +48,12 @@ def configure_logging(level_name: str) -> None:
     Args:
         level_name: One of "DEBUG", "INFO", "WARNING", "ERROR" — the package logger's
             new severity threshold.
+        log_file: When provided, receives every package log record in addition to the console
+            output. Its parent directory is created when needed.
     """
     package_logger = logging.getLogger("excel_runner")
+    for handler in package_logger.handlers:
+        handler.close()
     package_logger.handlers.clear()
     formatter = logging.Formatter(_LOG_FORMAT, datefmt=_LOG_DATE_FORMAT)
 
@@ -61,6 +66,12 @@ def configure_logging(level_name: str) -> None:
     stderr_handler.setFormatter(formatter)
     stderr_handler.setLevel(logging.WARNING)
     package_logger.addHandler(stderr_handler)
+
+    if log_file is not None:
+        log_file.parent.mkdir(parents=True, exist_ok=True)
+        file_handler = logging.FileHandler(log_file, mode="w", encoding="utf-8")
+        file_handler.setFormatter(formatter)
+        package_logger.addHandler(file_handler)
 
     level = getattr(logging, level_name)
     package_logger.setLevel(level)
@@ -84,6 +95,11 @@ def _parse_env_override(raw: str) -> tuple[str, str]:
         )
     key, _, value = raw.partition("=")
     return key, value
+
+
+def _default_log_file(workflow: str, working_dir: str | None) -> Path:
+    base = Path(working_dir) if working_dir is not None else Path.cwd()
+    return base / "excel_runner_runs" / Path(workflow).stem / "run.log"
 
 
 def main(argv: list[str] | None = None) -> int:
@@ -123,6 +139,12 @@ def main(argv: list[str] | None = None) -> int:
         "--logging-level", help="DEBUG,INFO,WARNING,ERROR", default="INFO"
     )
     parser.add_argument(
+        "--no-logfile",
+        action="store_false",
+        dest="logfile",
+        help="Disable the default run.log file alongside audit.jsonl.",
+    )
+    parser.add_argument(
         "--check-existence",
         action="store_true",
         help=(
@@ -143,7 +165,8 @@ def main(argv: list[str] | None = None) -> int:
     args = parser.parse_args(argv)
     env_overrides = dict(args.env)
 
-    configure_logging(args.logging_level)
+    log_file = _default_log_file(args.workflow, args.working_dir) if args.logfile else None
+    configure_logging(args.logging_level, log_file)
 
     try:
         if args.dry_run:

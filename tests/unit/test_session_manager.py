@@ -147,6 +147,29 @@ class TestGetOrOpen:
             manager.get_or_open("manip")
         assert "missing.xlsx" in exc_info.value.detail.message
 
+    def test_template_overrides_an_existing_output_workbook(self, tmp_path: Path) -> None:
+        source = _write_workbook(tmp_path / "source" / "source.xlsx")
+        output = _write_workbook(tmp_path / "output" / "report.xlsx")
+        source_workbook = openpyxl.load_workbook(source)
+        source_workbook["Sheet"]["A1"] = "template"
+        source_workbook.save(source)
+        source_workbook.close()
+        output_workbook = openpyxl.load_workbook(output)
+        output_workbook["Sheet"]["A1"] = "previous output"
+        output_workbook.save(output)
+        output_workbook.close()
+        workbooks = {
+            "source": WorkbookRef(name="source", file=str(source)),
+            "report": WorkbookRef(
+                name="report", file=str(output), template="source"
+            ),
+        }
+        manager = SessionManager(workbooks, ScratchManager(tmp_path / "working"))
+
+        session = manager.get_or_open("report")
+
+        assert session.handle["Sheet"]["A1"].value == "template"
+
 
 class TestNeededBackend:
     """PRD sec 6.2.2's capability -> backend mapping, as a standalone pure function."""

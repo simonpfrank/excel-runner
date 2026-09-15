@@ -68,8 +68,8 @@ still aren't built (see [Not yet available](#not-yet-available)).
   rename-based with per-file rollback if a later workbook in the same run fails to commit.
   Nothing in `working_dir` is deleted automatically anymore. Added console logging (stdlib
   `logging`, `--logging-level` flag) alongside the existing structured audit log — the CLI no
-  longer prints the `RunResult` as JSON to stdout either; since `working_dir` is now a fixed
-  path, an external caller reads `working_dir/audit.jsonl` directly instead.
+  longer prints the `RunResult` as JSON to stdout either; since `working_dir` is a fixed path,
+  an external caller can read `working_dir/audit.jsonl` and `working_dir/run.log` directly.
 - **2026-08-20**: Added `create_sheet`/`rename_sheet`/`delete_sheet` actions (no prior way to
   add/rename/remove a worksheet). Also fixed a real design gap found while adding them: whether
   an action needs its workbook opened read-write was tracked in a hardcoded list disconnected
@@ -153,8 +153,7 @@ workbooks:                        # every workbook the workflow touches, by logi
     file: "{{ env.input_folder }}/historical.xlsx"
   results:
     file: "{{ env.output_folder }}/results.xlsx"
-    create_if_missing: true       # create a blank workbook if the file doesn't exist
-    template: historical          # optional — copy this workbook's content instead of blank
+    template: historical          # begin every run from this workbook's content
 
 steps:                            # run in order
   - id: some_step                 # unique, referenced by later steps
@@ -701,6 +700,9 @@ Use the compiler-style read-only preflight before a run:
 
 # Run the same preflight, then execute only when it succeeds.
 .venv\Scripts\python .\excel_runner\cli.py .\workflow.yaml --check-existence
+
+# Suppress the default human-readable log file for either command.
+.venv\Scripts\python .\excel_runner\cli.py .\workflow.yaml --no-logfile
 ```
 
 A workflow is checked in up to three tiers before/while it runs:
@@ -716,9 +718,12 @@ A workflow is checked in up to three tiers before/while it runs:
   step output are deferred to execution because their final values do not exist yet. A workbook
   that does not exist yet (`create_if_missing` with no template) is skipped.
 
-`--dry-run` stops after these checks: it does not create a run directory, scratch copy, Excel
-process, workbook write, save, or calculation. `--check-existence` performs the same checks,
-then executes normally. Validation errors stop the real run before any action dispatch.
+The CLI writes all console log records to `excel_runner_runs/<workflow-name>/run.log` by default,
+alongside the structured `audit.jsonl` created during execution. Pass `--no-logfile` to disable
+the human-readable log. A default `--dry-run` creates only this `run.log`; it still does not
+create a scratch copy, Excel process, workbook write, save, calculation, or action dispatch.
+`--check-existence` performs the same checks, then executes normally. Validation errors stop the
+real run before any action dispatch.
 
 ## Not yet available
 

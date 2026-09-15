@@ -207,3 +207,21 @@ class TestConsoleLogging:
         assert "WARNING" in line
         assert "cli" in line
         assert "test_format_includes_level_module_function_and_line" in line
+
+
+class TestFileLogging:
+    def test_default_logfile_records_cli_logs(self, tmp_path: Path) -> None:
+        with patch("excel_runner.cli.run_workflow", return_value=_success_result()):
+            main(["workflow.yaml", "--working-dir", str(tmp_path)])
+        logging.getLogger("excel_runner.cli").info("file-log-marker")
+
+        log_file = tmp_path / "excel_runner_runs" / "workflow" / "run.log"
+        assert "file-log-marker" in log_file.read_text(encoding="utf-8")
+
+    def test_no_logfile_does_not_create_a_run_log(self, tmp_path: Path) -> None:
+        with patch("excel_runner.cli.run_workflow", return_value=_success_result()):
+            main(["workflow.yaml", "--working-dir", str(tmp_path), "--no-logfile"])
+        logging.getLogger("excel_runner.cli").info("not-in-a-file-marker")
+
+        log_file = tmp_path / "excel_runner_runs" / "workflow" / "run.log"
+        assert not log_file.exists()

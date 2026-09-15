@@ -82,8 +82,8 @@ Each ref supports exactly these fields:
 | Field | Required | Type | Notes |
 |---|---|---|---|
 | `file` | yes | str | Path to the `.xlsx` file. May use `{{ env.* }}` templating. |
-| `create_if_missing` | no | bool | Default `false`. Creates a blank workbook at `file` on first reference if it doesn't exist. |
-| `template` | no | str | Logical name of **another** workbook in this same `workbooks:` block, whose content is copied when creating (requires `create_if_missing: true`). |
+| `create_if_missing` | no | bool | Default `false`. When no `template` is declared, creates a blank workbook at `file` if it does not exist. |
+| `template` | no | str | Logical name of **another** workbook in this same `workbooks:` block. Its content is copied into scratch at the start of every run and committed to `file` on success; it takes precedence over `create_if_missing`. |
 
 ```yaml
 workbooks:
@@ -91,7 +91,6 @@ workbooks:
     file: "{{ env.input_folder }}/historical.xlsx"
   results:
     file: "{{ env.output_folder }}/results.xlsx"
-    create_if_missing: true
     template: historical
 ```
 
@@ -99,6 +98,7 @@ Common mistakes:
 - Do **not** nest `sheet:` or `range:` under `workbooks:` — sheets/ranges are per-step fields,
   not per-workbook.
 - `template:` must name another key in this same `workbooks:` dict, not a file path.
+- `template:` always supplies the run's starting content, even when `file:` already exists.
 - A workbook referenced by a step but missing from `workbooks:` fails validation with
   `Workbook "X" is not declared in the workbooks: registry.` — every `workbook:` value used
   anywhere in `steps:` must have a matching entry here.
@@ -321,6 +321,26 @@ Output: `{}`.
 Output: `{"values": [[...], ...]}`. `.csv`/`.fac` use commas; `.tsv`/`.txt` use tabs; every
 other extension returns one non-empty line per row. Fields never receive automatic type checking
 or conversion: identifiers such as `00123` remain strings.
+
+**`parse_date`** — parses a string into a native Python date. **No `workbook:` field.**
+| Field | Required |
+|---|---|
+| `value`, `format` | yes |
+`format` uses Python `datetime.strptime` directives. Invalid input or calendar dates return a
+structured action error. Output: `{"value": date}`. Use a whole-expression template with
+`write_cell` to preserve the native date type:
+```yaml
+- id: parse_period_end
+  action: parse_date
+  value: "2026-06-30"
+  format: "%Y-%m-%d"
+- id: write_period_end
+  action: write_cell
+  workbook: output
+  sheet: "Sheet"
+  cell: "B1"
+  value: "{{ steps.parse_period_end.output.value }}"
+```
 
 **`replace_text`** — regex replacement in each populated cell of the selected sheet(s).
 | Field | Required | Notes |

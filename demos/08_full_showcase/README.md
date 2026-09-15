@@ -47,10 +47,9 @@ staging area) so the next run starts clean.
       linked.xlsx                  pristine fixture (see "The linked workbook fixture" below)
 ```
 
-`catalog`/`report`/`linked_workbook` are declared with `create_if_missing: true` and a
-`template:` pointing at their `originals/` counterpart, so a working copy that's been deleted
-is recreated fresh on the next run — but once a run has committed to it, it stays as-is
-(same as every other demo's `working_copy:` pattern, e.g. demos 05/07).
+`catalog`/`report`/`linked_workbook` are declared with a `template:` pointing at their
+`originals/` counterpart. Every run begins from that pristine source and commits its completed
+copy to the configured working path.
 
 ## The linked workbook fixture
 

@@ -26,8 +26,9 @@ class WorkbookRef:
     Args:
         name: Logical name, used as the registry key and referenced by steps.
         file: Path to the workbook file. May contain ``{{ env.* }}`` templating.
-        create_if_missing: Create the file on first reference if it doesn't exist.
-        template: Logical name of another WorkbookRef to copy from when creating.
+        create_if_missing: Create a blank file on first reference if it doesn't exist and no
+            template is declared.
+        template: Logical name of another WorkbookRef to copy from at the start of every run.
     """
 
     name: str
@@ -281,7 +282,24 @@ def _build_step(raw_step: dict[str, Any]) -> Step:
     )
 
 
-def load(path: str | Path, env_overrides: dict[str, Any] | None = None) -> Workflow:
+def _validate_environment(env: dict[str, Any]) -> None:
+    for name, value in env.items():
+        if value is None or (isinstance(value, str) and not value.strip()):
+            raise ValidationError(
+                ErrorDetail(
+                    message=f'Environment value "{name}" must not be blank.',
+                    technical_reason=f"environment value {name!r} is blank",
+                    field=name,
+                    suggestion=f'Set env.{name} in the workflow or pass --env {name}=VALUE.',
+                )
+            )
+
+
+def load(
+    path: str | Path,
+    env_overrides: dict[str, Any] | None = None,
+    validate_environment: bool = True,
+) -> Workflow:
     """Load and parse a workflow YAML file.
 
     ``env:``/``workbooks:`` fields are resolved immediately (env-only context); step params
@@ -292,6 +310,8 @@ def load(path: str | Path, env_overrides: dict[str, Any] | None = None) -> Workf
         path: Path to the workflow YAML file.
         env_overrides: Values merged over (and taking precedence over) the file's own
             ``env:`` block — how an external caller parameterizes a run (PRD sec 6.6).
+        validate_environment: Validate that every effective environment value is nonblank.
+            Internal audit code disables this only to capture pre-override default values.
 
     Returns:
         The parsed Workflow, with workbook paths resolved and step params left raw.
@@ -300,6 +320,8 @@ def load(path: str | Path, env_overrides: dict[str, Any] | None = None) -> Workf
     raw = yaml.load(raw_text, Loader=_Yaml12BoolLoader) or {}
 
     env: dict[str, Any] = {**(raw.get("env") or {}), **(env_overrides or {})}
+    if validate_environment:
+        _validate_environment(env)
     context = {"env": env}
 
     workbooks: dict[str, WorkbookRef] = {}

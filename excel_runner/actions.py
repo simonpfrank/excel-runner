@@ -15,6 +15,7 @@ import csv
 import json
 import logging
 import re
+from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
@@ -28,9 +29,24 @@ from core import (
     control_action,
     file_action,
 )
-from openpyxl.utils import column_index_from_string, get_column_letter
+from openpyxl.utils import column_index_from_string, coordinate_to_tuple, get_column_letter
 
 logger = logging.getLogger("excel_runner.actions")
+
+
+@control_action
+def parse_date(value: str, format: str) -> ActionResult:
+    """Parse a string into a native date using an explicit format."""
+    try:
+        parsed_value = datetime.strptime(value, format).date()
+    except (TypeError, ValueError) as exc:
+        raise ActionExecutionError(
+            ErrorDetail(
+                f"parse_date: could not parse {value!r} with format {format!r}.",
+                f"{type(exc).__name__}: {exc}",
+            )
+        ) from exc
+    return ActionResult(status="success", output={"value": parsed_value})
 
 
 @control_action
@@ -224,6 +240,7 @@ def save(session: WorkbookSession) -> ActionResult:
         A success result with no meaningful output.
     """
     backends.save_open_workbook(session.handle, session.backend, session.path)
+    session.dirty = False
     return ActionResult(status="success", output={})
 
 
@@ -793,6 +810,8 @@ def replace_in_range(
 @file_action
 def read_table(session: WorkbookSession, sheet: str, header_cell: str) -> ActionResult:
     """Read a rectangular table discovered from its top-left header cell."""
+    if session.backend == "file" and session.mode == "read_only":
+        return _read_table_read_only(session, sheet, header_cell)
     start_row, start_column, end_row, end_column, headers = _table_bounds(
         session, sheet, header_cell
     )
@@ -800,6 +819,53 @@ def read_table(session: WorkbookSession, sheet: str, header_cell: str) -> Action
         [_cell_value(session, sheet, row, column) for column in range(start_column, end_column + 1)]
         for row in range(start_row, end_row + 1)
     ]
+    end_ref = get_column_letter(end_column) + str(end_row)
+    return ActionResult(
+        status="success",
+        output={"values": values, "headers": headers, "range": f"{header_cell}:{end_ref}"},
+    )
+
+
+def _read_table_read_only(
+    session: WorkbookSession, sheet: str, header_cell: str
+) -> ActionResult:
+    worksheet = session.handle[sheet]
+    start_row, start_column = coordinate_to_tuple(header_cell)
+    table_rows = worksheet.iter_rows(
+        min_row=start_row, min_col=start_column, values_only=True
+    )
+    header_values = next(table_rows)
+    headers: list[str] = []
+    normalized_headers: set[str] = set()
+    for value in header_values:
+        if value in (None, ""):
+            break
+        if not isinstance(value, str) or value.lower() in normalized_headers:
+            raise ActionExecutionError(
+                ErrorDetail(
+                    "read_table: headers must be unique non-empty text.",
+                    "invalid table headers",
+                )
+            )
+        headers.append(value)
+        normalized_headers.add(value.lower())
+    if not headers:
+        raise ActionExecutionError(
+            ErrorDetail("read_table: header_cell is blank.", "blank table header")
+        )
+
+    values: list[list[Any]] = [headers]
+    for row_values in table_rows:
+        table_row = list(row_values[: len(headers)])
+        if table_row[0] in (None, ""):
+            break
+        values.append(table_row)
+    if len(values) == 1:
+        raise ActionExecutionError(
+            ErrorDetail("read_table: table has no data rows.", "empty table")
+        )
+    end_row = start_row + len(values) - 1
+    end_column = start_column + len(headers) - 1
     end_ref = get_column_letter(end_column) + str(end_row)
     return ActionResult(
         status="success",

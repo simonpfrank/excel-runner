@@ -5,6 +5,7 @@ exists.
 """
 
 from pathlib import Path
+from unittest.mock import patch
 
 import openpyxl
 import pytest
@@ -46,6 +47,58 @@ class TestSheetExistence:
             {"wb": WorkbookRef(name="wb", file=str(workbook_path))},
         )
         validation.validate_existence(workflow)  # should not raise
+
+
+class TestTableReferencePreflight:
+    def test_reuses_one_table_inspection_for_multiple_table_steps(
+        self, tmp_path: Path
+    ) -> None:
+        path = tmp_path / "fixture.xlsx"
+        workbook = openpyxl.Workbook()
+        sheet = workbook.active
+        assert sheet is not None
+        sheet.title = "BASIS"
+        sheet.append(["BASIS_ITEM", "I17_CLS", "I17_OPN"])
+        sheet.append(["ACC_RATIO", "old", "old"])
+        workbook.save(path)
+        workflow = _workflow(
+            [
+                Step(
+                    id="copy_column",
+                    action="copy_table_columns",
+                    params={
+                        "workbook": "wb",
+                        "sheet": "BASIS",
+                        "header_cell": "A1",
+                        "source_columns": ["I17_CLS"],
+                        "target_columns": ["I17_OPN"],
+                    },
+                ),
+                Step(
+                    id="update_cell",
+                    action="update_table_cells",
+                    params={
+                        "workbook": "wb",
+                        "sheet": "BASIS",
+                        "header_cell": "A1",
+                        "lookup_column": "BASIS_ITEM",
+                        "lookup_rows": ["ACC_RATIO"],
+                        "target_columns": ["I17_OPN"],
+                        "value": "new",
+                    },
+                ),
+            ],
+            {"wb": WorkbookRef(name="wb", file=str(path))},
+        )
+
+        with patch.object(
+            validation,
+            "_inspect_table_reference",
+            wraps=validation._inspect_table_reference,
+        ) as inspect:
+            validation.validate_existence(workflow)
+
+        inspect.assert_called_once()
 
     def test_raises_when_sheet_is_missing(self, workbook_path: Path) -> None:
         workflow = _workflow(

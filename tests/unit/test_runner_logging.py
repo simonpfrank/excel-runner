@@ -7,6 +7,7 @@ via `configure_logging()` (see `test_cli.py::TestConsoleLogging`). Tests here us
 `configure_logging()`'s real `StreamHandler`s.
 """
 
+import json
 import logging
 from pathlib import Path
 
@@ -33,6 +34,42 @@ def _write_yaml(path: Path, text: str) -> Path:
 
 
 class TestStepLogging:
+    def test_env_overrides_are_logged_and_audited(
+        self, tmp_path: Path, caplog: pytest.LogCaptureFixture
+    ) -> None:
+        _make_workbook(tmp_path / "override.xlsx")
+        workflow_path = _write_yaml(
+            tmp_path / "workflow.yaml",
+            """
+            env:
+              output_filepath: "./default.xlsx"
+            workbooks:
+              manip:
+                file: "{{ env.output_filepath }}"
+            steps:
+              - id: open_manip
+                action: open
+                workbook: manip
+            """,
+        )
+
+        with caplog.at_level(logging.INFO, logger="excel_runner.runner"):
+            result = run_workflow(
+                workflow_path,
+                env_overrides={"output_filepath": str(tmp_path / "override.xlsx")},
+                working_dir=tmp_path,
+            )
+
+        records = [json.loads(line) for line in result.audit_log_path.read_text().splitlines()]
+        override_event = next(record for record in records if record.get("event") == "env_overrides")
+        assert override_event["overrides"] == {
+            "output_filepath": {
+                "previous": "./default.xlsx",
+                "effective": str(tmp_path / "override.xlsx"),
+            }
+        }
+        assert any("output_filepath" in record.message for record in caplog.records)
+
     def test_info_logs_step_start_and_completion(
         self, tmp_path: Path, caplog: pytest.LogCaptureFixture
     ) -> None:

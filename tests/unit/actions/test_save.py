@@ -18,6 +18,7 @@ class TestSaveAction:
         write_cell_action(session=file_session, sheet="Summary", cell="A1", value="Changed")
         result = save_action(session=file_session)
         assert result.status == "success"
+        assert file_session.dirty is False
 
         file_session.handle.close()
         reopened = backends.open_workbook(file_session.path, mode="read_only")

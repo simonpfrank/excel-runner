@@ -404,20 +404,26 @@ class ScratchManager:
             {}
         )  # name -> .bak path, only set during a commit_all()
 
-    def stage(self, name: str, real_path: Path, writes: bool = True) -> Path:
-        """Copy a workbook into `scratch/working/`, or reserve a path there for a new one.
+    def stage(
+        self,
+        name: str,
+        real_path: Path,
+        writes: bool = True,
+        source_path: Path | None = None,
+    ) -> Path:
+        """Copy a workbook source into `scratch/working/`, or reserve a path for a new one.
 
         Args:
             name: The workbook's logical name.
-            real_path: Its real file path. If it doesn't exist yet (a `create_if_missing`
-                workbook), no copy happens — the caller creates the workbook directly at the
-                returned working path instead.
+            real_path: The real destination path to receive the committed workbook.
             writes: Whether this workbook may be written to and needs committing back later.
                 False for a read-only session (PRD sec 6.2.3's correction — staged too now, to
                 avoid holding a handle open on the real file, but never committed since
                 nothing about it ever changes). Only a `writes=True` workbook gets a
                 `scratch/originals/` backup — a read-only copy never changes, so there's
                 nothing to back up.
+            source_path: Source file to copy into scratch. Defaults to `real_path`; a declared
+                template supplies a different source path.
 
         Returns:
             The `scratch/working/` path to open/create the workbook at instead of `real_path`.
@@ -430,9 +436,10 @@ class ScratchManager:
         logger.info('Staging workbook "%s" into scratch: %s', name, real_path)
         self._working_subdir.mkdir(parents=True, exist_ok=True)
         working_path = self._working_subdir / real_path.name
-        if real_path.exists():
-            shutil.copy2(real_path, working_path)
-            if writes:
+        source = source_path or real_path
+        if source.exists():
+            shutil.copy2(source, working_path)
+            if writes and real_path.exists():
                 self._originals_dir.mkdir(parents=True, exist_ok=True)
                 shutil.copy2(real_path, self._originals_dir / real_path.name)
         else:
@@ -813,8 +820,12 @@ class SessionManager:
             writes: Whether the dispatching action mutates the workbook.
         """
         real_path = Path(ref.file)
+        template_path = Path(self._workbooks[ref.template].file) if ref.template else None
         scratch_path = self._scratch.stage(
-            name, real_path, writes=(mode == "read_write")
+            name,
+            real_path,
+            writes=(mode == "read_write"),
+            source_path=template_path,
         )
         if not scratch_path.exists():
             self._create(ref, scratch_path)
@@ -1775,13 +1786,42 @@ def _table_validation_error(step: Step, message: str) -> ValidationError:
     )
 
 
-def _validate_table_references(step: Step, workbook: Any) -> None:
+@dataclass(frozen=True)
+class _TableReference:
+    headers: tuple[str, ...]
+    lookup_rows: dict[str, dict[str, tuple[int, ...]]]
+
+
+def _table_cache_key(
+    step: Step, inspection_path: Path
+) -> tuple[Path, str, str] | None:
     if step.action not in _TABLE_ACTIONS:
-        return
+        return None
     sheet_name = step.params.get("sheet")
     header_cell = step.params.get("header_cell")
     if not _is_literal_string(sheet_name) or not _is_literal_string(header_cell):
-        return
+        return None
+    return inspection_path, sheet_name, header_cell
+
+
+def _table_lookup_columns(
+    workflow: Workflow, inspection_paths_by_name: dict[str, Path]
+) -> dict[tuple[Path, str, str], set[str]]:
+    lookup_columns: dict[tuple[Path, str, str], set[str]] = {}
+    for step in workflow.steps:
+        workbook_name = step.params.get("workbook")
+        if workbook_name not in inspection_paths_by_name:
+            continue
+        key = _table_cache_key(step, inspection_paths_by_name[workbook_name])
+        lookup_column = step.params.get("lookup_column")
+        if key is not None and _is_literal_string(lookup_column):
+            lookup_columns.setdefault(key, set()).add(lookup_column.casefold())
+    return lookup_columns
+
+
+def _inspect_table_reference(
+    step: Step, workbook: Any, sheet_name: str, header_cell: str, lookup_columns: set[str]
+) -> _TableReference:
     try:
         worksheet = workbook[sheet_name]
         anchor = worksheet[header_cell]
@@ -1790,25 +1830,53 @@ def _validate_table_references(step: Step, workbook: Any) -> None:
 
     headers: list[str] = []
     normalized_headers: set[str] = set()
-    column = anchor.column
-    while (value := worksheet.cell(anchor.row, column).value) not in (None, ""):
+    rows = worksheet.iter_rows(
+        min_row=anchor.row, min_col=anchor.column, values_only=True
+    )
+    header_values = next(rows, ())
+    for value in header_values:
+        if value in (None, ""):
+            break
         if not isinstance(value, str) or value.casefold() in normalized_headers:
             raise _table_validation_error(
                 step, "table headers must be unique non-empty text."
             )
         headers.append(value)
         normalized_headers.add(value.casefold())
-        column += 1
     if not headers:
         raise _table_validation_error(step, "table header_cell is blank.")
 
-    row = anchor.row + 1
-    while worksheet.cell(row, anchor.column).value not in (None, ""):
-        row += 1
-    if row == anchor.row + 1:
+    header_indexes = {header.casefold(): index for index, header in enumerate(headers)}
+    tracked_columns = {
+        name: header_indexes[name] for name in lookup_columns if name in header_indexes
+    }
+    lookup_rows: dict[str, dict[str, list[int]]] = {
+        name: {} for name in tracked_columns
+    }
+    row_number = anchor.row + 1
+    has_data = False
+    for row_values in rows:
+        if not row_values or row_values[0] in (None, ""):
+            break
+        has_data = True
+        for name, column_index in tracked_columns.items():
+            value = str(row_values[column_index]).casefold()
+            lookup_rows[name].setdefault(value, []).append(row_number)
+        row_number += 1
+    if not has_data:
         raise _table_validation_error(step, "table has no data rows.")
 
-    header_indexes = {header.casefold(): index for index, header in enumerate(headers)}
+    return _TableReference(
+        headers=tuple(headers),
+        lookup_rows={
+            name: {value: tuple(rows) for value, rows in values.items()}
+            for name, values in lookup_rows.items()
+        },
+    )
+
+
+def _validate_table_references(step: Step, table: _TableReference) -> None:
+    header_indexes = {header.casefold(): index for index, header in enumerate(table.headers)}
     names = [step.params.get("lookup_column")]
     names.extend(step.params.get("source_columns", []))
     names.extend(step.params.get("target_columns", []))
@@ -1826,12 +1894,9 @@ def _validate_table_references(step: Step, workbook: Any) -> None:
     for lookup_value in lookup_rows:
         if not _is_literal_string(lookup_value):
             continue
-        matches = [
-            current_row
-            for current_row in range(anchor.row + 1, row)
-            if str(worksheet.cell(current_row, anchor.column + lookup_index).value).casefold()
-            == lookup_value.casefold()
-        ]
+        matches = table.lookup_rows[lookup_column.casefold()].get(
+            lookup_value.casefold(), ()
+        )
         if len(matches) != 1:
             raise _table_validation_error(
                 step, f"table row {lookup_value!r} must occur exactly once."
@@ -1860,9 +1925,12 @@ def validate_existence(workflow: Workflow) -> None:
     opened: dict[Path, Any] = {}
     known_sheets: dict[str, set[str]] = {}
     defined_names: dict[str, set[str]] = {}
+    inspection_paths_by_name = inspection_paths(workflow.workbooks)
+    table_lookup_columns = _table_lookup_columns(workflow, inspection_paths_by_name)
+    table_references: dict[tuple[Path, str, str], _TableReference] = {}
 
     try:
-        for name, path in inspection_paths(workflow.workbooks).items():
+        for name, path in inspection_paths_by_name.items():
             if path not in opened:
                 opened[path] = openpyxl.load_workbook(path, read_only=True)
             wb = opened[path]
@@ -1873,7 +1941,20 @@ def validate_existence(workflow: Workflow) -> None:
             _check_step_existence(step, known_sheets, defined_names)
             workbook_name = step.params.get("workbook")
             if workbook_name in known_sheets:
-                _validate_table_references(step, opened[inspection_paths(workflow.workbooks)[workbook_name]])
+                key = _table_cache_key(step, inspection_paths_by_name[workbook_name])
+                if key is not None:
+                    table = table_references.get(key)
+                    if table is None:
+                        _, sheet_name, header_cell = key
+                        table = _inspect_table_reference(
+                            step,
+                            opened[key[0]],
+                            sheet_name,
+                            header_cell,
+                            table_lookup_columns.get(key, set()),
+                        )
+                        table_references[key] = table
+                    _validate_table_references(step, table)
     finally:
         for wb in opened.values():
             wb.close()

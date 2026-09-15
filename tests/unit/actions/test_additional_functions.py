@@ -1,10 +1,12 @@
 """Tests for text-file, replacement, and table actions."""
 
 from pathlib import Path
+from unittest.mock import patch
 
 import openpyxl
 import pytest
 
+from excel_runner import backends
 from excel_runner.actions import (
     copy_table_columns,
     read_table,
@@ -115,6 +117,32 @@ def test_table_actions_discover_copy_update_and_replace(tmp_path: Path) -> None:
     replace_table_text(session, "BASIS", "B7", "BASIS_ITEM", ["ACC_RATIO"], ["TARGET"], "\\d{6}", "202606")
     assert session.handle["BASIS"]["D8"].value == "old_202606"
     assert session.handle["BASIS"]["D9"].value == "set"
+
+
+def test_read_table_uses_sequential_reads_for_a_read_only_file_session(
+    tmp_path: Path,
+) -> None:
+    writable_session = _table_session(tmp_path)
+    path = writable_session.path
+    writable_session.handle.close()
+    session = WorkbookSession(
+        "table",
+        "file",
+        backends.open_workbook(path, "read_only"),
+        path,
+        "read_only",
+    )
+    worksheet = session.handle["BASIS"]
+
+    with patch.object(type(worksheet), "cell", side_effect=AssertionError):
+        table = read_table(session, "BASIS", "B7")
+
+    assert table.output["values"] == [
+        ["BASIS_ITEM", "SOURCE", "TARGET"],
+        ["ACC_RATIO", "old_202512", None],
+        ["ECO_TBL", "value", None],
+    ]
+    session.handle.close()
 
 
 def test_table_actions_reject_case_insensitive_duplicate_headers(tmp_path: Path) -> None:

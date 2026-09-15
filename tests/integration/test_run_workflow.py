@@ -170,6 +170,28 @@ class TestPreflight:
         with pytest.raises(ActionExecutionError):
             preflight_workflow(workflow_path)
 
+    def test_preflight_reads_a_text_file_with_an_environment_rendered_path(
+        self, tmp_path: Path
+    ) -> None:
+        input_path = tmp_path / "input.fac"
+        input_path.write_text("HEADER\nvalue\n", encoding="utf-8")
+        workflow_path = _write_yaml(
+            tmp_path / "workflow.yaml",
+            f"""
+            env:
+              input_folder: "{tmp_path.as_posix()}"
+            workbooks:
+              input:
+                file: "{_make_workbook(tmp_path / 'input.xlsx').as_posix()}"
+            steps:
+              - id: validate_input
+                action: read_text_file
+                file: "{{{{ env.input_folder }}}}/input.fac"
+            """,
+        )
+
+        preflight_workflow(workflow_path)
+
     def test_preflight_rejects_missing_table_column(self, tmp_path: Path) -> None:
         workbook_path = _make_workbook(tmp_path / "input.xlsx")
         sheet = openpyxl.load_workbook(workbook_path)
@@ -737,10 +759,11 @@ class TestAuditLog:
 
 
 class TestCrashSafety:
-    """PRD sec 6.3/6.3.1's actual crash-safety requirement: a run interrupted mid-step must
-    never leave the real files touched, must leave the scratch copies in place as the
-    recovery/debugging artifact, and must not leave anything in a state that blocks a later,
-    valid run against the same workbook. "No orphaned Excel process" (PRD sec 6.3) isn't
+    """A run interrupted mid-step must never leave real files touched, must leave the scratch
+    copies in place as the recovery/debugging artifact, and must not leave anything in a state
+    that blocks a later valid run against the same workbook. Unsaved writes stay in memory;
+    workflow authors add an explicit `save` step when a recoverable on-disk checkpoint matters.
+    "No orphaned Excel process" (PRD sec 6.3) isn't
     testable yet — there's no COM backend built, so no Excel process is ever spawned by the
     current (file-backend only) action set; that part of the requirement gets a real test once
     build order item 9 exists.
@@ -793,12 +816,12 @@ class TestCrashSafety:
         # the real file is completely untouched by the in-progress write
         assert openpyxl.load_workbook(real)["Sheet"]["B1"].value is None
 
-        # the scratch copy survives as the recovery artifact, with the in-progress work intact
+        # The scratch copy survives, but unsaved writes stay in the in-memory session. This
+        # avoids serializing large workbooks after every step; an explicit save is the durable
+        # recovery boundary.
         scratch_file = run_dir / "scratch" / "working" / "manip.xlsx"
         assert scratch_file.exists()
-        assert (
-            openpyxl.load_workbook(scratch_file)["Sheet"]["B1"].value == "in progress"
-        )
+        assert openpyxl.load_workbook(scratch_file)["Sheet"]["B1"].value is None
 
         # the audit log survives too — it lives outside scratch/ specifically so nothing ever
         # takes it along with a deletion (Spec sec 6.1's bug fix); nothing in working_dir is

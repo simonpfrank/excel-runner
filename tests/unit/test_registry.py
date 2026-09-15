@@ -18,6 +18,7 @@ class TestDiscoverActions:
             "read_range",
             "read_metadata",
             "read_text_file",
+            "parse_date",
             "write_cell",
             "write_range",
             "write_row",

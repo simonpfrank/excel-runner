@@ -213,14 +213,13 @@ def preflight_workflow(
 def _validate_literal_action_inputs(workflow: Workflow) -> None:
     """Validate literal non-workbook inputs whose runtime values are already knowable."""
     for step in workflow.steps:
-        if step.action == "read_text_file" and not any(
-            core.is_whole_template_expression(value)
-            for value in step.params.values()
-            if isinstance(value, str)
-        ):
-            actions_module.read_text_file(**step.params)
-        pattern = step.params.get("pattern")
-        if isinstance(pattern, str) and not core.is_whole_template_expression(pattern):
+        if _has_step_reference(step.params):
+            continue
+        params = core.resolve_value(step.params, {"env": workflow.env})
+        if step.action == "read_text_file":
+            actions_module.read_text_file(**params)
+        pattern = params.get("pattern")
+        if isinstance(pattern, str):
             try:
                 re.compile(pattern)
             except re.error as exc:
@@ -230,6 +229,26 @@ def _validate_literal_action_inputs(workflow: Workflow) -> None:
                         "invalid preflight regular expression",
                     )
                 ) from exc
+
+
+def _has_step_reference(value: Any) -> bool:
+    if isinstance(value, str):
+        return "steps." in value
+    if isinstance(value, dict):
+        return any(_has_step_reference(item) for item in value.values())
+    if isinstance(value, list):
+        return any(_has_step_reference(item) for item in value)
+    return False
+
+
+def _environment_overrides(
+    path: str | Path, effective_environment: dict[str, Any], overrides: dict[str, Any]
+) -> dict[str, dict[str, Any]]:
+    defaults = core.load(path, validate_environment=False).env
+    return {
+        name: {"previous": defaults.get(name), "effective": effective_environment[name]}
+        for name in sorted(overrides)
+    }
 
 
 def run_workflow(
@@ -295,6 +314,11 @@ def run_workflow(
 
     audit_log_path = run_dir / "audit.jsonl"
     audit = AuditLogger(audit_log_path)
+    overrides = env_overrides or {}
+    if overrides:
+        override_details = _environment_overrides(path, workflow.env, overrides)
+        audit.record_event("env_overrides", {"overrides": override_details})
+        logger.info("Environment overrides: %s", override_details)
 
     session_manager = engine.SessionManager(
         workflow.workbooks,
@@ -359,12 +383,6 @@ def run_workflow(
                 "status": step_result.status,
                 "output": step_result.output,
             }
-            # Persist this step's writes to the scratch file now, not just at the end — so a
-            # later step crashing still leaves everything that succeeded so far visible in the
-            # recovery artifact (PRD sec 6.3.1). Found necessary via a failing crash-safety
-            # integration test: without this, an in-memory-only write is invisible on disk
-            # until commit_all(), which never runs on a crash.
-            session_manager.checkpoint()
 
             if stop_triggered:
                 # A stop step (PRD sec 6.9) ends the run right here — every later step gets a
