@@ -160,6 +160,14 @@ class TestResolveRange:
         )
         workbook.close()
 
+    def test_plain_a1_notation_requires_a_sheet(self, tmp_path: Path) -> None:
+        workbook = backends.open_workbook(
+            str(_make_workbook(tmp_path)), mode="read_write"
+        )
+        with pytest.raises(ValueError, match="worksheet name"):
+            backends.resolve_range(workbook, None, "A1:B2")
+        workbook.close()
+
     def test_resolves_a_defined_name_to_its_own_sheet_and_a1_range(
         self, tmp_path: Path
     ) -> None:

@@ -14,13 +14,14 @@ from collections.abc import Callable
 from dataclasses import dataclass
 from pathlib import Path
 from types import ModuleType
-from typing import Any, Literal
+from typing import Any, Literal, TypeGuard
 from urllib.parse import unquote, urlparse
 from xml.etree import ElementTree
 
-import backends
 import openpyxl
-from core import (
+
+from . import backends
+from .core import (
     ACTION_CAPABILITIES,
     ACTION_WRITES,
     ActionExecutionError,
@@ -1121,7 +1122,7 @@ class SessionManager:
         for session in self._sessions.values():
             try:
                 backends.close_open_workbook(session.handle, session.backend)
-            except Exception as exc:  # noqa: BLE001 - intentional, see docstring
+            except Exception as exc:  # noqa: BLE001 # pylint: disable=broad-exception-caught
                 errors.append(exc)
         try:
             self._owned_instances.close_owned()
@@ -1199,7 +1200,7 @@ def _type_name(expected: Any) -> str:
         return " or ".join(
             _type_name(arg)
             for arg in typing.get_args(expected)
-            if arg is not type(None)
+            if arg is not pytypes.NoneType
         )
     if origin is typing.Literal:
         return " or ".join(repr(arg) for arg in typing.get_args(expected))
@@ -1373,7 +1374,7 @@ def _check_param_types(
 
 
 def _check_step_references(
-    workflow: Workflow, registry: dict[str, ActionSpec]
+    workflow: Workflow, registry: dict[str, ActionSpec]  # pylint: disable=unused-argument
 ) -> ValidationError | None:
     step_index = {step.id: i for i, step in enumerate(workflow.steps)}
     for i, step in enumerate(workflow.steps):
@@ -1776,7 +1777,7 @@ def _check_step_existence(
     _check_range_field_existence(step, wb_name, defined_names)
 
 
-def _is_literal_string(value: Any) -> bool:
+def _is_literal_string(value: Any) -> TypeGuard[str]:
     return isinstance(value, str) and not _contains_template_expression(value)
 
 
@@ -1837,12 +1838,17 @@ def _inspect_table_reference(
     for value in header_values:
         if value in (None, ""):
             break
-        if not isinstance(value, str) or value.casefold() in normalized_headers:
+        if not isinstance(value, str):
+            raise _table_validation_error(
+                step, "table headers must be unique non-empty text."
+            )
+        normalized_value = value.casefold()
+        if normalized_value in normalized_headers:
             raise _table_validation_error(
                 step, "table headers must be unique non-empty text."
             )
         headers.append(value)
-        normalized_headers.add(value.casefold())
+        normalized_headers.add(normalized_value)
     if not headers:
         raise _table_validation_error(step, "table header_cell is blank.")
 

@@ -1,6 +1,7 @@
 """Tests for text-file, replacement, and table actions."""
 
 from pathlib import Path
+from types import SimpleNamespace
 from unittest.mock import patch
 
 import openpyxl
@@ -106,6 +107,39 @@ def test_replace_in_range_leaves_blank_cells_unchanged(tmp_path: Path) -> None:
     result = replace_in_range(session, "BASIS", "D8:D9", "None", "changed")
     assert result.output == {"replacements": 0}
     assert session.handle["BASIS"]["D8"].value is None
+
+
+def test_replace_in_range_uses_xlwings_cells_without_calling_the_range_parameter(
+    monkeypatch: pytest.MonkeyPatch,
+) -> None:
+    selected = SimpleNamespace(
+        row=1,
+        column=1,
+        rows=SimpleNamespace(count=1),
+        columns=SimpleNamespace(count=1),
+    )
+    session = SimpleNamespace(
+        backend="xlw",
+        dirty=False,
+        handle=SimpleNamespace(
+            sheets={"Summary": SimpleNamespace(range=lambda _: selected)}
+        ),
+    )
+    updated: list[tuple[int, int, str]] = []
+    monkeypatch.setattr(
+        "excel_runner.actions.backends.primitives",
+        lambda _: SimpleNamespace(resolve_range=lambda *_: ("Summary", "A1")),
+    )
+    monkeypatch.setattr("excel_runner.actions._cell_value", lambda *_: "old")
+    monkeypatch.setattr(
+        "excel_runner.actions._set_cell_value",
+        lambda _, __, row, column, value: updated.append((row, column, value)),
+    )
+
+    result = replace_in_range(session, "Summary", "A1", "old", "new")
+
+    assert result.output == {"replacements": 1}
+    assert updated == [(1, 1, "new")]
 
 
 def test_table_actions_discover_copy_update_and_replace(tmp_path: Path) -> None:

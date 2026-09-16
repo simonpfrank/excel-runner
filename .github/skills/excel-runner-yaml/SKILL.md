@@ -46,13 +46,7 @@ which means a typo here fails silently instead of erroring.
 Use the read-only preflight while authoring or reviewing a workflow:
 
 ```powershell
-python cli.py workflow.yaml --dry-run
-```
-
-In a development checkout, package-mode invocation is also supported:
-
-```powershell
-.venv\Scripts\python -m excel_runner workflow.yaml --dry-run
+python -m excel_runner workflow.yaml --dry-run
 ```
 
 It validates workflow structure plus literal workbook sheets, defined names, text input parsing,
@@ -265,10 +259,11 @@ step.
 ```
 Output: `{}`.
 
-**Omitting `source.range` copies the source sheet's used range**, not literally every cell up
-to Excel's spreadsheet limit. `copy` uses Excel's COM `Range.Copy` operation through a shared
-live Excel instance, so it has normal Excel copy/paste semantics: formulas, formatting, merged
-cells, and column widths are preserved.
+**Omitting `source.range` copies the whole sheet** — but specifically its **used range**
+(openpyxl's `iter_rows()` over the sheet's tracked dimension), not literally every cell up to
+the spreadsheet limit, and **values only**: no formatting, no merged cells, no column widths,
+and formulas are copied as whatever `.value` holds (a formula string if the source was opened
+without `data_only`), never recalculated.
 
 ### 7.3 Data
 
@@ -340,15 +335,15 @@ or conversion: identifiers such as `00123` remain strings.
 **`parse_date`** — parses a string into a native Python date. **No `workbook:` field.**
 | Field | Required |
 |---|---|
-| `value`, `format` | yes |
-`format` uses Python `datetime.strptime` directives. Invalid input or calendar dates return a
+| `value`, `date_format` | yes |
+`date_format` uses Python `datetime.strptime` directives. Invalid input or calendar dates return a
 structured action error. Output: `{"value": date}`. Use a whole-expression template with
 `write_cell` to preserve the native date type:
 ```yaml
 - id: parse_period_end
   action: parse_date
   value: "2026-06-30"
-  format: "%Y-%m-%d"
+  date_format: "%Y-%m-%d"
 - id: write_period_end
   action: write_cell
   workbook: output

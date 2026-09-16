@@ -13,10 +13,9 @@ from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-import actions as actions_module
-import core
-import engine
-from core import ActionResult, ErrorDetail, Step, WorkbookSession, Workflow
+from . import actions as actions_module
+from . import core, engine
+from .core import ActionResult, ErrorDetail, Step, WorkbookSession, Workflow
 
 logger = logging.getLogger("excel_runner.runner")
 

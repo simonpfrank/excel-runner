@@ -18,8 +18,8 @@ import logging
 import sys
 from pathlib import Path
 
-from core import ExcelRunnerError
-from runner import preflight_workflow, run_workflow
+from .core import ExcelRunnerError
+from .runner import preflight_workflow, run_workflow
 
 logger = logging.getLogger("excel_runner.cli")
 

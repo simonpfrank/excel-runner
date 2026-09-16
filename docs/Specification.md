@@ -695,17 +695,14 @@ pre-populated with guesses.
 The blocker set goes in the run's audit record, so a run that was slower than expected can be
 explained.
 
+Detection must inspect the `template:` when the target file does not exist yet, or a
+template-borne blocker is missed on the workbook's first run.
+
+
+**`create_if_missing`/`template` resolution lives in `SessionManager._create()`**, called from
+both the read-write and read-only open paths when the target file doesn't exist yet. `template`
 is a *logical name* (another entry in the `workbooks:` registry), resolved to that entry's
-Detection must inspect a template-backed workbook's staged copy, including when the target file
-already exists, so template-borne blockers are seen on every run.
-
-
-**`template` resolution happens during `SessionManager` staging.** `template` is a *logical
-name* (another entry in the `workbooks:` registry), resolved to that entry's `file` path and
-copied to scratch on every run. It is authoritative: an existing destination `file:` is not
-used as the source. If no template is declared and the destination is missing,
-`SessionManager._create()` delegates to `backends.create_workbook()` to make a blank workbook
-when `create_if_missing: true` is set.
+`file` path before delegating to `backends.create_workbook()`.
 
 **A real bug, caught by a coverage gap, not by intuition**: the read-only-plus-`create_if_missing`
 combination (unusual — why read something you just created blank? — but not forbidden) failed

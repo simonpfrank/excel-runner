@@ -8,11 +8,13 @@ not this file's.
 """
 
 import logging
+import shutil
 import subprocess
 import sys
 from pathlib import Path
 from unittest.mock import patch
 
+import openpyxl
 import pytest
 
 from excel_runner.cli import main
@@ -20,17 +22,53 @@ from excel_runner.core import ErrorDetail, ValidationError
 from excel_runner.runner import RunResult, StepResult
 
 
-def test_cli_script_can_run_directly() -> None:
-    cli_path = Path(__file__).parents[2] / "excel_runner" / "cli.py"
+def test_cli_launcher_can_run_from_a_deployment_folder(tmp_path: Path) -> None:
+    deployment_path = tmp_path / "deployment"
+    package_source = Path(__file__).parents[2] / "excel_runner"
+    shutil.copytree(package_source, deployment_path / "excel_runner")
+    launcher_source = Path(__file__).parents[2] / "run_excel_runner.py"
+    launcher_path = deployment_path / "run_excel_runner.py"
+    shutil.copy(launcher_source, launcher_path)
+    workflow_source = Path(__file__).parents[2] / "unify_smoke_test.yaml"
+    workflow_path = deployment_path / "unify_smoke_test.yaml"
+    shutil.copy(workflow_source, workflow_path)
+    working_path = tmp_path / "working"
+    working_path.mkdir()
+    copied_launcher_path = working_path / "run_excel_runner.py"
+    shutil.copy(launcher_path, copied_launcher_path)
 
     result = subprocess.run(
-        [sys.executable, str(cli_path), "--help"],
+        [
+            sys.executable,
+            str(copied_launcher_path),
+            "--runner-home",
+            str(deployment_path),
+            str(workflow_path),
+        ],
         check=False,
         capture_output=True,
         text=True,
+        cwd=working_path,
     )
 
     assert result.returncode == 0, result.stderr
+    workbook = openpyxl.load_workbook(working_path / "hello_world.xlsx", data_only=False)
+    assert workbook["Sheet"]["A1"].value == "Hello World"
+
+    import_result = subprocess.run(
+        [
+            sys.executable,
+            "-c",
+            "import excel_runner.cli as cli; print(cli.run_workflow.__module__)",
+        ],
+        check=False,
+        capture_output=True,
+        text=True,
+        cwd=working_path,
+    )
+
+    assert import_result.returncode == 0, import_result.stderr
+    assert import_result.stdout.strip() == "excel_runner.runner"
 
 
 def _success_result() -> RunResult:

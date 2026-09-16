@@ -1101,9 +1101,7 @@ workbooks:
 **10. Creating a new workbook** — no dedicated action. The `workbooks:` registry already
 requires declaring a workbook upfront (see the header example above); `create_if_missing: true`
 plus implicit lazy-open (§6.3) creates it the moment it's first referenced. Template selection
-is a registry-entry field. A declared `template:` is the source for every run, including when
-the destination file already exists; `create_if_missing` only creates a blank workbook when no
-template is declared:
+is a registry-entry field:
 ```yaml
 workbooks:
   results:

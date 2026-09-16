@@ -25,15 +25,16 @@ from typing import Any, Literal, ParamSpec, Protocol, TypeVar
 
 import openpyxl
 import xlwings as xw
-from core import ActionExecutionError, ErrorDetail, ExcelRunnerError
 from openpyxl.cell.cell import Cell
 from openpyxl.cell.read_only import ReadOnlyCell
 from openpyxl.utils import column_index_from_string, get_column_letter
 from openpyxl.workbook.workbook import Workbook
 
+from .core import ActionExecutionError, ErrorDetail, ExcelRunnerError
+
 logger = logging.getLogger("excel_runner.backends")
 
-_SingleCell = (Cell, ReadOnlyCell)
+_SINGLE_CELL_TYPES = (Cell, ReadOnlyCell)
 _WHOLE_COLUMN_RE = re.compile(r"^([A-Za-z]+):([A-Za-z]+)$")
 _WHOLE_ROW_RE = re.compile(r"^(\d+):(\d+)$")
 
@@ -268,6 +269,8 @@ def resolve_range(workbook: Workbook, sheet: str | None, range: str) -> tuple[st
     """
     defined_name = workbook.defined_names.get(range)
     if defined_name is None:
+        if sheet is None:
+            raise ValueError("A worksheet name is required for an A1 range.")
         return sheet, range
     destinations = list(defined_name.destinations)
     if len(destinations) != 1:
@@ -298,7 +301,7 @@ def read_range(workbook: Workbook, sheet: str, range: str) -> Any:
     """
     resolved_sheet, resolved_range = resolve_range(workbook, sheet, range)
     selection = workbook[resolved_sheet][resolved_range]
-    if isinstance(selection, _SingleCell):
+    if isinstance(selection, _SINGLE_CELL_TYPES):
         return selection.value
     return [[cell.value for cell in row] for row in selection]
 
@@ -456,7 +459,7 @@ def insert_range(
     workbook: Workbook,
     sheet: str,
     at: str,
-    direction: Literal["rows", "columns"] | None = None,
+    direction: Literal["rows", "columns"] | None = None,  # pylint: disable=unused-argument
     header: dict[str, Any] | None = None,
 ) -> None:
     """Insert a whole row or whole column, shifting existing content.
@@ -519,7 +522,7 @@ def copy_range(
         selection = source_worksheet[source_range]
         values = (
             [[selection.value]]
-            if isinstance(selection, _SingleCell)
+            if isinstance(selection, _SINGLE_CELL_TYPES)
             else [[cell.value for cell in row] for row in selection]
         )
     write_range(target_workbook, target_sheet, target_range, values)
@@ -618,7 +621,7 @@ def find_headers_row(
     """
     resolved_sheet, resolved_range = resolve_range(workbook, sheet, search_range)
     selection = workbook[resolved_sheet][resolved_range]
-    rows = [(selection,)] if isinstance(selection, _SingleCell) else selection
+    rows = [(selection,)] if isinstance(selection, _SINGLE_CELL_TYPES) else selection
     anchor = rows[0][0]
     values = [[cell.value for cell in row] for row in rows]
     return _match_headers_row(values, anchor.row, anchor.column, patterns)
@@ -866,6 +869,8 @@ def xlw_resolve_range(book: xw.Book, sheet: str | None, range: str) -> tuple[str
             )
         target = defined_name.refers_to_range
         return target.sheet.name, target.address.replace("$", "")
+    if sheet is None:
+        raise ValueError("A worksheet name is required for an A1 range.")
     return sheet, range
 
 
@@ -1515,13 +1520,13 @@ class BackendPrimitives:
     there (`workbook: Workbook` vs `book: xw.Book`).
     """
 
-    resolve_range: Callable[[Any, str, str], tuple[str, str]]
+    resolve_range: Callable[[Any, str | None, str], tuple[str, str]]
     resolve_sheet_names: Callable[[Any, str | list[str] | dict[str, str]], list[str]]
     read_range: Callable[[Any, str, str], Any]
     read_cells: Callable[[Any, str, list[str]], dict[str, Any]]
     read_properties: Callable[[Any], dict[str, Any]]
-    write_cell: Callable[[Any, str, str, Any], None]
-    write_range: Callable[[Any, str, str, list[list[Any]]], None]
+    write_cell: Callable[[Any, str | None, str, Any], None]
+    write_range: Callable[[Any, str | None, str, list[list[Any]]], None]
     set_column_width: Callable[[Any, str, str, float | Literal["autofit"]], None]
     create_sheet: _CreateSheet
     rename_sheet: Callable[[Any, str, str], None]
@@ -1668,7 +1673,7 @@ class OwnedInstanceRegistry:
                     xw.apps[pid].quit()
                 except KeyError:
                     app.quit()
-            except Exception as exc:  # noqa: BLE001 - intentional, see docstring
+            except Exception as exc:  # noqa: BLE001 # pylint: disable=broad-exception-caught
                 errors.append(exc)
         self._owned.clear()
         if errors:

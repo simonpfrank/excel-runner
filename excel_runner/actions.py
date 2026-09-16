@@ -15,12 +15,15 @@ import csv
 import json
 import logging
 import re
+from builtins import range as builtins_range
 from datetime import datetime
 from pathlib import Path
 from typing import Any, Literal
 
-import backends
-from core import (
+from openpyxl.utils import column_index_from_string, coordinate_to_tuple, get_column_letter
+
+from . import backends
+from .core import (
     ActionExecutionError,
     ActionResult,
     ErrorDetail,
@@ -29,20 +32,19 @@ from core import (
     control_action,
     file_action,
 )
-from openpyxl.utils import column_index_from_string, coordinate_to_tuple, get_column_letter
 
 logger = logging.getLogger("excel_runner.actions")
 
 
 @control_action
-def parse_date(value: str, format: str) -> ActionResult:
+def parse_date(value: str, date_format: str) -> ActionResult:
     """Parse a string into a native date using an explicit format."""
     try:
-        parsed_value = datetime.strptime(value, format).date()
+        parsed_value = datetime.strptime(value, date_format).date()
     except (TypeError, ValueError) as exc:
         raise ActionExecutionError(
             ErrorDetail(
-                f"parse_date: could not parse {value!r} with format {format!r}.",
+                f"parse_date: could not parse {value!r} with format {date_format!r}.",
                 f"{type(exc).__name__}: {exc}",
             )
         ) from exc
@@ -210,7 +212,9 @@ def _table_targets(
 
 
 @file_action
-def open(session: WorkbookSession) -> ActionResult:
+def open(  # pylint: disable=redefined-builtin,unused-argument
+    session: WorkbookSession,
+) -> ActionResult:
     """Confirm a workbook is open.
 
     The runner resolves and opens `session` before dispatching to any action (Spec sec 6.1) —
@@ -422,7 +426,7 @@ def dump(
                 )
             )
         Path(path).parent.mkdir(parents=True, exist_ok=True)
-        Path(path).write_text(payload)
+        Path(path).write_text(payload, encoding="utf-8")
     else:
         print(f"--- dump ({len(selected)} step(s)) ---\n{payload}")
     return ActionResult(status="success", output={})
@@ -799,8 +803,8 @@ def replace_in_range(
                     session, resolved_sheet, row, column, value
                 ),
             )
-            for row in range(selected.row, selected.row + selected.rows.count)
-            for column in range(selected.column, selected.column + selected.columns.count)
+            for row in builtins_range(selected.row, selected.row + selected.rows.count)
+            for column in builtins_range(selected.column, selected.column + selected.columns.count)
         ]
     changed = _replace_cells(cells, pattern, replacement)
     session.dirty = session.dirty or bool(changed)

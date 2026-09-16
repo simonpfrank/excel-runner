@@ -63,6 +63,8 @@ select = ["E", "F", "I", "UP", "B"]
 [tool.ruff.lint.per-file-ignores]
 # Bare attribute-access expressions are the standard vulture whitelist idiom, not real code.
 "vulture_whitelist.py" = ["B018", "I001"]
+# The launcher must configure sys.path before importing the extracted package.
+"run_excel_runner.py" = ["E402", "I001"]
 
 [tool.mypy]
 strict = true
@@ -85,6 +87,10 @@ disable = [
     "too-few-public-methods",
     "too-many-lines",
 ]
+
+[tool.pylint.variables]
+# These names are deliberate public YAML vocabulary. See README.md, "YAML field names".
+allowed-redefined-builtins = ["open", "range"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

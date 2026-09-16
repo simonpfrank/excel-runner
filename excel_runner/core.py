@@ -316,7 +316,7 @@ def load(
     Returns:
         The parsed Workflow, with workbook paths resolved and step params left raw.
     """
-    raw_text = Path(path).read_text()
+    raw_text = Path(path).read_text(encoding="utf-8")
     raw = yaml.load(raw_text, Loader=_Yaml12BoolLoader) or {}
 
     env: dict[str, Any] = {**(raw.get("env") or {}), **(env_overrides or {})}

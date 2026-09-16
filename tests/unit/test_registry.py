@@ -89,6 +89,12 @@ class TestParamSchema:
         schema = registry["read_range"].param_schema
         assert set(schema["properties"]) == {"sheet", "range", "formula"}
 
+    def test_parse_date_uses_date_format_in_its_schema(self) -> None:
+        registry = discover_actions(actions)
+        schema = registry["parse_date"].param_schema
+        assert set(schema["properties"]) == {"value", "date_format"}
+        assert set(schema["required"]) == {"value", "date_format"}
+
     def test_required_parameters_have_no_default(self) -> None:
         registry = discover_actions(actions)
         schema = registry["read_range"].param_schema

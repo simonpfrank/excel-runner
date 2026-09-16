@@ -1,0 +1,16 @@
+workbooks:
+  output:
+    file: "./hello_world.xlsx"
+    create_if_missing: true
+
+steps:
+  - id: write_hello_world
+    action: write_cell
+    workbook: output
+    sheet: "Sheet"
+    cell: "A1"
+    value: "Hello World"
+
+  - id: save_hello_world
+    action: save
+    workbook: output

@@ -7,9 +7,10 @@
 
 **Release documentation:** The README, PRD, specification, and YAML authoring skill have been
 reconciled for the implemented template lifecycle, `copy` COM semantics, `parse_date`, formula
-reads, text/table actions, and preflight behavior. The remaining Unify deployment model is
-explicitly TBC because its operational contract has not been agreed. Test-summary totals and
-release quality status remain pending a completed, supported full-suite run.
+reads, text/table actions, and preflight behavior. The agreed deployment model copies the
+`excel_runner/` package directory beside the workflow and runs `python -m excel_runner`; it needs
+no wheel or editable installation. Test-summary totals and release quality status remain pending
+a completed, supported full-suite run.
 
 | Action / component | Built | Tested | Notes |
 |---|---|---|---|
