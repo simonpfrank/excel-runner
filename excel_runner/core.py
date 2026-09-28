@@ -9,6 +9,7 @@ module docstring correction recorded in docs/PRD.md sec 10.1 and docs/Specificat
 """
 
 import re
+import warnings
 from collections.abc import Callable
 from dataclasses import dataclass, field
 from enum import Enum
@@ -17,6 +18,16 @@ from typing import Any, Literal, ParamSpec, overload
 
 import jinja2
 import yaml
+
+# openpyxl warns on every read of a workbook with unsupported data-validation extensions
+# (harmless — the workflow never round-trips that extension). Narrowly scoped so other
+# openpyxl/jinja2/etc. warnings still surface normally.
+warnings.filterwarnings(
+    "ignore",
+    message=r"Data Validation extension is not supported and will be removed",
+    category=UserWarning,
+    module=r"openpyxl\.worksheet\._reader",
+)
 
 
 @dataclass(frozen=True)

@@ -55,34 +55,51 @@ commands and inspect the output before a production run.
 
 1. Run `build_unify_zip.bat` from this repository.
 2. Upload `dist\excel-runner-unify.zip` to a Unify dataset.
+3. Upload the workflow YAML you want to run (for example `unify_smoke_test.yaml`) to its own
+  Unify dataset.
 
 #### Workflow activities
 
-1. Create workflow string variables for the extracted runner folder, for example
-  `str_excel_runner_folder`, and the launcher script, for example
-  `str_excel_runner_script`.
-2. Add a **Download Dataset** activity for the uploaded dataset. Store its result working
-  directory in `str_excel_runner_folder`.
-3. Add an **Unzip** activity. Use the Download Dataset `FileOutput` as the archive and
-  `str_excel_runner_folder` as its destination.
-4. Add an **Assign** activity to set the launcher script variable:
+1. Add a **Download Dataset** activity for the `excel-runner-unify.zip` dataset. Capture its
+  result folder in a variable, for example `str_excel_runner_folder`.
+2. Add a second **Download Dataset** activity for the workflow YAML's dataset. Capture its
+  `FileOutput` in a variable, for example `str_workflow_file`.
+3. Add an **Unzip** activity. Use the first Download Dataset activity's `FileOutput` (the zip)
+  as the archive and `str_excel_runner_folder` as the destination.
+4. Add an **Assign** activity to combine the extracted folder and the launcher script into a
+  variable, for example `str_excel_runner_script`:
 
   ```text
   Path.Combine({WorkflowVariable | "str_excel_runner_folder"}, "run_excel_runner.py")
   ```
 
 5. Add an **Execute Python** activity. Select **Other source** and use
-  `str_excel_runner_script` as the script location.
-6. For the included smoke test, pass these arguments to Execute Python:
+  `str_excel_runner_script` as the script location, with these arguments:
 
-  ```text
-  "{WorkflowVariable | "str_excel_runner_folder"}\unify_smoke_test.yaml"
-  --runner-home "{WorkflowVariable | "str_excel_runner_folder"}"
-  ```
+  5.1. The first argument is the workflow YAML's path — `{WorkflowVariable | "str_workflow_file"}`.
 
-  Unify may copy the launcher into Python's own working directory before starting it.
-  `--runner-home` tells the launcher where the extracted `excel_runner/` package is located.
-  It is a launcher-only option and just for Unify and is removed before Excel Runner parses the workflow command.
+  5.2. **Important:** always pass `--runner-home "{WorkflowVariable | "str_excel_runner_folder"}"`.
+    Unify runs the Execute Python activity from its own working directory, not the extracted
+    folder, so `run_excel_runner.py` needs `--runner-home` to find the `excel_runner/` package
+    it just unzipped. It's a launcher-only option, stripped before Excel Runner itself parses
+    the command line.
+
+  5.3. Pass any workflow `env:` values as repeated `--env NAME={WorkflowVariable | "..."}`
+    arguments — one flag per value.
+
+  5.4. On the first run, add `--dry-run` to confirm every referenced file resolves before
+    anything is changed. For subsequent full runs, prefer `--check-existence` instead, so a
+    missing/renamed file fails fast rather than after part of the workflow has already run.
+
+  5.5. To capture a workbook the workflow writes as an Execute Python **FileOutput**, give that
+    workbook a relative path (`./`) in the YAML — see [Paths in Unify](#paths-in-unify)
+    below — since Unify looks for outputs in the activity's own working directory.
+
+  Everything the run produces lands under the Execute Python activity's own working
+  directory, not `--runner-home`: any workbook given a relative (`./...`) path in the YAML is
+  written there directly, and `excel_runner_runs/<workflow-yaml-stem>/` under that same
+  directory holds `run.log`, `audit.jsonl`, and `steps_dump.json` for that run (pass
+  `--working-dir` to relocate that folder instead).
 
 The smoke workflow creates `hello_world.xlsx` and writes `Hello World` to `Sheet!A1`. Add that
 file as the Output of the Execute Python activity to inspect the created workbook.
@@ -874,7 +891,7 @@ clear. `parse_date` uses `date_format:`, not `format:`.
 
 ### Documentation to keep up to date
 
-`docs/Progress_Tracker.md` tracks build status per component. 
+`docs/Progress_Tracker.md` tracks build status per component.
 `docs/Specification.md` §0
 explains the sourcing policy for a prior, superseded tool this project doesn't reuse code or
 structure from.
